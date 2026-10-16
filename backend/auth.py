@@ -1,12 +1,13 @@
-import os
 import time
 import uuid
 from typing import Optional
 
-# 内存用户表（demo 阶段不引数据库）
-# 密码用简单 hash 存，避免明文；demo 阶段不做加盐/加密
 import hashlib
 
+from backend import store
+
+# 用户表（demo 阶段写死；后续可迁移到持久化）
+# 密码用简单 hash 存，避免明文；demo 阶段不做加盐/加密
 _USERS = [
     {
         "id": "u-admin",
@@ -23,9 +24,6 @@ _USERS = [
         "role": "customer",
     },
 ]
-
-# token -> user_id，内存会话
-_SESSIONS: dict[str, dict] = {}
 
 _TOKEN_TTL = 60 * 60 * 24  # 24 小时
 
@@ -50,22 +48,26 @@ def authenticate(username: str, password: str) -> Optional[dict]:
 
 def create_session(user: dict) -> str:
     token = uuid.uuid4().hex
-    _SESSIONS[token] = {
+    data = store.read()
+    data["sessions"][token] = {
         "user_id": user["id"],
         "username": user["username"],
         "name": user["name"],
         "role": user["role"],
         "expires_at": time.time() + _TOKEN_TTL,
     }
+    store.write(data)
     return token
 
 
 def get_session(token: str) -> Optional[dict]:
-    s = _SESSIONS.get(token)
+    data = store.read()
+    s = data["sessions"].get(token)
     if not s:
         return None
     if s["expires_at"] < time.time():
-        _SESSIONS.pop(token, None)
+        data["sessions"].pop(token, None)
+        store.write(data)
         return None
     return s
 

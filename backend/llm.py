@@ -19,13 +19,15 @@ SYSTEM_PROMPT = (
 )
 
 
-def chat_reply(message: str) -> str:
+def chat_reply(message: str, history: list[dict] | None = None) -> str:
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": message})
+
     resp = _client.chat.completions.create(
         model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": message},
-        ],
+        messages=messages,
         temperature=0.7,
     )
     return resp.choices[0].message.content or ""

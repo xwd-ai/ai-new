@@ -520,7 +520,7 @@
       let reply = '';
       let suggest = false;
       try {
-        const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text }) });
+        const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify({ message: text }) });
         const data = await res.json();
         reply = data.reply;
         suggest = data.suggest_ticket;
@@ -552,6 +552,29 @@
     function newChat() { log.innerHTML = ''; input.focus(); }
     function switchConv(el) { document.querySelectorAll('.conv').forEach(c => c.classList.remove('active')); el.classList.add('active'); }
     function goTickets() { alert('工单管理页（后续实现）'); }
+
+    // ---- 加载历史对话，让用户「记得」之前聊过什么 ----
+    async function loadHistory() {
+      try {
+        const res = await fetch('/api/conversation', { headers: { 'Authorization': 'Bearer ' + token } });
+        const data = await res.json();
+        const messages = data.messages || [];
+        if (!messages.length) return;  // 没有历史，保留默认欢迎语
+
+        // 清掉默认欢迎语，回显真实历史
+        log.innerHTML = '';
+        messages.forEach(m => {
+          if (m.role === 'user') {
+            addUserMsg(m.content);
+          } else if (m.role === 'assistant') {
+            const body = addAiContainer();
+            addBubble(body, m.content);
+          }
+        });
+        scrollBottom();
+      } catch (e) { /* 拉取失败不影响使用 */ }
+    }
+    loadHistory();
   </script>
 </body>
 </html>

@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>工单管理 · AI 客服与工单助手</title>
+  <style>
+    :root {
+      --bg: #f3f5f9;
+      --surface: #ffffff;
+      --surface-2: #f7f9fc;
+      --text: #1a1d27;
+      --muted: #8a919f;
+      --muted-2: #b4bac6;
+      --primary: #4f6ef7;
+      --primary-soft: #eef1fe;
+      --primary-grad: linear-gradient(135deg, #4f6ef7 0%, #7a5cf0 100%);
+      --border: #e9edf3;
+      --ok: #2ec27e;
+      --ok-soft: #e8f8f0;
+      --warn: #f5a623;
+      --warn-soft: #fdf3e2;
+      --danger: #f0525c;
+      --danger-soft: #fdecee;
+      --radius: 14px;
+      --shadow: 0 1px 2px rgba(20,30,60,.04), 0 8px 24px rgba(20,30,60,.06);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: var(--bg); color: var(--text); height: 100vh; overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+    .layout { display: grid; grid-template-columns: 240px 1fr; height: 100vh; }
+
+    /* 侧边栏 */
+    .sidebar {
+      background: var(--surface); border-right: 1px solid var(--border);
+      display: flex; flex-direction: column; padding: 18px 14px; gap: 16px;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; padding: 0 4px; }
+    .brand .logo {
+      width: 34px; height: 34px; border-radius: 10px; background: var(--primary-grad);
+      display: flex; align-items: center; justify-content: center; color: #fff; font-size: 17px; font-weight: 700;
+      box-shadow: 0 4px 10px rgba(79,110,247,.35);
+    }
+    .brand .name { font-size: 15px; font-weight: 700; }
+    .brand .ver { font-size: 11px; color: var(--muted); margin-top: 1px; }
+    .nav { display: flex; flex-direction: column; gap: 6px; }
+    .nav .title { font-size: 11px; color: var(--muted-2); text-transform: uppercase; letter-spacing: .8px; padding: 4px 6px; }
+    .nav-item {
+      display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px;
+      cursor: pointer; font-size: 13.5px; font-weight: 600; color: var(--text); transition: background .15s;
+    }
+    .nav-item:hover { background: var(--surface-2); }
+    .nav-item.active { background: var(--primary-soft); color: var(--primary); }
+    .nav-item .count {
+      margin-left: auto; font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 10px;
+      background: var(--danger); color: #fff;
+    }
+    .sidebar-user {
+      display: flex; align-items: center; gap: 10px; padding: 10px 8px;
+      border-top: 1px solid var(--border); margin-top: auto;
+    }
+    .sidebar-user .avatar {
+      width: 34px; height: 34px; border-radius: 50%; background: var(--primary-grad); color: #fff;
+      display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 600; flex-shrink: 0;
+    }
+    .sidebar-user .meta { flex: 1; min-width: 0; }
+    .sidebar-user .meta .who { font-size: 13px; font-weight: 600; }
+    .sidebar-user .meta .preview { font-size: 12px; color: var(--muted); }
+    .sidebar-user .logout {
+      width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--border);
+      background: transparent; color: var(--muted); cursor: pointer; font-size: 14px; transition: all .15s;
+    }
+    .sidebar-user .logout:hover { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
+
+    /* 主区 */
+    .main { display: flex; flex-direction: column; min-width: 0; }
+    .topbar {
+      display: flex; align-items: center; gap: 12px; padding: 16px 24px;
+      background: var(--surface); border-bottom: 1px solid var(--border);
+    }
+    .topbar h1 { font-size: 18px; font-weight: 700; }
+    .topbar .sub { font-size: 13px; color: var(--muted); }
+    .topbar .spacer { flex: 1; }
+    .refresh {
+      border: 1px solid var(--border); background: var(--surface); color: var(--text);
+      padding: 8px 16px; border-radius: 10px; font-size: 13px; cursor: pointer; transition: all .15s;
+    }
+    .refresh:hover { border-color: var(--primary); color: var(--primary); }
+
+    .content { flex: 1; overflow: hidden; display: grid; grid-template-columns: 360px 1fr; gap: 0; }
+
+    /* 工单列表 */
+    .ticket-list { border-right: 1px solid var(--border); overflow-y: auto; background: var(--surface); }
+    .ticket-item {
+      padding: 16px 18px; border-bottom: 1px solid var(--border); cursor: pointer; transition: background .15s;
+    }
+    .ticket-item:hover { background: var(--surface-2); }
+    .ticket-item.active { background: var(--primary-soft); }
+    .ticket-item .ti-top { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+    .ticket-item .ti-id { font-size: 12px; color: var(--primary); font-weight: 700; }
+    .ticket-item .ti-user { font-size: 12px; color: var(--muted); }
+    .ticket-item .spacer { flex: 1; }
+    .ticket-item .ti-desc { font-size: 14px; font-weight: 600; margin-bottom: 8px; line-height: 1.5; }
+    .ticket-item .ti-meta { font-size: 12px; color: var(--muted-2); }
+    .status {
+      font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 20px; flex-shrink: 0;
+    }
+    .status.open { background: var(--warn-soft); color: var(--warn); }
+    .status.in_progress { background: var(--primary-soft); color: var(--primary); }
+    .status.resolved { background: var(--ok-soft); color: var(--ok); }
+
+    /* 工单详情 */
+    .detail { overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 18px; }
+    .detail-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--muted-2); font-size: 14px; }
+    .detail .d-head { display: flex; align-items: center; gap: 10px; }
+    .detail .d-id { font-size: 16px; font-weight: 700; color: var(--primary); }
+    .detail .d-head .spacer { flex: 1; }
+    .detail .d-title { font-size: 18px; font-weight: 700; line-height: 1.4; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; box-shadow: var(--shadow); }
+    .card .c-title { font-size: 13px; font-weight: 700; color: var(--muted); margin-bottom: 10px; }
+    .card .c-body { font-size: 14px; line-height: 1.6; color: var(--text); white-space: pre-wrap; }
+    .card .c-row { display: flex; gap: 10px; font-size: 13.5px; padding: 4px 0; }
+    .card .c-row .k { color: var(--muted); flex-shrink: 0; width: 72px; }
+    .card .c-row .v { flex: 1; }
+
+    /* 回复区 */
+    .reply-area { display: flex; flex-direction: column; gap: 10px; }
+    .reply-area textarea {
+      width: 100%; min-height: 90px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px;
+      font-size: 14px; font-family: inherit; line-height: 1.6; resize: vertical; outline: none; transition: border-color .15s, box-shadow .15s;
+    }
+    .reply-area textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(79,110,247,.12); }
+    .reply-actions { display: flex; gap: 10px; }
+    .btn {
+      padding: 10px 20px; border-radius: 10px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all .15s;
+    }
+    .btn-primary { background: var(--primary-grad); color: #fff; border: none; box-shadow: 0 4px 12px rgba(79,110,247,.30); }
+    .btn-primary:hover { transform: translateY(-1px); }
+    .btn-primary:disabled { opacity: .6; cursor: not-allowed; transform: none; }
+    .btn-ghost { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+    .btn-ghost:hover { border-color: var(--ok); color: var(--ok); }
+
+    /* 回复记录 */
+    .replies { display: flex; flex-direction: column; gap: 12px; }
+    .reply {
+      display: flex; gap: 10px; padding: 12px 14px; background: var(--surface-2);
+      border: 1px solid var(--border); border-radius: 12px;
+    }
+    .reply .r-avatar {
+      width: 30px; height: 30px; border-radius: 50%; flex-shrink: 0; color: #fff;
+      display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600;
+    }
+    .reply .r-avatar.support { background: var(--primary-grad); }
+    .reply .r-body { flex: 1; min-width: 0; }
+    .reply .r-head { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+    .reply .r-content { font-size: 14px; line-height: 1.6; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="logo">AI</div>
+        <div>
+          <div class="name">工单后台</div>
+          <div class="ver">管理员端 · Demo</div>
+        </div>
+      </div>
+      <div class="nav">
+        <div class="title">工单</div>
+        <div class="nav-item active">全部工单 <span class="count" id="openCount">0</span></div>
+      </div>
+      <div class="sidebar-user">
+        <div class="avatar" id="meAvatar">管</div>
+        <div class="meta">
+          <div class="who" id="meName">管理员</div>
+          <div class="preview">工单后台</div>
+        </div>
+        <button class="logout" id="logoutBtn" title="退出登录">⏻</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="topbar">
+        <h1>工单管理</h1>
+        <span class="sub">处理客户提交的售后工单</span>
+        <div class="spacer"></div>
+        <button class="refresh" id="refreshBtn">刷新</button>
+      </div>
+
+      <div class="content">
+        <div class="ticket-list" id="ticketList"></div>
+        <div class="detail" id="detailPane">
+          <div class="detail-empty">选择左侧工单查看详情</div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const token = localStorage.getItem('token');
+    const me = JSON.parse(localStorage.getItem('user') || 'null');
+    if (!token || !me) {
+      window.location.href = '/login';
+    } else if (me.role !== 'admin') {
+      // 普通用户不能进工单后台，回到对话页
+      window.location.href = '/';
+    }
+
+    document.getElementById('meName').textContent = me.name;
+    document.getElementById('meAvatar').textContent = me.name.charAt(0);
+    document.getElementById('logoutBtn').addEventListener('click', () => {
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      window.location.href = '/login';
+    });
+
+    const STATUS_TEXT = { open: '待处理', in_progress: '处理中', resolved: '已解决' };
+    let tickets = [];
+    let currentId = null;
+
+    async function loadTickets() {
+      const res = await fetch('/api/tickets', { headers: { 'Authorization': 'Bearer ' + token } });
+      const data = await res.json();
+      tickets = data.tickets || [];
+      renderList();
+      // 更新待处理计数
+      const open = tickets.filter(t => t.status === 'open').length;
+      document.getElementById('openCount').textContent = open;
+      // 默认选中第一张
+      if (!currentId && tickets.length) {
+        selectTicket(tickets[0].id);
+      }
+    }
+
+    function renderList() {
+      const list = document.getElementById('ticketList');
+      list.innerHTML = '';
+      if (!tickets.length) {
+        list.innerHTML = '<div style="padding:40px;text-align:center;color:var(--muted-2);">暂无工单</div>';
+        return;
+      }
+      tickets.forEach(t => {
+        const item = document.createElement('div');
+        item.className = 'ticket-item' + (t.id === currentId ? ' active' : '');
+        item.innerHTML = `
+          <div class="ti-top">
+            <span class="ti-id">#${t.id}</span>
+            <span class="ti-user">${escapeHtml(t.user_name)}</span>
+            <span class="spacer"></span>
+            <span class="status ${t.status}">${STATUS_TEXT[t.status] || t.status}</span>
+          </div>
+          <div class="ti-desc">${escapeHtml(t.description)}</div>
+          <div class="ti-meta">${formatTime(t.created_at)}</div>`;
+        item.addEventListener('click', () => selectTicket(t.id));
+        list.appendChild(item);
+      });
+    }
+
+    function selectTicket(id) {
+      currentId = id;
+      renderList();
+      const t = tickets.find(x => x.id === id);
+      renderDetail(t);
+    }
+
+    function renderDetail(t) {
+      const pane = document.getElementById('detailPane');
+      if (!t) {
+        pane.innerHTML = '<div class="detail-empty">选择左侧工单查看详情</div>';
+        return;
+      }
+      const replies = (t.replies || []).map(r => `
+        <div class="reply">
+          <div class="r-avatar support">${escapeHtml(r.replier.charAt(0))}</div>
+          <div class="r-body">
+            <div class="r-head">${escapeHtml(r.replier)} · ${formatTime(r.at)}</div>
+            <div class="r-content">${escapeHtml(r.content)}</div>
+          </div>
+        </div>`).join('');
+
+      pane.innerHTML = `
+        <div class="d-head">
+          <span class="d-id">#${t.id}</span>
+          <span class="spacer"></span>
+          <span class="status ${t.status}">${STATUS_TEXT[t.status] || t.status}</span>
+        </div>
+        <div class="d-title">${escapeHtml(t.description)}</div>
+        <div class="card">
+          <div class="c-title">工单信息</div>
+          <div class="c-row"><span class="k">客户</span><span class="v">${escapeHtml(t.user_name)}</span></div>
+          <div class="c-row"><span class="k">已尝试</span><span class="v">${escapeHtml(t.tried_steps || '—')}</span></div>
+          <div class="c-row"><span class="k">依据</span><span class="v">${escapeHtml(t.evidence || '—')}</span></div>
+          <div class="c-row"><span class="k">创建时间</span><span class="v">${formatTime(t.created_at)}</span></div>
+        </div>
+        <div class="card">
+          <div class="c-title">人工回复</div>
+          <div class="replies">${replies || '<div style="color:var(--muted-2);font-size:13px;">暂无回复</div>'}</div>
+        </div>
+        <div class="card reply-area">
+          <div class="c-title">回复客户</div>
+          <textarea id="replyInput" placeholder="输入回复内容…"></textarea>
+          <div class="reply-actions">
+            <button class="btn btn-primary" id="sendReplyBtn">发送回复</button>
+            <button class="btn btn-ghost" id="resolveBtn">标记已解决</button>
+          </div>
+        </div>`;
+
+      document.getElementById('sendReplyBtn').addEventListener('click', () => sendReply(t.id));
+      document.getElementById('resolveBtn').addEventListener('click', () => markResolved(t.id));
+    }
+
+    async function sendReply(id) {
+      const content = document.getElementById('replyInput').value.trim();
+      if (!content) return;
+      const res = await fetch('/api/tickets/reply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+        body: JSON.stringify({ ticket_id: id, content }),
+      });
+      await res.json();
+      await loadTickets();
+      selectTicket(id);
+    }
+
+    async function markResolved(id) {
+      const res = await fetch('/api/tickets/status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+        body: JSON.stringify({ ticket_id: id, status: 'resolved' }),
+      });
+      await res.json();
+      await loadTickets();
+      selectTicket(id);
+    }
+
+    function formatTime(ts) {
+      const d = new Date(ts * 1000);
+      const pad = n => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+
+    function escapeHtml(s) {
+      return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    document.getElementById('refreshBtn').addEventListener('click', loadTickets);
+    loadTickets();
+  </script>
+</body>
+</html>

@@ -110,7 +110,8 @@
         if (data.token) {
           localStorage.setItem('token', data.token);
           localStorage.setItem('user', JSON.stringify(data.user));
-          window.location.href = '/';
+          // 按角色分流：管理员进工单后台，普通用户进对话工作台
+          window.location.href = data.user.role === 'admin' ? '/admin' : '/';
         } else {
           errorEl.textContent = '账号或密码错误';
         }
