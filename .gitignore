@@ -9,6 +9,11 @@ __pycache__/
 .venv/
 venv/
 
+# 密钥与本地配置
+.env
+.env.*
+!.env.example
+
 # 前端构建产物
 node_modules/
 dist/

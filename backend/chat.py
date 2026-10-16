@@ -1,6 +1,8 @@
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from backend import llm
+
 chat_router = APIRouter()
 
 
@@ -14,4 +16,5 @@ class ChatResponse(BaseModel):
 
 @chat_router.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest) -> ChatResponse:
-    return ChatResponse(reply=f"收到你的问题：{req.message}")
+    reply = llm.chat_reply(req.message)
+    return ChatResponse(reply=reply)
