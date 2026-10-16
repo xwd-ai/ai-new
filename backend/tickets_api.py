@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Header
 from pydantic import BaseModel
 
-from backend import auth, tickets
+from backend import auth, orders, store, tickets
 
 tickets_router = APIRouter()
 
@@ -30,11 +30,18 @@ def create_ticket(req: CreateTicketRequest, authorization: str = Header(default=
     user = _current_user(authorization)
     if not user:
         return {"error": "未登录"}
+
+    # 若前端未显式传已尝试步骤，则从会话已记录的步骤自动沉淀
+    tried_steps = req.tried_steps
+    if not tried_steps:
+        data = store.read()
+        tried_steps = " · ".join(data.get("tried_steps", {}).get(user["id"], [])) or ""
+
     ticket = tickets.create_ticket(
         user_id=user["id"],
         user_name=user["name"],
         description=req.description,
-        tried_steps=req.tried_steps,
+        tried_steps=tried_steps,
         evidence=req.evidence,
     )
     return {"ticket": ticket}
@@ -51,6 +58,15 @@ def list_tickets(authorization: str = Header(default="")):
     else:
         items = [t for t in tickets.list_tickets() if t["user_id"] == user["id"]]
     return {"tickets": items}
+
+
+@tickets_router.get("/order")
+def my_order(authorization: str = Header(default="")):
+    """查询当前用户订单与服务范围，供前端展示。"""
+    user = _current_user(authorization)
+    if not user:
+        return {"order": None}
+    return {"order": orders.query_order(user["id"])}
 
 
 @tickets_router.post("/tickets/reply")

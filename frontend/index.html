@@ -261,6 +261,16 @@
     .ct-btn:disabled { opacity: .6; cursor: not-allowed; transform: none; }
     .ct-dismiss { font-size: 13px; color: var(--muted); }
 
+    /* 引用来源 */
+    .sources { display: flex; flex-direction: column; gap: 6px; }
+    .sources .src-label { font-size: 11px; color: var(--muted-2); letter-spacing: .5px; }
+    .sources .src-list { display: flex; flex-wrap: wrap; gap: 6px; }
+    .src-chip {
+      display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px;
+      border-radius: 6px; background: var(--surface-2); border: 1px solid var(--border);
+      font-size: 12px; color: var(--primary); cursor: default;
+    }
+
     @media (max-width: 1080px) {
       .layout { grid-template-columns: 220px 1fr; }
       .aside { display: none; }
@@ -366,11 +376,11 @@
     <!-- 右侧上下文面板 -->
     <aside class="aside">
       <div class="a-title">客户信息</div>
-      <div class="info-card">
-        <div class="i-row"><span class="ik">姓名</span><span class="iv">李女士</span></div>
-        <div class="i-row"><span class="ik">产品</span><span class="iv"><span class="pill pro">专业版</span></span></div>
-        <div class="i-row"><span class="ik">订单状态</span><span class="iv"><span class="pill ok">服务期内</span></span></div>
-        <div class="i-row"><span class="ik">到期时间</span><span class="iv">2027-03-15</span></div>
+      <div class="info-card" id="orderCard">
+        <div class="i-row"><span class="ik">姓名</span><span class="iv" id="custName">—</span></div>
+        <div class="i-row"><span class="ik">产品</span><span class="iv"><span class="pill pro" id="custProduct">—</span></span></div>
+        <div class="i-row"><span class="ik">订单状态</span><span class="iv"><span class="pill ok" id="custStatus">—</span></span></div>
+        <div class="i-row"><span class="ik">到期时间</span><span class="iv" id="custExpire">—</span></div>
       </div>
 
       <div class="a-title">快捷提问</div>
@@ -448,6 +458,7 @@
     }
 
     // 确认建单按钮
+    // 确认建单按钮（带来源依据）
     function addConfirmTicket(body, description) {
       const wrap = document.createElement('div');
       wrap.className = 'confirm-ticket';
@@ -465,13 +476,16 @@
         confirmBtn.disabled = true;
         confirmBtn.textContent = '创建中…';
         try {
+          // 把当前命中的知识来源作为「排查依据」沉淀进工单
+          const evidence = currentSources.length
+            ? currentSources.map(s => s.title).join('；')
+            : 'AI 客服建议';
           const res = await fetch('/api/tickets', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
             body: JSON.stringify({
               description: description,
-              tried_steps: '已完成自助排查',
-              evidence: 'AI 客服建议',
+              evidence: evidence,
             }),
           });
           const data = await res.json();
@@ -495,6 +509,7 @@
         <div class="tc-head"><span>📋 工单已创建</span><span class="spacer"></span><span class="tc-status">${t.status === 'open' ? '待处理' : t.status}</span></div>
         <div class="tc-body">
           <div class="tc-row"><span class="k">问题</span><span class="v">${escapeHtml(t.description)}</span></div>
+          <div class="tc-row"><span class="k">依据</span><span class="v">${escapeHtml(t.evidence || '—')}</span></div>
           <div class="tc-row"><span class="k">工单号</span><span class="v">#${escapeHtml(t.id)}</span></div>
           <div class="tc-row"><span class="k">状态</span><span class="v">已提交，人工客服将尽快处理</span></div>
         </div>`;
@@ -502,9 +517,32 @@
       scrollBottom();
     }
 
+    // 展示 AI 回答引用的知识来源
+    function addSources(body, sources) {
+      if (!sources || !sources.length) return;
+      const wrap = document.createElement('div');
+      wrap.className = 'sources';
+      wrap.innerHTML = '<div class="src-label">参考来源</div>';
+      const list = document.createElement('div');
+      list.className = 'src-list';
+      const kindText = { manual: '手册', faq: 'FAQ', rule: '规则' };
+      sources.forEach(s => {
+        const chip = document.createElement('span');
+        chip.className = 'src-chip';
+        chip.textContent = `${kindText[s.kind] || '资料'} · ${s.title}`;
+        list.appendChild(chip);
+      });
+      wrap.appendChild(list);
+      body.appendChild(wrap);
+      scrollBottom();
+    }
+
     function escapeHtml(s) {
       return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     }
+
+    // 当前对话命中的知识来源（供建单时沉淀为「依据」）
+    let currentSources = [];
 
     async function handleSend() {
       const text = input.value.trim();
@@ -519,18 +557,25 @@
 
       let reply = '';
       let suggest = false;
+      let sources = [];
       try {
         const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify({ message: text }) });
         const data = await res.json();
         reply = data.reply;
         suggest = data.suggest_ticket;
+        sources = data.sources || [];
       } catch (e) {
         reply = '抱歉，我暂时无法连接到服务，请稍后再试。';
       }
 
+      currentSources = sources;
+
       // 用真实回复替换「正在思考」
       typing.textContent = reply;
       typing.style.color = '';
+
+      // 展示引用来源
+      addSources(body, sources);
 
       if (suggest) {
         addConfirmTicket(body, text);
@@ -575,6 +620,22 @@
       } catch (e) { /* 拉取失败不影响使用 */ }
     }
     loadHistory();
+
+    // ---- 加载真实订单信息到右侧面板 ----
+    async function loadOrder() {
+      try {
+        const res = await fetch('/api/order', { headers: { 'Authorization': 'Bearer ' + token } });
+        const data = await res.json();
+        const o = data.order;
+        if (!o || !o.has_order) return;
+        document.getElementById('custName').textContent = me.name;
+        document.getElementById('custProduct').textContent = o.product_name;
+        document.getElementById('custStatus').textContent = o.in_service ? '服务期内' : '服务期外';
+        document.getElementById('custStatus').className = 'pill ' + (o.in_service ? 'ok' : 'warn');
+        document.getElementById('custExpire').textContent = new Date(o.expires_at * 1000).toISOString().slice(0, 10);
+      } catch (e) { /* 拉取失败保持默认 */ }
+    }
+    loadOrder();
   </script>
 </body>
 </html>
