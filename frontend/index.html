@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI 客服与工单助手</title>
+  <style>
+    :root {
+      --bg: #f5f6f8;
+      --card: #ffffff;
+      --text: #1f2329;
+      --muted: #646a73;
+      --primary: #1677ff;
+      --border: #e5e6eb;
+      --ok: #00b42a;
+      --warn: #ff7d00;
+      --danger: #f53f3f;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      padding: 24px;
+    }
+    .app {
+      width: 100%;
+      max-width: 720px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    h1 { font-size: 20px; }
+    .sub { color: var(--muted); font-size: 13px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+    }
+    .chat-log { display: flex; flex-direction: column; gap: 12px; min-height: 320px; max-height: 480px; overflow-y: auto; }
+    .msg { max-width: 85%; padding: 10px 14px; border-radius: 12px; line-height: 1.6; font-size: 14px; white-space: pre-wrap; }
+    .msg.user { align-self: flex-end; background: var(--primary); color: #fff; border-bottom-right-radius: 4px; }
+    .msg.ai { align-self: flex-start; background: #f0f1f3; color: var(--text); border-bottom-left-radius: 4px; }
+    .steps { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 0; }
+    .step {
+      display: flex; align-items: center; gap: 8px;
+      background: #fafbfc; border: 1px solid var(--border);
+      border-radius: 8px; padding: 8px 12px; font-size: 13px;
+    }
+    .step .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+    .step.done .dot { background: var(--ok); }
+    .step .label { flex: 1; }
+    .step .status { color: var(--muted); font-size: 12px; }
+    .step.done .status { color: var(--ok); }
+    .input-row { display: flex; gap: 8px; }
+    .input-row input {
+      flex: 1; padding: 10px 14px; border: 1px solid var(--border);
+      border-radius: 8px; font-size: 14px; outline: none;
+    }
+    .input-row input:focus { border-color: var(--primary); }
+    button {
+      padding: 10px 18px; border: none; border-radius: 8px;
+      background: var(--primary); color: #fff; font-size: 14px; cursor: pointer;
+    }
+    button:disabled { background: #b8c6d6; cursor: not-allowed; }
+    button.ghost { background: transparent; color: var(--primary); border: 1px solid var(--primary); }
+    .ticket-box { border: 1px dashed var(--primary); background: #f0f7ff; border-radius: 8px; padding: 12px; font-size: 13px; }
+    .ticket-box h4 { margin-bottom: 6px; }
+    .ticket-box p { color: var(--muted); line-height: 1.6; }
+    .hint { color: var(--muted); font-size: 12px; text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>AI 客服与工单助手</h1>
+      <p class="sub">演示：专业版导出功能失败 → 排查建议 → 创建工单</p>
+    </header>
+
+    <div class="card">
+      <div class="chat-log" id="chatLog"></div>
+    </div>
+
+    <div class="card">
+      <div class="input-row">
+        <input id="msgInput" type="text" placeholder="输入问题，例如：专业版导出功能一直失败" />
+        <button id="sendBtn">发送</button>
+        <button class="ghost" id="ticketBtn" disabled>创建工单</button>
+      </div>
+      <p class="hint" style="margin-top:8px;">输入上面这句示例问题，即可看到完整排查流程。</p>
+    </div>
+  </div>
+
+  <script>
+    const log = document.getElementById('chatLog');
+    const input = document.getElementById('msgInput');
+    const sendBtn = document.getElementById('sendBtn');
+    const ticketBtn = document.getElementById('ticketBtn');
+
+    const STEPS = ['理解问题并追问', '查询订单与服务范围', '检索手册给出建议', '确认并创建工单'];
+
+    function addMsg(text, role) {
+      const el = document.createElement('div');
+      el.className = 'msg ' + role;
+      el.textContent = text;
+      log.appendChild(el);
+      log.scrollTop = log.scrollHeight;
+      return el;
+    }
+
+    function addSteps(container) {
+      const box = document.createElement('div');
+      box.className = 'steps';
+      STEPS.forEach((label, i) => {
+        const s = document.createElement('div');
+        s.className = 'step';
+        s.innerHTML = `<span class="dot"></span><span class="label">${label}</span><span class="status">待执行</span>`;
+        box.appendChild(s);
+      });
+      container.appendChild(box);
+      return box;
+    }
+
+    function setStep(box, i, done) {
+      const s = box.children[i];
+      if (!s) return;
+      if (done) { s.classList.add('done'); s.querySelector('.status').textContent = '完成'; }
+      else { s.querySelector('.status').textContent = '执行中'; }
+    }
+
+    function addTicket(container) {
+      const t = document.createElement('div');
+      t.className = 'ticket-box';
+      t.innerHTML = `<h4>已创建工单</h4><p>问题：专业版导出功能一直失败<br/>已尝试步骤：重启客户端、检查网络<br/>依据：产品手册《导出功能排查指南》<br/>状态：待处理</p>`;
+      container.appendChild(t);
+    }
+
+    async function handleSend() {
+      const text = input.value.trim();
+      if (!text) return;
+      addMsg(text, 'user');
+      input.value = '';
+
+      const aiEl = addMsg('正在处理…', 'ai');
+      const box = addSteps(aiEl);
+
+      for (let i = 0; i < STEPS.length; i++) {
+        await new Promise(r => setTimeout(r, 600));
+        setStep(box, i, false);
+        await new Promise(r => setTimeout(r, 400));
+        setStep(box, i, true);
+      }
+
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: text }),
+        });
+        const data = await res.json();
+        aiEl.textContent = '排查建议：请按以下步骤尝试——1）升级到最新专业版；2）检查导出目录权限；3）联系客服提交工单。' + '\n\n（服务端回复：' + data.reply + '）';
+      } catch (e) {
+        aiEl.textContent = '排查建议：请按以下步骤尝试——1）升级到最新专业版；2）检查导出目录权限；3）联系客服提交工单。';
+      }
+
+      addTicket(aiEl);
+      ticketBtn.disabled = false;
+      log.scrollTop = log.scrollHeight;
+    }
+
+    sendBtn.addEventListener('click', handleSend);
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') handleSend(); });
+    ticketBtn.addEventListener('click', () => {
+      addMsg('已创建工单（演示）。', 'ai');
+      ticketBtn.disabled = true;
+    });
+  </script>
+</body>
+</html>

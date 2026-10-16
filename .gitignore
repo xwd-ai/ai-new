@@ -1,0 +1,14 @@
+小团队AI客服与工单助手-构建执行计划.md
+30日迭代计划.md
+.workbuddy/memory/2026-10-16.md
+/.workbuddy/memory
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 前端构建产物
+node_modules/
+dist/
