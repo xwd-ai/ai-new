@@ -230,6 +230,37 @@
     }
     .suggestion:hover { border-color: var(--primary); color: var(--primary); background: var(--primary-soft); }
 
+    .nav { margin-top: 6px; }
+    .sidebar-user {
+      display: flex; align-items: center; gap: 10px; padding: 10px 8px;
+      border-top: 1px solid var(--border); margin-top: 4px;
+    }
+    .sidebar-user .avatar { background: linear-gradient(135deg,#4f6ef7,#7a5cf0); }
+    .sidebar-user .meta { flex: 1; min-width: 0; }
+    .sidebar-user .logout {
+      width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--border);
+      background: transparent; color: var(--muted); cursor: pointer; font-size: 14px;
+      transition: all .15s ease; flex-shrink: 0;
+    }
+    .sidebar-user .logout:hover { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
+
+    /* 确认建单 */
+    .confirm-ticket {
+      background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 14px 16px; box-shadow: var(--shadow);
+    }
+    .confirm-ticket .ct-text { font-size: 13.5px; margin-bottom: 12px; color: var(--text); }
+    .confirm-ticket .ct-actions { display: flex; gap: 10px; }
+    .ct-btn {
+      padding: 9px 18px; border-radius: 10px; font-size: 13.5px; font-weight: 600; cursor: pointer;
+      border: 1px solid var(--border); background: var(--surface); color: var(--text); transition: all .15s ease;
+    }
+    .ct-btn:hover { border-color: var(--primary); color: var(--primary); }
+    .ct-btn.primary { background: var(--primary-grad); color: #fff; border: none; box-shadow: 0 4px 12px rgba(79,110,247,.30); }
+    .ct-btn.primary:hover { transform: translateY(-1px); }
+    .ct-btn:disabled { opacity: .6; cursor: not-allowed; transform: none; }
+    .ct-dismiss { font-size: 13px; color: var(--muted); }
+
     @media (max-width: 1080px) {
       .layout { grid-template-columns: 220px 1fr; }
       .aside { display: none; }
@@ -278,6 +309,23 @@
           </div>
           <span class="time">昨天</span>
         </div>
+      </div>
+
+      <div class="nav" id="navAdmin" style="display:none;">
+        <div class="title">管理</div>
+        <div class="conv" onclick="goTickets()">
+          <div class="avatar" style="background:linear-gradient(135deg,#4f6ef7,#7a5cf0);">单</div>
+          <div class="meta"><div class="who">工单管理</div></div>
+        </div>
+      </div>
+
+      <div class="sidebar-user">
+        <div class="avatar" id="meAvatar">客</div>
+        <div class="meta">
+          <div class="who" id="meName">未登录</div>
+          <div class="preview" id="meRole"></div>
+        </div>
+        <button class="logout" id="logoutBtn" title="退出登录">⏻</button>
       </div>
     </aside>
 
@@ -333,16 +381,31 @@
   </div>
 
   <script>
+    // ---- 登录守卫 ----
+    const token = localStorage.getItem('token');
+    const me = JSON.parse(localStorage.getItem('user') || 'null');
+    if (!token || !me) {
+      window.location.href = '/login';
+    } else if (me.role === 'admin') {
+      // 管理员应进入工单后台，而非客户对话页
+      window.location.href = '/admin';
+    }
+
     const log = document.getElementById('chatLog');
     const input = document.getElementById('msgInput');
     const sendBtn = document.getElementById('sendBtn');
 
-    const STEPS = [
-      { name: '理解问题并追问', desc: '澄清版本、页面与报错信息' },
-      { name: '查询订单与服务范围', desc: '确认专业版且在服务期内' },
-      { name: '检索手册给出建议', desc: '命中《导出功能排查指南》' },
-      { name: '确认并创建工单', desc: '生成工单 T-1024' },
-    ];
+    // 显示当前用户 + 管理员入口
+    document.getElementById('meName').textContent = me.name;
+    document.getElementById('meRole').textContent = me.role === 'admin' ? '管理员' : '用户';
+    document.getElementById('meAvatar').textContent = me.name.charAt(0);
+    if (me.role === 'admin') document.getElementById('navAdmin').style.display = '';
+
+    document.getElementById('logoutBtn').addEventListener('click', () => {
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      window.location.href = '/login';
+    });
 
     function scrollBottom() { const s = document.querySelector('.chat-scroll'); s.scrollTop = s.scrollHeight; }
 
@@ -364,39 +427,15 @@
       return wrap.querySelector('.body');
     }
 
-    function iconFor(name) {
-      if (name.includes('理解')) return '问';
-      if (name.includes('订单')) return '单';
-      if (name.includes('检索')) return '书';
-      return '✓';
-    }
-
-    function addSteps(body) {
-      const card = document.createElement('div');
-      card.className = 'steps-card';
-      card.innerHTML = `<div class="card-head"><span class="pulse"></span>正在为您排查</div>`;
-      const tl = document.createElement('div');
-      tl.className = 'timeline';
-      STEPS.forEach(s => {
-        const el = document.createElement('div');
-        el.className = 'tstep';
-        el.innerHTML = `<div class="rail"><div class="node">${iconFor(s.name)}</div><div class="line"></div></div>
-          <div class="tlabel"><div class="t-name">${s.name}</div><div class="t-desc">${s.desc}</div></div>
-          <div class="tstate">待执行</div>`;
-        tl.appendChild(el);
-      });
-      card.appendChild(tl);
-      body.appendChild(card);
+    // 给 AI 容器加一个「正在输入」的气泡，拿到真实回复后替换掉
+    function addTyping(body) {
+      const b = document.createElement('div');
+      b.className = 'bubble';
+      b.style.color = 'var(--muted)';
+      b.textContent = '正在思考…';
+      body.appendChild(b);
       scrollBottom();
-      return tl;
-    }
-
-    function setStep(tl, i, state) {
-      const el = tl.children[i];
-      if (!el) return;
-      el.classList.remove('running', 'done');
-      if (state === 'running') { el.classList.add('running'); el.querySelector('.tstate').textContent = '执行中'; }
-      else if (state === 'done') { el.classList.add('done'); el.querySelector('.tstate').textContent = '完成'; }
+      return b;
     }
 
     function addBubble(body, text) {
@@ -408,19 +447,63 @@
       return b;
     }
 
-    function addTicketCard(body) {
+    // 确认建单按钮
+    function addConfirmTicket(body, description) {
+      const wrap = document.createElement('div');
+      wrap.className = 'confirm-ticket';
+      wrap.innerHTML = `
+        <div class="ct-text">是否需要我为您创建工单，让人工客服跟进？</div>
+        <div class="ct-actions">
+          <button class="ct-btn primary">确认创建工单</button>
+          <button class="ct-btn">暂不需要</button>
+        </div>`;
+      body.appendChild(wrap);
+      scrollBottom();
+
+      const [confirmBtn, cancelBtn] = wrap.querySelectorAll('.ct-btn');
+      confirmBtn.addEventListener('click', async () => {
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = '创建中…';
+        try {
+          const res = await fetch('/api/tickets', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+            body: JSON.stringify({
+              description: description,
+              tried_steps: '已完成自助排查',
+              evidence: 'AI 客服建议',
+            }),
+          });
+          const data = await res.json();
+          const t = data.ticket;
+          wrap.innerHTML = '';
+          addTicketCard(body, t);
+        } catch (e) {
+          confirmBtn.disabled = false;
+          confirmBtn.textContent = '确认创建工单';
+        }
+      });
+      cancelBtn.addEventListener('click', () => {
+        wrap.innerHTML = `<div class="ct-dismiss">好的，如后续需要可随时让我创建工单。</div>`;
+      });
+    }
+
+    function addTicketCard(body, t) {
       const card = document.createElement('div');
       card.className = 'ticket-card';
       card.innerHTML = `
-        <div class="tc-head"><span>📋 工单已创建</span><span class="spacer"></span><span class="tc-status">待处理</span></div>
+        <div class="tc-head"><span>📋 工单已创建</span><span class="spacer"></span><span class="tc-status">${t.status === 'open' ? '待处理' : t.status}</span></div>
         <div class="tc-body">
-          <div class="tc-row"><span class="k">问题</span><span class="v">专业版导出功能一直失败</span></div>
-          <div class="tc-row"><span class="k">已尝试</span><span class="v">重启客户端 · 检查网络连接</span></div>
-          <div class="tc-row"><span class="k">依据</span><span class="v"><span class="tc-ref">📄 产品手册《导出功能排查指南》</span></span></div>
-          <div class="tc-row"><span class="k">工单号</span><span class="v">#T-1024</span></div>
+          <div class="tc-row"><span class="k">问题</span><span class="v">${escapeHtml(t.description)}</span></div>
+          <div class="tc-row"><span class="k">工单号</span><span class="v">#${escapeHtml(t.id)}</span></div>
+          <div class="tc-row"><span class="k">状态</span><span class="v">已提交，人工客服将尽快处理</span></div>
         </div>`;
       body.appendChild(card);
       scrollBottom();
+    }
+
+    function escapeHtml(s) {
+      return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     }
 
     async function handleSend() {
@@ -432,24 +515,27 @@
       sendBtn.disabled = true;
 
       const body = addAiContainer();
-      const tl = addSteps(body);
-
-      for (let i = 0; i < STEPS.length; i++) {
-        setStep(tl, i, 'running');
-        await new Promise(r => setTimeout(r, 750));
-        setStep(tl, i, 'done');
-        await new Promise(r => setTimeout(r, 250));
-      }
+      const typing = addTyping(body);
 
       let reply = '';
+      let suggest = false;
       try {
         const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text }) });
         const data = await res.json();
         reply = data.reply;
-      } catch (e) { /* 离线演示不阻塞 */ }
+        suggest = data.suggest_ticket;
+      } catch (e) {
+        reply = '抱歉，我暂时无法连接到服务，请稍后再试。';
+      }
 
-      addBubble(body, '根据排查，建议您：\n1. 升级到最新专业版客户端\n2. 检查导出目录是否有写入权限\n3. 若仍失败，可为您提交工单处理');
-      addTicketCard(body);
+      // 用真实回复替换「正在思考」
+      typing.textContent = reply;
+      typing.style.color = '';
+
+      if (suggest) {
+        addConfirmTicket(body, text);
+      }
+
       sendBtn.disabled = false;
       scrollBottom();
     }
@@ -465,6 +551,7 @@
     function fillAndSend(t) { input.value = t; handleSend(); }
     function newChat() { log.innerHTML = ''; input.focus(); }
     function switchConv(el) { document.querySelectorAll('.conv').forEach(c => c.classList.remove('active')); el.classList.add('active'); }
+    function goTickets() { alert('工单管理页（后续实现）'); }
   </script>
 </body>
 </html>

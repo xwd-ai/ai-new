@@ -5,7 +5,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from backend.auth_api import auth_router
 from backend.chat import chat_router
+from backend.tickets_api import tickets_router
+from backend import tickets
 
 app = FastAPI(title="AI 客服与工单助手", version="0.1.0")
 
@@ -17,6 +20,11 @@ app.add_middleware(
 )
 
 app.include_router(chat_router, prefix="/api")
+app.include_router(auth_router, prefix="/api")
+app.include_router(tickets_router, prefix="/api")
+
+# 预置演示工单（进程启动时执行一次）
+tickets.seed_tickets()
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 app.mount("/assets", StaticFiles(directory=FRONTEND_DIR), name="assets")
@@ -30,3 +38,13 @@ def health() -> JSONResponse:
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "index.html")
+
+
+@app.get("/login")
+def login_page() -> FileResponse:
+    return FileResponse(FRONTEND_DIR / "login.html")
+
+
+@app.get("/admin")
+def admin_page() -> FileResponse:
+    return FileResponse(FRONTEND_DIR / "admin.html")

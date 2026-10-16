@@ -12,9 +12,12 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     reply: str
+    suggest_ticket: bool = False
 
 
 @chat_router.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest) -> ChatResponse:
     reply = llm.chat_reply(req.message)
-    return ChatResponse(reply=reply)
+    # 简单启发式：命中「失败/报错/不行/解决不了/工单」等则建议建单
+    suggest = any(k in req.message for k in ("失败", "报错", "不行", "解决不了", "无效", "工单", "不能用"))
+    return ChatResponse(reply=reply, suggest_ticket=suggest)
