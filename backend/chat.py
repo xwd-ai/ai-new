@@ -1,9 +1,12 @@
 import time
+import uuid
 
 from fastapi import APIRouter, Header
 from pydantic import BaseModel
 
 from backend import auth, knowledge, llm, orders, store
+from backend.database import SessionLocal
+from backend.models import Conversation, Message
 
 chat_router = APIRouter()
 
@@ -26,13 +29,29 @@ def _current_user(authorization: str):
     return auth.find_by_username(session["username"])
 
 
-def _append_message(user_id: str, role: str, content: str) -> None:
-    data = store.read()
-    data["conversations"].setdefault(user_id, [])
-    data["conversations"][user_id].append(
-        {"role": role, "content": content, "at": time.time()}
-    )
-    store.write(data)
+def _append_message(conversation_id: str, role: str, content: str) -> None:
+    """向数据库追加一条消息，并刷新会话更新时间。"""
+    db = SessionLocal()
+    try:
+        db.add(
+            Message(
+                id=uuid.uuid4().hex,
+                conversation_id=conversation_id,
+                role=role,
+                content=content,
+                at=time.time(),
+            )
+        )
+        conv = (
+            db.query(Conversation)
+            .filter(Conversation.id == conversation_id)
+            .first()
+        )
+        if conv:
+            conv.updated_at = time.time()
+        db.commit()
+    finally:
+        db.close()
 
 
 def _append_tried_step(user_id: str, step: str) -> None:
@@ -50,15 +69,62 @@ def _get_tried_steps(user_id: str) -> str:
     return " · ".join(steps) if steps else ""
 
 
+def _get_or_create_conversation(user_id: str) -> str:
+    """取该用户最近一次会话；没有则新建一个。"""
+    db = SessionLocal()
+    try:
+        conv = (
+            db.query(Conversation)
+            .filter(Conversation.user_id == user_id)
+            .order_by(Conversation.updated_at.desc())
+            .first()
+        )
+        if conv:
+            return conv.id
+        now = time.time()
+        conv = Conversation(
+            id=uuid.uuid4().hex,
+            user_id=user_id,
+            title="",
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(conv)
+        db.commit()
+        db.refresh(conv)
+        return conv.id
+    finally:
+        db.close()
+
+
+def _history(conversation_id: str, limit: int = 8) -> list[dict]:
+    """拉取最近 N 条消息作为上下文。"""
+    db = SessionLocal()
+    try:
+        messages = (
+            db.query(Message)
+            .filter(Message.conversation_id == conversation_id)
+            .order_by(Message.at.desc())
+            .limit(limit)
+            .all()
+        )
+        # 倒序取回后反转为时间正序
+        return [
+            {"role": m.role, "content": m.content}
+            for m in reversed(messages)
+        ]
+    finally:
+        db.close()
+
+
 @chat_router.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, authorization: str = Header(default="")) -> ChatResponse:
     user = _current_user(authorization)
     user_id = user["id"] if user else "anonymous"
 
     # 1. 拉取历史上下文
-    data = store.read()
-    history = data["conversations"].get(user_id, [])[-8:]
-    context = [{"role": m["role"], "content": m["content"]} for m in history]
+    conversation_id = _get_or_create_conversation(user_id)
+    context = _history(conversation_id)
 
     # 2. 查询订单与服务范围（Agent 的「查订单」工具）
     order = orders.query_order(user_id) if user else None
@@ -70,8 +136,8 @@ def chat(req: ChatRequest, authorization: str = Header(default="")) -> ChatRespo
     reply = llm.chat_reply(req.message, context, matched, order)
 
     # 5. 持久化消息
-    _append_message(user_id, "user", req.message)
-    _append_message(user_id, "assistant", reply)
+    _append_message(conversation_id, "user", req.message)
+    _append_message(conversation_id, "assistant", reply)
 
     # 记录已尝试步骤（命中知识则说明给了排查建议）
     if matched:
@@ -90,6 +156,26 @@ def conversation(authorization: str = Header(default="")):
     user = _current_user(authorization)
     if not user:
         return {"messages": []}
-    data = store.read()
-    messages = data["conversations"].get(user["id"], [])
-    return {"messages": messages}
+    db = SessionLocal()
+    try:
+        conv = (
+            db.query(Conversation)
+            .filter(Conversation.user_id == user["id"])
+            .order_by(Conversation.updated_at.desc())
+            .first()
+        )
+        if not conv:
+            return {"messages": []}
+        messages = (
+            db.query(Message)
+            .filter(Message.conversation_id == conv.id)
+            .order_by(Message.at.asc())
+            .all()
+        )
+        return {
+            "messages": [
+                {"role": m.role, "content": m.content, "at": m.at} for m in messages
+            ]
+        }
+    finally:
+        db.close()
