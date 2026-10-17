@@ -1,9 +1,12 @@
 import hashlib
 import time
 
-from backend import store
+from sqlalchemy import func
 
-# 工单持久化到 data.json（demo 阶段不引数据库）
+from backend.database import SessionLocal
+from backend.models import Ticket
+
+# 工单持久化到 SQLite 数据库
 # 一个工单对应一次「问题 → 排查 → 建单」的闭环
 # 工单状态机：open(待处理) -> in_progress(处理中) -> resolved(已解决)
 
@@ -12,19 +15,14 @@ def _dedup_key(user_id: str, description: str) -> str:
     return hashlib.sha256(f"{user_id}::{description}".encode()).hexdigest()
 
 
-def _all_tickets() -> dict:
-    return store.read()["tickets"]
-
-
-def _save_tickets(tickets: dict) -> None:
-    data = store.read()
-    data["tickets"] = tickets
-    store.write(data)
-
-
-def _next_id(data: dict) -> str:
-    data["ticket_seq"] += 1
-    return f"T-{data['ticket_seq']}"
+def _next_id(db) -> str:
+    """工单号自增：基于现有最大序号 +1。"""
+    max_id = db.query(func.max(Ticket.id)).scalar()
+    if not max_id:
+        seq = 1000
+    else:
+        seq = int(max_id.replace("T-", ""))
+    return f"T-{seq + 1}"
 
 
 def create_ticket(
@@ -35,69 +33,95 @@ def create_ticket(
     evidence: str,
 ) -> dict:
     key = _dedup_key(user_id, description)
-    data = store.read()
-    tickets = data["tickets"]
+    db = SessionLocal()
+    try:
+        # 幂等：同一用户同一问题只建一张单，重复确认返回已有工单
+        existing = (
+            db.query(Ticket)
+            .filter(Ticket.dedup_key == key, Ticket.status != "resolved")
+            .first()
+        )
+        if existing:
+            return existing.to_dict()
 
-    # 幂等：同一用户同一问题只建一张单，重复确认返回已有工单
-    for t in tickets.values():
-        if t["dedup_key"] == key and t["status"] != "resolved":
-            return t
-
-    ticket_id = _next_id(data)
-    ticket = {
-        "id": ticket_id,
-        "dedup_key": key,
-        "user_id": user_id,
-        "user_name": user_name,
-        "description": description,
-        "tried_steps": tried_steps,
-        "evidence": evidence,
-        "status": "open",  # open / in_progress / resolved
-        "created_at": time.time(),
-        "replies": [],
-    }
-    tickets[ticket_id] = ticket
-    store.write(data)
-    return ticket
+        ticket = Ticket(
+            id=_next_id(db),
+            dedup_key=key,
+            user_id=user_id,
+            user_name=user_name,
+            description=description,
+            tried_steps=tried_steps,
+            evidence=evidence,
+            status="open",
+            created_at=time.time(),
+            replies=[],
+        )
+        db.add(ticket)
+        db.commit()
+        db.refresh(ticket)
+        return ticket.to_dict()
+    finally:
+        db.close()
 
 
 def list_tickets() -> list[dict]:
-    tickets = _all_tickets()
-    return sorted(tickets.values(), key=lambda t: t["created_at"], reverse=True)
+    db = SessionLocal()
+    try:
+        tickets = db.query(Ticket).order_by(Ticket.created_at.desc()).all()
+        return [t.to_dict() for t in tickets]
+    finally:
+        db.close()
 
 
 def get_ticket(ticket_id: str) -> dict | None:
-    return _all_tickets().get(ticket_id)
+    db = SessionLocal()
+    try:
+        t = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+        return t.to_dict() if t else None
+    finally:
+        db.close()
 
 
 def add_reply(ticket_id: str, replier: str, content: str) -> dict | None:
-    data = store.read()
-    t = data["tickets"].get(ticket_id)
-    if not t:
-        return None
-    t["replies"].append(
-        {"replier": replier, "content": content, "at": time.time()}
-    )
-    if t["status"] == "open":
-        t["status"] = "in_progress"
-    store.write(data)
-    return t
+    db = SessionLocal()
+    try:
+        t = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+        if not t:
+            return None
+        replies = list(t.replies or [])
+        replies.append({"replier": replier, "content": content, "at": time.time()})
+        t.replies = replies
+        if t.status == "open":
+            t.status = "in_progress"
+        db.commit()
+        db.refresh(t)
+        return t.to_dict()
+    finally:
+        db.close()
 
 
 def update_status(ticket_id: str, status: str) -> dict | None:
-    data = store.read()
-    t = data["tickets"].get(ticket_id)
-    if not t:
-        return None
-    t["status"] = status
-    store.write(data)
-    return t
+    db = SessionLocal()
+    try:
+        t = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+        if not t:
+            return None
+        t.status = status
+        db.commit()
+        db.refresh(t)
+        return t.to_dict()
+    finally:
+        db.close()
 
 
 def seed_tickets() -> None:
     """演示数据：预置两张工单，方便管理员端第一次打开就有内容。"""
-    if _all_tickets():
-        return
+    db = SessionLocal()
+    try:
+        if db.query(Ticket).first() is not None:
+            return
+    finally:
+        db.close()
     create_ticket(
         user_id="u-customer",
         user_name="李女士",
