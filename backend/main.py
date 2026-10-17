@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from backend.auth_api import auth_router
 from backend.chat import chat_router
 from backend.tickets_api import tickets_router
-from backend import auth, orders, tickets
+from backend import auth, knowledge, orders, tickets
 from backend.database import init_db
 
 app = FastAPI(title="AI 客服与工单助手", version="0.1.0")
@@ -29,6 +29,7 @@ init_db()
 auth.seed_users()
 orders.seed_orders()
 tickets.seed_tickets()
+knowledge.seed_knowledge()
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 app.mount("/assets", StaticFiles(directory=FRONTEND_DIR), name="assets")
