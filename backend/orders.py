@@ -1,23 +1,27 @@
 import time
 
-# 产品与订单数据（demo 阶段内置静态数据，不引数据库）
+from backend.database import SessionLocal
+from backend.models import Order, Product
+
+# 产品与订单持久化到 SQLite 数据库
 # 订单是「服务范围判定」的依据：确认用户购买的是不是专业版、是否在服务期内
 
-# 产品版本及其特性
-PRODUCTS = {
-    "basic": {
+# 产品版本及其特性（首次启动时预置）
+_SEED_PRODUCTS = [
+    {
+        "id": "basic",
         "name": "基础版",
         "features": ["基础导出", "单文件上传", "社区支持"],
     },
-    "pro": {
+    {
+        "id": "pro",
         "name": "专业版",
         "features": ["批量导出", "高级报表", "优先客服支持", "API 接口"],
     },
-}
+]
 
-# 演示订单
-# 李女士 = u-customer，买了专业版且在服务期内
-ORDERS = [
+# 演示订单：李女士 = u-customer，买了专业版且在服务期内
+_SEED_ORDERS = [
     {
         "id": "O-1001",
         "user_id": "u-customer",
@@ -29,11 +33,33 @@ ORDERS = [
 ]
 
 
+def seed_orders() -> None:
+    """预置产品与演示订单（幂等：已有数据则跳过）。"""
+    db = SessionLocal()
+    try:
+        if db.query(Product).first() is None:
+            for p in _SEED_PRODUCTS:
+                db.add(Product(id=p["id"], name=p["name"], features=p["features"]))
+        if db.query(Order).first() is None:
+            for o in _SEED_ORDERS:
+                db.add(Order(**o))
+        db.commit()
+    finally:
+        db.close()
+
+
+def _get_product(db, tier: str) -> dict | None:
+    p = db.query(Product).filter(Product.id == tier).first()
+    return p.to_dict() if p else None
+
+
 def get_order(user_id: str) -> dict | None:
-    for o in ORDERS:
-        if o["user_id"] == user_id:
-            return o
-    return None
+    db = SessionLocal()
+    try:
+        o = db.query(Order).filter(Order.user_id == user_id).first()
+        return o.to_dict() if o else None
+    finally:
+        db.close()
 
 
 def query_order(user_id: str) -> dict:
@@ -45,10 +71,16 @@ def query_order(user_id: str) -> dict:
             "message": "未查询到该用户的订单记录",
         }
 
+    db = SessionLocal()
+    try:
+        product = _get_product(db, order["product_tier"])
+    finally:
+        db.close()
+
     now = time.time()
     in_service = order["status"] == "active" and order["expires_at"] > now
-    tier_name = PRODUCTS[order["product_tier"]]["name"]
-    features = PRODUCTS[order["product_tier"]]["features"]
+    tier_name = product["name"] if product else order["product_tier"]
+    features = product["features"] if product else []
 
     return {
         "has_order": True,

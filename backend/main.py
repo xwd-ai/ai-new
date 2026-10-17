@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from backend.auth_api import auth_router
 from backend.chat import chat_router
 from backend.tickets_api import tickets_router
-from backend import auth, tickets
+from backend import auth, orders, tickets
 from backend.database import init_db
 
 app = FastAPI(title="AI 客服与工单助手", version="0.1.0")
@@ -27,6 +27,7 @@ app.include_router(tickets_router, prefix="/api")
 # 初始化数据库并预置演示数据（进程启动时执行一次）
 init_db()
 auth.seed_users()
+orders.seed_orders()
 tickets.seed_tickets()
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
