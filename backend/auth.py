@@ -8,51 +8,13 @@ from backend.models import Session, User
 
 # 用户与会话持久化到 SQLite 数据库
 # 密码用简单 hash 存，避免明文；demo 阶段不做加盐/加密
+# 预置用户逻辑收敛到 backend.seed 模块
 
 _TOKEN_TTL = 60 * 60 * 24  # 24 小时
-
-# 预置用户：首次启动时若用户表为空则写入
-_SEED_USERS = [
-    {
-        "id": "u-admin",
-        "username": "admin",
-        "password": "admin123",
-        "name": "管理员",
-        "role": "admin",
-    },
-    {
-        "id": "u-customer",
-        "username": "customer",
-        "password": "customer123",
-        "name": "李女士",
-        "role": "customer",
-    },
-]
 
 
 def _hash(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
-
-
-def seed_users() -> None:
-    """预置演示用户（幂等：已有用户则跳过）。"""
-    db = SessionLocal()
-    try:
-        if db.query(User).first() is not None:
-            return
-        for u in _SEED_USERS:
-            db.add(
-                User(
-                    id=u["id"],
-                    username=u["username"],
-                    password_hash=_hash(u["password"]),
-                    name=u["name"],
-                    role=u["role"],
-                )
-            )
-        db.commit()
-    finally:
-        db.close()
 
 
 def find_by_username(username: str) -> Optional[dict]:

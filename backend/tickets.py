@@ -9,6 +9,7 @@ from backend.models import Ticket
 # 工单持久化到 SQLite 数据库
 # 一个工单对应一次「问题 → 排查 → 建单」的闭环
 # 工单状态机：open(待处理) -> in_progress(处理中) -> resolved(已解决)
+# 预置工单逻辑收敛到 backend.seed 模块
 
 
 def _dedup_key(user_id: str, description: str) -> str:
@@ -112,27 +113,3 @@ def update_status(ticket_id: str, status: str) -> dict | None:
         return t.to_dict()
     finally:
         db.close()
-
-
-def seed_tickets() -> None:
-    """演示数据：预置两张工单，方便管理员端第一次打开就有内容。"""
-    db = SessionLocal()
-    try:
-        if db.query(Ticket).first() is not None:
-            return
-    finally:
-        db.close()
-    create_ticket(
-        user_id="u-customer",
-        user_name="李女士",
-        description="专业版导出功能一直失败",
-        tried_steps="重启客户端 · 检查网络连接",
-        evidence="产品手册《导出功能排查指南》",
-    )
-    create_ticket(
-        user_id="u-customer",
-        user_name="王先生",
-        description="激活码输入提示无效",
-        tried_steps="核对邮箱中的激活码",
-        evidence="FAQ《激活码常见问题》",
-    )
