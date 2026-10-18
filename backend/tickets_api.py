@@ -1,7 +1,9 @@
 from fastapi import APIRouter, Header
 from pydantic import BaseModel
 
-from backend import auth, orders, store, tickets
+from backend import auth, orders, tickets
+from backend.database import SessionLocal
+from backend.models import TriedStep
 
 tickets_router = APIRouter()
 
@@ -34,8 +36,17 @@ def create_ticket(req: CreateTicketRequest, authorization: str = Header(default=
     # 若前端未显式传已尝试步骤，则从会话已记录的步骤自动沉淀
     tried_steps = req.tried_steps
     if not tried_steps:
-        data = store.read()
-        tried_steps = " · ".join(data.get("tried_steps", {}).get(user["id"], [])) or ""
+        db = SessionLocal()
+        try:
+            steps = (
+                db.query(TriedStep)
+                .filter(TriedStep.user_id == user["id"])
+                .order_by(TriedStep.at.asc())
+                .all()
+            )
+            tried_steps = " · ".join(s.step for s in steps) if steps else ""
+        finally:
+            db.close()
 
     ticket = tickets.create_ticket(
         user_id=user["id"],

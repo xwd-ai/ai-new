@@ -141,6 +141,18 @@ class Message(Base):
         }
 
 
+class TriedStep(Base):
+    __tablename__ = "tried_steps"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, nullable=False)
+    step: Mapped[str] = mapped_column(String, nullable=False)
+    at: Mapped[float] = mapped_column(Float, nullable=False)
+
+    def to_dict(self) -> dict:
+        return {"id": self.id, "user_id": self.user_id, "step": self.step, "at": self.at}
+
+
 class Ticket(Base):
     __tablename__ = "tickets"
 

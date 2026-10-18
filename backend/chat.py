@@ -4,9 +4,9 @@ import uuid
 from fastapi import APIRouter, Header
 from pydantic import BaseModel
 
-from backend import auth, knowledge, llm, orders, store
+from backend import auth, knowledge, llm, orders
 from backend.database import SessionLocal
-from backend.models import Conversation, Message
+from backend.models import Conversation, Message, TriedStep
 
 chat_router = APIRouter()
 
@@ -56,17 +56,33 @@ def _append_message(conversation_id: str, role: str, content: str) -> None:
 
 def _append_tried_step(user_id: str, step: str) -> None:
     """记录一次「已尝试步骤」，供后续建单沉淀。"""
-    data = store.read()
-    data.setdefault("tried_steps", {})
-    data["tried_steps"].setdefault(user_id, [])
-    data["tried_steps"][user_id].append(step)
-    store.write(data)
+    db = SessionLocal()
+    try:
+        db.add(
+            TriedStep(
+                id=uuid.uuid4().hex,
+                user_id=user_id,
+                step=step,
+                at=time.time(),
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
 
 
 def _get_tried_steps(user_id: str) -> str:
-    data = store.read()
-    steps = data.get("tried_steps", {}).get(user_id, [])
-    return " · ".join(steps) if steps else ""
+    db = SessionLocal()
+    try:
+        steps = (
+            db.query(TriedStep)
+            .filter(TriedStep.user_id == user_id)
+            .order_by(TriedStep.at.asc())
+            .all()
+        )
+        return " · ".join(s.step for s in steps) if steps else ""
+    finally:
+        db.close()
 
 
 def _get_or_create_conversation(user_id: str) -> str:
