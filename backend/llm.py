@@ -2,15 +2,14 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from openai import OpenAI
+
+from backend.providers import build_chat_provider
 
 # 加载 backend/.env
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
-_client = OpenAI(
-    api_key=os.getenv("DEEPSEEK_API_KEY"),
-    base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-)
+# Chat 能力由适配层提供，此处只做业务上下文的组装
+_chat = build_chat_provider()
 
 SYSTEM_PROMPT = (
     "你是一家虚拟软件公司的智能客服助手。"
@@ -57,9 +56,4 @@ def chat_reply(
         messages.extend(history)
     messages.append({"role": "user", "content": message})
 
-    resp = _client.chat.completions.create(
-        model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
-        messages=messages,
-        temperature=0.7,
-    )
-    return resp.choices[0].message.content or ""
+    return _chat.chat(messages)
