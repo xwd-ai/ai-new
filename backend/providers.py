@@ -69,6 +69,62 @@ class OpenAICompatChatProvider:
         return resp.choices[0].message.content or ""
 
 
+class EmbeddingProvider(Protocol):
+    """Embedding 能力抽象：把文本编码为向量，供检索做相似度计算。"""
+
+    def embed(self, text: str, *, model: str | None = None) -> list[float]:
+        """返回文本对应的向量。"""
+        ...
+
+    def embed_many(
+        self, texts: Sequence[str], *, model: str | None = None
+    ) -> list[list[float]]:
+        """批量编码，返回与输入等长的向量列表。"""
+        ...
+
+
+class OpenAICompatEmbeddingProvider:
+    """基于 OpenAI 兼容接口的 Embedding 实现。
+
+    通过 base_url / api_key 指向任意 OpenAI 兼容服务。默认对接
+    DeepSeek 的向量接口，也可换成其它兼容供应商而无需改动调用方。
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        model: str | None = None,
+    ) -> None:
+        self._api_key = api_key or os.getenv("DEEPSEEK_API_KEY", "")
+        self._base_url = base_url or os.getenv(
+            "DEEPSEEK_BASE_URL", "https://api.deepseek.com"
+        )
+        self._model = model or os.getenv(
+            "EMBEDDING_MODEL", "deepseek-embedding"
+        )
+        self._client = OpenAI(api_key=self._api_key, base_url=self._base_url)
+
+    def embed(self, text: str, *, model: str | None = None) -> list[float]:
+        return self.embed_many([text], model=model)[0]
+
+    def embed_many(
+        self, texts: Sequence[str], *, model: str | None = None
+    ) -> list[list[float]]:
+        if not texts:
+            return []
+        resp = self._client.embeddings.create(
+            model=model or self._model, input=list(texts)
+        )
+        return [d.embedding for d in resp.data]
+
+
 def build_chat_provider() -> ChatProvider:
     """按环境变量装配一个 Chat 能力实现。"""
     return OpenAICompatChatProvider()
+
+
+def build_embedding_provider() -> EmbeddingProvider:
+    """按环境变量装配一个 Embedding 能力实现。"""
+    return OpenAICompatEmbeddingProvider()
