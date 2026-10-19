@@ -1,15 +1,24 @@
-import os
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-from backend.providers import build_chat_provider
+from backend.providers import ChatProvider, build_chat_provider
 
 # 加载 backend/.env
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
-# Chat 能力由适配层提供，此处只做业务上下文的组装
-_chat = build_chat_provider()
+# Chat 能力由适配层提供，此处只做业务上下文的组装；
+# provider 由调用方注入，避免在导入期固化成全局单例。
+_default_provider: ChatProvider | None = None
+
+
+def _get_provider() -> ChatProvider:
+    """惰性装配默认 Chat 实现，首次调用时才创建客户端。"""
+    global _default_provider
+    if _default_provider is None:
+        _default_provider = build_chat_provider()
+    return _default_provider
+
 
 SYSTEM_PROMPT = (
     "你是一家虚拟软件公司的智能客服助手。"
@@ -25,6 +34,7 @@ def chat_reply(
     history: list[dict] | None = None,
     knowledge: list[dict] | None = None,
     order: dict | None = None,
+    provider: ChatProvider | None = None,
 ) -> str:
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
@@ -56,4 +66,5 @@ def chat_reply(
         messages.extend(history)
     messages.append({"role": "user", "content": message})
 
-    return _chat.chat(messages)
+    chat = provider or _get_provider()
+    return chat.chat(messages)

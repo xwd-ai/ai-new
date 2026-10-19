@@ -7,8 +7,12 @@ from pydantic import BaseModel
 from backend import auth, knowledge, llm, orders
 from backend.database import SessionLocal
 from backend.models import Conversation, Message, TriedStep
+from backend.providers import build_chat_provider
 
 chat_router = APIRouter()
+
+# 对话链路的 Chat 能力，由适配层装配；可在测试时替换为假实现
+_chat_provider = build_chat_provider()
 
 
 class ChatRequest(BaseModel):
@@ -149,7 +153,7 @@ def chat(req: ChatRequest, authorization: str = Header(default="")) -> ChatRespo
     matched = knowledge.search_knowledge(req.message)
 
     # 4. 生成带来源的回答
-    reply = llm.chat_reply(req.message, context, matched, order)
+    reply = llm.chat_reply(req.message, context, matched, order, _chat_provider)
 
     # 5. 持久化消息
     _append_message(conversation_id, "user", req.message)
