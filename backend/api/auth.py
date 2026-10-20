@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Header
 
-from backend import auth
 from backend.schemas import LoginRequest, LoginResponse
+from backend.services import auth
 
 auth_router = APIRouter()
 

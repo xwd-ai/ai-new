@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Header
 
-from backend import chat as chat_service
 from backend.database import SessionLocal
+from backend.services import chat as chat_service
 from backend.models import Conversation, Message
 from backend.schemas import ChatRequest, ChatResponse
 

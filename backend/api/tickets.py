@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Header
 
-from backend import auth, orders, tickets
 from backend.database import SessionLocal
+from backend.services import auth, orders, tickets
 from backend.models import TriedStep
 from backend.schemas import CreateTicketRequest, ReplyRequest
 

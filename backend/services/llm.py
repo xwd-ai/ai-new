@@ -4,8 +4,8 @@ from dotenv import load_dotenv
 
 from backend.providers import ChatProvider, build_chat_provider
 
-# 加载 backend/.env
-load_dotenv(Path(__file__).resolve().parent / ".env")
+# 加载 backend/.env（本文件位于 backend/services/ 下，需向上一层）
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 # Chat 能力由适配层提供，此处只做业务上下文的组装；
 # provider 由调用方注入，避免在导入期固化成全局单例。

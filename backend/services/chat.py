@@ -1,8 +1,8 @@
 import time
 import uuid
 
-from backend import knowledge, llm, orders
 from backend.database import SessionLocal
+from backend.services import knowledge, llm, orders
 from backend.models import Conversation, Message, TriedStep
 from backend.providers import build_chat_provider
 
@@ -14,7 +14,7 @@ _chat_provider = build_chat_provider()
 
 
 def current_user(authorization: str):
-    from backend import auth
+    from backend.services import auth
 
     token = authorization.replace("Bearer ", "").strip()
     session = auth.get_session(token)
