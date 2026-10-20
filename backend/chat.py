@@ -1,31 +1,21 @@
 import time
 import uuid
 
-from fastapi import APIRouter, Header
-from pydantic import BaseModel
-
-from backend import auth, knowledge, llm, orders
+from backend import knowledge, llm, orders
 from backend.database import SessionLocal
 from backend.models import Conversation, Message, TriedStep
 from backend.providers import build_chat_provider
 
-chat_router = APIRouter()
+# 对话链路：会话与消息的存取、已尝试步骤的记录，以及「查订单 + 检索手册 + 生成回答」的编排。
+# 路由定义在 backend.api.chat，此处仅承载存储与业务编排逻辑。
 
 # 对话链路的 Chat 能力，由适配层装配；可在测试时替换为假实现
 _chat_provider = build_chat_provider()
 
 
-class ChatRequest(BaseModel):
-    message: str
+def current_user(authorization: str):
+    from backend import auth
 
-
-class ChatResponse(BaseModel):
-    reply: str
-    suggest_ticket: bool = False
-    sources: list = []
-
-
-def _current_user(authorization: str):
     token = authorization.replace("Bearer ", "").strip()
     session = auth.get_session(token)
     if not session:
@@ -33,7 +23,7 @@ def _current_user(authorization: str):
     return auth.find_by_username(session["username"])
 
 
-def _append_message(conversation_id: str, role: str, content: str) -> None:
+def append_message(conversation_id: str, role: str, content: str) -> None:
     """向数据库追加一条消息，并刷新会话更新时间。"""
     db = SessionLocal()
     try:
@@ -58,7 +48,7 @@ def _append_message(conversation_id: str, role: str, content: str) -> None:
         db.close()
 
 
-def _append_tried_step(user_id: str, step: str) -> None:
+def append_tried_step(user_id: str, step: str) -> None:
     """记录一次「已尝试步骤」，供后续建单沉淀。"""
     db = SessionLocal()
     try:
@@ -75,7 +65,7 @@ def _append_tried_step(user_id: str, step: str) -> None:
         db.close()
 
 
-def _get_tried_steps(user_id: str) -> str:
+def get_tried_steps(user_id: str) -> str:
     db = SessionLocal()
     try:
         steps = (
@@ -89,7 +79,7 @@ def _get_tried_steps(user_id: str) -> str:
         db.close()
 
 
-def _get_or_create_conversation(user_id: str) -> str:
+def get_or_create_conversation(user_id: str) -> str:
     """取该用户最近一次会话；没有则新建一个。"""
     db = SessionLocal()
     try:
@@ -117,7 +107,7 @@ def _get_or_create_conversation(user_id: str) -> str:
         db.close()
 
 
-def _history(conversation_id: str, limit: int = 8) -> list[dict]:
+def history(conversation_id: str, limit: int = 8) -> list[dict]:
     """拉取最近 N 条消息作为上下文。"""
     db = SessionLocal()
     try:
@@ -137,65 +127,30 @@ def _history(conversation_id: str, limit: int = 8) -> list[dict]:
         db.close()
 
 
-@chat_router.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest, authorization: str = Header(default="")) -> ChatResponse:
-    user = _current_user(authorization)
-    user_id = user["id"] if user else "anonymous"
+def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
+    """编排一次对话回复：查订单 → 检索手册 → 生成带来源回答。
 
-    # 1. 拉取历史上下文
-    conversation_id = _get_or_create_conversation(user_id)
-    context = _history(conversation_id)
+    返回 (reply, sources, suggest_ticket)。
+    """
+    conversation_id = get_or_create_conversation(user_id)
+    context = history(conversation_id)
 
-    # 2. 查询订单与服务范围（Agent 的「查订单」工具）
-    order = orders.query_order(user_id) if user else None
+    # 匿名用户无订单，直接跳过「查订单」环节
+    order = orders.query_order(user_id) if user_id != "anonymous" else None
+    matched = knowledge.search_knowledge(message)
+    reply = llm.chat_reply(message, context, matched, order, _chat_provider)
 
-    # 3. 检索知识库（Agent 的「检索手册」工具）
-    matched = knowledge.search_knowledge(req.message)
+    append_message(conversation_id, "user", message)
+    append_message(conversation_id, "assistant", reply)
 
-    # 4. 生成带来源的回答
-    reply = llm.chat_reply(req.message, context, matched, order, _chat_provider)
-
-    # 5. 持久化消息
-    _append_message(conversation_id, "user", req.message)
-    _append_message(conversation_id, "assistant", reply)
-
-    # 记录已尝试步骤（命中知识则说明给了排查建议）
     if matched:
-        _append_tried_step(user_id, f"按《{matched[0]['title']}》排查")
+        append_tried_step(user_id, f"按《{matched[0]['title']}》排查")
 
-    # 6. 结构化返回
-    suggest = any(k in req.message for k in ("失败", "报错", "不行", "解决不了", "无效", "工单", "不能用", "退款"))
+    suggest = any(
+        k in message
+        for k in ("失败", "报错", "不行", "解决不了", "无效", "工单", "不能用", "退款")
+    )
     sources = [
         {"id": k["id"], "title": k["title"], "kind": k["kind"]} for k in matched
     ]
-    return ChatResponse(reply=reply, suggest_ticket=suggest, sources=sources)
-
-
-@chat_router.get("/conversation")
-def conversation(authorization: str = Header(default="")):
-    user = _current_user(authorization)
-    if not user:
-        return {"messages": []}
-    db = SessionLocal()
-    try:
-        conv = (
-            db.query(Conversation)
-            .filter(Conversation.user_id == user["id"])
-            .order_by(Conversation.updated_at.desc())
-            .first()
-        )
-        if not conv:
-            return {"messages": []}
-        messages = (
-            db.query(Message)
-            .filter(Message.conversation_id == conv.id)
-            .order_by(Message.at.asc())
-            .all()
-        )
-        return {
-            "messages": [
-                {"role": m.role, "content": m.content, "at": m.at} for m in messages
-            ]
-        }
-    finally:
-        db.close()
+    return reply, sources, suggest

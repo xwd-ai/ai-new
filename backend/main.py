@@ -5,9 +5,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend.auth_api import auth_router
-from backend.chat import chat_router
-from backend.tickets_api import tickets_router
+from backend.api.auth import auth_router
+from backend.api.chat import chat_router
+from backend.api.tickets import tickets_router
 from backend.database import init_db
 from backend.seed import seed_all
 
