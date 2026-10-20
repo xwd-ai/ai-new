@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Header
-from pydantic import BaseModel
 
 from backend import auth, orders, tickets
 from backend.database import SessionLocal
 from backend.models import TriedStep
+from backend.schemas import CreateTicketRequest, ReplyRequest
 
 tickets_router = APIRouter()
 
@@ -14,17 +14,6 @@ def _current_user(authorization: str):
     if not session:
         return None
     return auth.find_by_username(session["username"])
-
-
-class CreateTicketRequest(BaseModel):
-    description: str
-    tried_steps: str = ""
-    evidence: str = ""
-
-
-class ReplyRequest(BaseModel):
-    ticket_id: str
-    content: str
 
 
 @tickets_router.post("/tickets")

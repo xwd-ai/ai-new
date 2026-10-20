@@ -1,21 +1,11 @@
 from fastapi import APIRouter, Header
-from pydantic import BaseModel
 
 from backend import chat as chat_service
 from backend.database import SessionLocal
 from backend.models import Conversation, Message
+from backend.schemas import ChatRequest, ChatResponse
 
 chat_router = APIRouter()
-
-
-class ChatRequest(BaseModel):
-    message: str
-
-
-class ChatResponse(BaseModel):
-    reply: str
-    suggest_ticket: bool = False
-    sources: list = []
 
 
 @chat_router.post("/chat", response_model=ChatResponse)

@@ -1,19 +1,9 @@
 from fastapi import APIRouter, Header
-from pydantic import BaseModel
 
 from backend import auth
+from backend.schemas import LoginRequest, LoginResponse
 
 auth_router = APIRouter()
-
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-
-class LoginResponse(BaseModel):
-    token: str
-    user: dict
 
 
 @auth_router.post("/login", response_model=LoginResponse)
