@@ -185,3 +185,88 @@ def get_knowledge(knowledge_id: str) -> dict | None:
         return doc.to_dict() if doc else None
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# 向量召回
+# ---------------------------------------------------------------------------
+
+# 候选预取深度：召回阶段多取一些，给后续去重与重排留出空间。
+# 目标条数较多时按倍数放大，但至少保证一个基础池。
+_PREFETCH_MULTIPLIER = 5
+_PREFETCH_FLOOR = 50
+
+
+def _prefetch_depth(top_k: int) -> int:
+    """计算召回应取回的候选条数。"""
+    return max(top_k * _PREFETCH_MULTIPLIER, _PREFETCH_FLOOR)
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    """余弦相似度；任一向量为零向量时返回 0。"""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na == 0 or nb == 0:
+        return 0.0
+    return dot / (na * nb)
+
+
+def _doc_text(item: dict) -> str:
+    """拼出用于向量化的文档文本：标题 + 关键词 + 正文。"""
+    keywords = "、".join(item.get("keywords", []))
+    return f"{item.get('title', '')}\n{keywords}\n{item.get('content', '')}"
+
+
+def search_knowledge_by_vector(
+    query: str,
+    *,
+    top_k: int = 3,
+    embedding_provider=None,
+) -> list[dict]:
+    """按向量相似度检索知识条目。
+
+    embedding 不可用（未配置密钥、网络失败、返回异常）时返回空列表，
+    由调用方降级到关键词检索，避免整个检索链路因模型不可用而失败。
+    """
+    if embedding_provider is None:
+        return []
+
+    docs = _all_docs()
+    if not docs:
+        return []
+
+    try:
+        query_vector = embedding_provider.embed(query)
+        doc_vectors = embedding_provider.embed_many([_doc_text(d) for d in docs])
+    except Exception:  # noqa: BLE001 - 模型不可用时统一降级
+        return []
+
+    if not query_vector or len(doc_vectors) != len(docs):
+        return []
+
+    scored: list[tuple[dict, float]] = []
+    for item, vec in zip(docs, doc_vectors):
+        sim = _cosine(query_vector, vec)
+        if sim > 0:
+            scored.append((item, sim))
+
+    scored.sort(key=lambda pair: pair[1], reverse=True)
+
+    results: list[SearchResult] = []
+    for item, sim in scored[:top_k]:
+        results.append(
+            SearchResult(
+                id=item["id"],
+                title=item["title"],
+                kind=item["kind"],
+                content=item["content"],
+                keywords=item.get("keywords", []),
+                score=max(0.0, min(1.0, sim)),
+                match_type="vector",
+            )
+        )
+    return [r.to_dict() for r in results]
+
