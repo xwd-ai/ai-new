@@ -270,3 +270,114 @@ def search_knowledge_by_vector(
         )
     return [r.to_dict() for r in results]
 
+
+# ---------------------------------------------------------------------------
+# 多路融合（RRF）
+# ---------------------------------------------------------------------------
+
+# RRF 平滑常数：越大越弱化「第一名」的优势，结果更平均
+_RRF_K = 60
+# 两路召回的相对权重：向量路更擅长语义相近，关键词路更擅长精确术语
+_RRF_VECTOR_WEIGHT = 0.7
+_RRF_KEYWORD_WEIGHT = 0.3
+
+
+def fuse_rrf(
+    *,
+    vector_results: list[dict],
+    keyword_results: list[dict],
+    top_k: int = 3,
+    k: int = _RRF_K,
+    vector_weight: float = _RRF_VECTOR_WEIGHT,
+    keyword_weight: float = _RRF_KEYWORD_WEIGHT,
+) -> list[dict]:
+    """用 RRF（倒数排名融合）合并两路召回结果。
+
+    融合只依赖各自列表中的**名次**，不直接相加原始分数——向量相似度与
+    BM25 分数量纲不同，直接相加会让其中一路压倒另一路。
+
+    融合分再按理论最大值 ``(vw+kw)/(k+1)`` 归一化到 [0, 1]，
+    使混合结果与单路结果的分数仍可比较。
+    """
+    if not vector_results and not keyword_results:
+        return []
+
+    # 记录每个条目在两路中的 1-based 名次（同一路内重复取最优名次）
+    vector_rank: dict[str, int] = {}
+    keyword_rank: dict[str, int] = {}
+    # 保留条目内容，优先用向量路（字段更完整），缺失时用关键词路
+    items: dict[str, dict] = {}
+
+    for rank, item in enumerate(vector_results, start=1):
+        doc_id = item["id"]
+        vector_rank.setdefault(doc_id, rank)
+        items.setdefault(doc_id, item)
+    for rank, item in enumerate(keyword_results, start=1):
+        doc_id = item["id"]
+        keyword_rank.setdefault(doc_id, rank)
+        items.setdefault(doc_id, item)
+
+    max_rrf = (vector_weight + keyword_weight) / (k + 1)
+
+    fused: list[dict] = []
+    for doc_id, item in items.items():
+        score = 0.0
+        sources: list[str] = []
+        if doc_id in vector_rank:
+            score += vector_weight / (k + vector_rank[doc_id])
+            sources.append("vector")
+        if doc_id in keyword_rank:
+            score += keyword_weight / (k + keyword_rank[doc_id])
+            sources.append("keyword")
+        normalized = score / max_rrf if max_rrf > 0 else 0.0
+
+        matched = set(sources)
+        if matched == {"vector", "keyword"}:
+            match_type = "hybrid"
+        elif sources:
+            match_type = sources[0]
+        else:
+            match_type = "keyword"
+
+        fused.append(
+            {
+                **item,
+                "score": round(min(1.0, max(0.0, normalized)), 4),
+                "match_type": match_type,
+            }
+        )
+
+    # 融合分降序；同分时按 id 稳定排序，保证结果可复现
+    fused.sort(key=lambda r: (-r["score"], r["id"]))
+    return fused[:top_k]
+
+
+def search_knowledge_hybrid(
+    query: str,
+    *,
+    top_k: int = 3,
+    embedding_provider=None,
+) -> list[dict]:
+    """混合检索入口：关键词与向量两路召回后做 RRF 融合。
+
+    向量路不可用（未配置模型或调用失败）时自动退化为纯关键词检索，
+    保证检索始终有结果、不会因为模型不可用而整体失败。
+    """
+    depth = _prefetch_depth(top_k)
+
+    keyword_results = search_knowledge(query, top_k=depth)
+    vector_results = search_knowledge_by_vector(
+        query, top_k=depth, embedding_provider=embedding_provider
+    )
+
+    if not vector_results:
+        # 单路降级：直接返回关键词结果
+        return keyword_results[:top_k]
+
+    return fuse_rrf(
+        vector_results=vector_results,
+        keyword_results=keyword_results,
+        top_k=top_k,
+    )
+
+
