@@ -8,7 +8,7 @@ class Ticket(Base):
     __tablename__ = "tickets"
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
-    dedup_key: Mapped[str] = mapped_column(String, nullable=False)
+    dedup_key: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     user_id: Mapped[str] = mapped_column(String, nullable=False)
     user_name: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str] = mapped_column(String, nullable=False)
