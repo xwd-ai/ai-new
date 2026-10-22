@@ -381,3 +381,95 @@ def search_knowledge_hybrid(
     )
 
 
+# ---------------------------------------------------------------------------
+# 相关性重排
+# ---------------------------------------------------------------------------
+
+# 送进重排模型的候选上限：每个候选都是一次计费调用，
+# 超量候选只会增加成本与延迟，收益很低。
+_MAX_RERANK_CANDIDATES = 200
+
+
+def build_passage(item: dict) -> str:
+    """把检索条目拼成送进重排模型的文本片段。
+
+    顺序为标题 → 关键词 → 正文：标题与关键词是判断主题的最强信号，
+    放在最前面可以让模型在长正文被截断时仍抓到重点。
+    """
+    title = item.get("title", "") or ""
+    keywords = "、".join(item.get("keywords", []) or [])
+    content = item.get("content", "") or ""
+    parts = [p for p in (title, keywords, content) if p]
+    return "\n".join(parts)
+
+
+def rerank_results(
+    query: str,
+    results: list[dict],
+    *,
+    rerank_provider=None,
+    top_k: int | None = None,
+    threshold: float = 0.0,
+) -> list[dict]:
+    """用重排模型按与查询的相关性重新排序候选。
+
+    重排模型只判断「这段内容与这个问题是否相关」，不负责召回，
+    因此它只能调整已有候选的顺序与取舍，不会引入新条目。
+
+    - 模型不可用或调用失败：原样返回输入顺序，不阻断检索链路。
+    - ``threshold`` 用来过滤低相关候选；全部低于阈值时保留最优一条，
+      避免用户拿到空结果。
+    """
+    if not results:
+        return []
+    if rerank_provider is None:
+        return results[:top_k] if top_k else results
+
+    # 控制送审候选数量，避免无意义的调用成本
+    candidates = results[:_MAX_RERANK_CANDIDATES]
+    passages = [build_passage(r) for r in candidates]
+
+    # 无有效文本的候选无法打分，保持原位不动
+    scorable = [(i, p) for i, p in enumerate(passages) if p.strip()]
+    if not scorable:
+        return results[:top_k] if top_k else results
+
+    try:
+        ranked = rerank_provider.rerank(
+            query, [p for _, p in scorable], top_n=len(scorable)
+        )
+    except Exception:  # noqa: BLE001 - 重排失败时降级为原顺序
+        return results[:top_k] if top_k else results
+
+    if not ranked:
+        return results[:top_k] if top_k else results
+
+    ordered: list[dict] = []
+    for hit in ranked:
+        # 重排返回的下标指向 scorable，需要映射回 candidates 的位置
+        if not (0 <= hit.index < len(scorable)):
+            continue
+        original_index = scorable[hit.index][0]
+        item = dict(candidates[original_index])
+        item["rerank_score"] = round(float(hit.relevance_score), 4)
+        # 保留召回分，便于对比重排前后的变化
+        item.setdefault("recall_score", item.get("score", 0.0))
+        item["score"] = round(min(1.0, max(0.0, float(hit.relevance_score))), 4)
+        item["match_type"] = "rerank"
+        ordered.append(item)
+
+    if not ordered:
+        return results[:top_k] if top_k else results
+
+    if threshold > 0:
+        passing = [r for r in ordered if r["score"] >= threshold]
+        if passing:
+            ordered = passing
+        else:
+            # 全部低于阈值时保留最优一条，避免空结果
+            ordered = ordered[:1]
+
+    return ordered[:top_k] if top_k else ordered
+
+
+
