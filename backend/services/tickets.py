@@ -53,7 +53,16 @@ def create_ticket(
     description: str,
     tried_steps: str,
     evidence: str,
-) -> dict:
+) -> tuple[dict, bool]:
+    """创建工单，返回 (工单数据, 是否新建)。
+
+    同一用户同一问题（dedup_key）已有未解决工单时，直接返回原工单，
+    并标记 created=False，调用方据此区分「新建」与「命中已有」，避免重复建单。
+    """
+    description = (description or "").strip()
+    if not description:
+        raise ValueError("问题描述不能为空")
+
     key = _dedup_key(user_id, description)
     # 建单临界区接入 advisory lock：同一意图（dedup_key）的并发建单在此串行执行，
     # 先到者建单并提交，后到者重查即可命中已有工单，避免并发下重复建单。
@@ -64,7 +73,7 @@ def create_ticket(
             .first()
         )
         if existing:
-            return existing.to_dict()
+            return existing.to_dict(), False
 
         ticket = Ticket(
             id=_next_id(db),
@@ -81,7 +90,7 @@ def create_ticket(
         db.add(ticket)
         db.flush()
         db.refresh(ticket)
-        return ticket.to_dict()
+        return ticket.to_dict(), True
 
 
 def list_tickets() -> list[dict]:

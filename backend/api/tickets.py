@@ -37,14 +37,18 @@ def create_ticket(req: CreateTicketRequest, authorization: str = Header(default=
         finally:
             db.close()
 
-    ticket = tickets.create_ticket(
+    ticket, created = tickets.create_ticket(
         user_id=user["id"],
         user_name=user["name"],
         description=req.description,
         tried_steps=tried_steps,
         evidence=req.evidence,
     )
-    return {"ticket": ticket}
+    return {
+        "ticket": ticket,
+        "created": created,
+        "message": "工单已创建" if created else "该问题已有未解决工单，已返回原工单",
+    }
 
 
 @tickets_router.get("/tickets")

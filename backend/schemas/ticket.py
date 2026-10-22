@@ -1,12 +1,35 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 
 class CreateTicketRequest(BaseModel):
-    description: str
-    tried_steps: str = ""
-    evidence: str = ""
+    """建单请求：描述必填且非空白，其余字段限长。"""
+
+    description: str = Field(..., min_length=1, max_length=500, description="问题描述")
+    tried_steps: str = Field(default="", max_length=1000, description="已尝试步骤")
+    evidence: str = Field(default="", max_length=1000, description="排查依据")
+
+    @field_validator("description")
+    @classmethod
+    def _validate_description(cls, v: str) -> str:
+        text = (v or "").strip()
+        if not text:
+            raise ValueError("问题描述不能为空")
+        return text
+
+    @field_validator("tried_steps", "evidence")
+    @classmethod
+    def _strip_optional(cls, v: str) -> str:
+        return (v or "").strip()
 
 
 class ReplyRequest(BaseModel):
-    ticket_id: str
-    content: str
+    ticket_id: str = Field(..., min_length=1, max_length=64)
+    content: str = Field(..., min_length=1, max_length=2000)
+
+    @field_validator("content")
+    @classmethod
+    def _validate_content(cls, v: str) -> str:
+        text = (v or "").strip()
+        if not text:
+            raise ValueError("回复内容不能为空")
+        return text
