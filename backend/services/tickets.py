@@ -55,9 +55,9 @@ def create_ticket(
     evidence: str,
 ) -> dict:
     key = _dedup_key(user_id, description)
-    db = SessionLocal()
-    try:
-        # 幂等：同一用户同一问题只建一张单，重复确认返回已有工单
+    # 建单临界区接入 advisory lock：同一意图（dedup_key）的并发建单在此串行执行，
+    # 先到者建单并提交，后到者重查即可命中已有工单，避免并发下重复建单。
+    with advisory_lock(key) as db:
         existing = (
             db.query(Ticket)
             .filter(Ticket.dedup_key == key, Ticket.status != "resolved")
@@ -79,11 +79,9 @@ def create_ticket(
             replies=[],
         )
         db.add(ticket)
-        db.commit()
+        db.flush()
         db.refresh(ticket)
         return ticket.to_dict()
-    finally:
-        db.close()
 
 
 def list_tickets() -> list[dict]:
