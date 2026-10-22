@@ -389,6 +389,28 @@ def search_knowledge_hybrid(
 # 超量候选只会增加成本与延迟，收益很低。
 _MAX_RERANK_CANDIDATES = 200
 
+# 阈值降级参数：当所有候选都不过阈值时，按倍数放宽一次再试。
+# 降级只发生一次，且不会降到 degrade_floor 以下——过低的阈值等于没有过滤。
+_DEGRADE_FLOOR = 0.3
+_DEGRADE_FACTOR = 0.7
+
+# 保底分：阈值全不过时，最佳候选至少要达到这个分数才保留。
+# 低于它说明这段内容和问题基本无关，返回空比硬塞一条更诚实。
+_FALLBACK_MIN_SCORE = 0.15
+
+# 复合分权重：重排分反映「这段内容是否回答了问题」，召回分反映
+# 「这段内容有多容易被找到」，来源权重用于小幅偏好权威来源。
+_COMPOSITE_RERANK_WEIGHT = 0.6
+_COMPOSITE_RECALL_WEIGHT = 0.3
+_COMPOSITE_SOURCE_WEIGHT = 0.1
+
+# 来源权重：规则类文档优先级略高，FAQ 次之，普通手册为基准。
+_SOURCE_WEIGHTS = {
+    "rule": 1.0,
+    "faq": 0.8,
+    "manual": 0.6,
+}
+
 
 def build_passage(item: dict) -> str:
     """把检索条目拼成送进重排模型的文本片段。
@@ -403,6 +425,61 @@ def build_passage(item: dict) -> str:
     return "\n".join(parts)
 
 
+def composite_score(item: dict, rerank_score: float) -> float:
+    """把重排分、召回分与来源权重混合成一个总分。"""
+    recall = float(item.get("recall_score", item.get("score", 0.0)) or 0.0)
+    source_weight = _SOURCE_WEIGHTS.get(item.get("kind", ""), 0.5)
+    blended = (
+        _COMPOSITE_RERANK_WEIGHT * rerank_score
+        + _COMPOSITE_RECALL_WEIGHT * recall
+        + _COMPOSITE_SOURCE_WEIGHT * source_weight
+    )
+    return min(1.0, max(0.0, blended))
+
+
+def _apply_threshold(ordered: list[dict], threshold: float) -> tuple[list[dict], dict]:
+    """按阈值筛选候选，必要时放宽阈值或保底保留最优一条。
+
+    阈值比较的是**重排分**而非复合分：阈值回答的是「这段内容与问题是否
+    相关」，这是重排模型的判断；复合分还混入了召回分与来源权重，
+    用它做门槛会让召回容易的文档单靠召回分就通过。
+
+    返回 (保留结果, 诊断信息)。诊断信息记录本次实际生效的阈值与结果，
+    便于排查「为什么这次只召回了一条」。
+    """
+    diagnostics = {
+        "threshold": threshold,
+        "effective_threshold": threshold,
+        "degraded": False,
+        "fallback": False,
+    }
+    if threshold <= 0 or not ordered:
+        return ordered, diagnostics
+
+    def relevance(item: dict) -> float:
+        return float(item.get("rerank_score", item.get("score", 0.0)))
+
+    passing = [r for r in ordered if relevance(r) >= threshold]
+    if passing:
+        return passing, diagnostics
+
+    # 第一次降级：放宽阈值后重试
+    if threshold > _DEGRADE_FLOOR:
+        relaxed = max(threshold * _DEGRADE_FACTOR, _DEGRADE_FLOOR)
+        passing = [r for r in ordered if relevance(r) >= relaxed]
+        diagnostics["effective_threshold"] = relaxed
+        diagnostics["degraded"] = True
+        if passing:
+            return passing, diagnostics
+
+    # 仍无结果：最佳候选的相关性达到保底分才保留，否则宁可为空
+    best = ordered[0]
+    if relevance(best) >= _FALLBACK_MIN_SCORE:
+        diagnostics["fallback"] = True
+        return [best], diagnostics
+    return [], diagnostics
+
+
 def rerank_results(
     query: str,
     results: list[dict],
@@ -410,20 +487,25 @@ def rerank_results(
     rerank_provider=None,
     top_k: int | None = None,
     threshold: float = 0.0,
-) -> list[dict]:
+    with_diagnostics: bool = False,
+) -> list[dict] | tuple[list[dict], dict]:
     """用重排模型按与查询的相关性重新排序候选。
 
     重排模型只判断「这段内容与这个问题是否相关」，不负责召回，
     因此它只能调整已有候选的顺序与取舍，不会引入新条目。
 
     - 模型不可用或调用失败：原样返回输入顺序，不阻断检索链路。
-    - ``threshold`` 用来过滤低相关候选；全部低于阈值时保留最优一条，
-      避免用户拿到空结果。
+    - ``threshold`` 用于过滤低相关候选；全部不过阈值时先放宽一次，
+      仍不过则保留达到保底分的最优一条，连保底分都达不到就返回空。
+    - ``with_diagnostics`` 为真时同时返回诊断信息，用于观察阈值是否降级。
     """
     if not results:
-        return []
+        out: list[dict] = []
+        return (out, {"threshold": threshold, "effective_threshold": threshold}) if with_diagnostics else out
     if rerank_provider is None:
-        return results[:top_k] if top_k else results
+        sliced = results[:top_k] if top_k else results
+        diag = {"threshold": threshold, "effective_threshold": threshold, "skipped": "no_provider"}
+        return (sliced, diag) if with_diagnostics else sliced
 
     # 控制送审候选数量，避免无意义的调用成本
     candidates = results[:_MAX_RERANK_CANDIDATES]
@@ -432,17 +514,23 @@ def rerank_results(
     # 无有效文本的候选无法打分，保持原位不动
     scorable = [(i, p) for i, p in enumerate(passages) if p.strip()]
     if not scorable:
-        return results[:top_k] if top_k else results
+        sliced = results[:top_k] if top_k else results
+        diag = {"threshold": threshold, "effective_threshold": threshold, "skipped": "no_passage"}
+        return (sliced, diag) if with_diagnostics else sliced
 
     try:
         ranked = rerank_provider.rerank(
             query, [p for _, p in scorable], top_n=len(scorable)
         )
     except Exception:  # noqa: BLE001 - 重排失败时降级为原顺序
-        return results[:top_k] if top_k else results
+        sliced = results[:top_k] if top_k else results
+        diag = {"threshold": threshold, "effective_threshold": threshold, "skipped": "model_error"}
+        return (sliced, diag) if with_diagnostics else sliced
 
     if not ranked:
-        return results[:top_k] if top_k else results
+        sliced = results[:top_k] if top_k else results
+        diag = {"threshold": threshold, "effective_threshold": threshold, "skipped": "empty"}
+        return (sliced, diag) if with_diagnostics else sliced
 
     ordered: list[dict] = []
     for hit in ranked:
@@ -451,25 +539,29 @@ def rerank_results(
             continue
         original_index = scorable[hit.index][0]
         item = dict(candidates[original_index])
-        item["rerank_score"] = round(float(hit.relevance_score), 4)
+        model_score = min(1.0, max(0.0, float(hit.relevance_score)))
+        item["rerank_score"] = round(model_score, 4)
         # 保留召回分，便于对比重排前后的变化
         item.setdefault("recall_score", item.get("score", 0.0))
-        item["score"] = round(min(1.0, max(0.0, float(hit.relevance_score))), 4)
+        item["score"] = round(composite_score(item, model_score), 4)
         item["match_type"] = "rerank"
         ordered.append(item)
 
     if not ordered:
-        return results[:top_k] if top_k else results
+        sliced = results[:top_k] if top_k else results
+        diag = {"threshold": threshold, "effective_threshold": threshold, "skipped": "no_valid_index"}
+        return (sliced, diag) if with_diagnostics else sliced
 
-    if threshold > 0:
-        passing = [r for r in ordered if r["score"] >= threshold]
-        if passing:
-            ordered = passing
-        else:
-            # 全部低于阈值时保留最优一条，避免空结果
-            ordered = ordered[:1]
+    # 重排模型通常已按分数降序返回，这里再排一次以防供应商未排序
+    ordered.sort(key=lambda r: -r["score"])
 
-    return ordered[:top_k] if top_k else ordered
+    ordered, diag = _apply_threshold(ordered, threshold)
+    diag["candidates"] = len(scorable)
+    diag["returned"] = len(ordered[:top_k]) if top_k else len(ordered)
+
+    final = ordered[:top_k] if top_k else ordered
+    return (final, diag) if with_diagnostics else final
+
 
 
 
