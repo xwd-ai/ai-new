@@ -563,5 +563,104 @@ def rerank_results(
     return (final, diag) if with_diagnostics else final
 
 
+# ---------------------------------------------------------------------------
+# 去冗余（MMR）
+# ---------------------------------------------------------------------------
+
+# MMR 的 λ：越大越看重相关性，越小越看重多样性。
+# 0.7 表示「相关性仍是主导，但明显重复的内容会被挤到后面」。
+_MMR_LAMBDA = 0.7
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    """两个词元集合的 Jaccard 相似度；任一为空时视为不相似。"""
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    if inter == 0:
+        return 0.0
+    return inter / len(a | b)
+
+
+def _item_token_set(item: dict) -> set[str]:
+    """取条目用于去重比对的词元集合。
+
+    这里保留单字：去重看的是「两段文字是否在讲同一件事」，
+    单字的重叠同样是有效信号。检索打分那侧过滤单字是为了压噪声，
+    两个用途目标不同，不能共用同一套筛子。
+    """
+    text = build_passage(item)
+    return set(tokenize(text))
+
+
+def select_mmr(
+    results: list[dict],
+    top_k: int,
+    *,
+    lambda_: float = _MMR_LAMBDA,
+) -> list[dict]:
+    """用最大边际相关（MMR）从候选中选出既相关又互不重复的若干条。
+
+    贪心选择：每轮挑出 ``λ×相关性 − (1−λ)×已选条目中的最大相似度``
+    最高的候选。这样当多篇文档讲的是同一件事时，只有最相关的一篇
+    会被保留，剩余位置让给其它角度的内容。
+
+    输入需已按相关性降序，函数内部取 ``score`` 作为相关性。
+    """
+    if top_k <= 0 or not results:
+        return []
+
+    candidates = list(results)
+    if len(candidates) <= top_k:
+        return candidates
+
+    tokens = [_item_token_set(c) for c in candidates]
+    selected: list[int] = []
+    remaining = list(range(len(candidates)))
+
+    while remaining and len(selected) < top_k:
+        best_pos = 0
+        best_score = float("-inf")
+        for pos, idx in enumerate(remaining):
+            relevance = float(candidates[idx].get("score", 0.0))
+            # 首条没有冗余项，直接按相关性取
+            if not selected:
+                mmr = relevance
+            else:
+                redundancy = max(_jaccard(tokens[idx], tokens[s]) for s in selected)
+                mmr = lambda_ * relevance - (1.0 - lambda_) * redundancy
+            if mmr > best_score:
+                best_score = mmr
+                best_pos = pos
+        selected.append(remaining.pop(best_pos))
+
+    return [candidates[i] for i in selected]
+
+
+def rerank_with_mmr(
+    query: str,
+    results: list[dict],
+    *,
+    rerank_provider=None,
+    top_k: int = 3,
+    threshold: float = 0.0,
+    lambda_: float = _MMR_LAMBDA,
+) -> list[dict]:
+    """重排后再做 MMR 去冗余，返回最终用于回答的若干条。
+
+    这是检索链路的收口函数：召回 → 融合 → 重排 → 阈值 → 去冗余。
+    """
+    candidate_count = max(top_k * 3, top_k)
+    reranked = rerank_results(
+        query,
+        results,
+        rerank_provider=rerank_provider,
+        top_k=candidate_count,
+        threshold=threshold,
+    )
+    return select_mmr(reranked, top_k, lambda_=lambda_)
+
+
+
 
 
