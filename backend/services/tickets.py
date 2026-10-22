@@ -1,7 +1,8 @@
 import hashlib
 import time
+from contextlib import contextmanager
 
-from sqlalchemy import func
+from sqlalchemy import func, text
 
 from backend.database import SessionLocal
 from backend.models import Ticket
@@ -14,6 +15,26 @@ from backend.models import Ticket
 
 def _dedup_key(user_id: str, description: str) -> str:
     return hashlib.sha256(f"{user_id}::{description}".encode()).hexdigest()
+
+
+@contextmanager
+def advisory_lock(key: str):
+    """建单 advisory lock：串行化同一意图（dedup_key）的并发建单。
+
+    SQLite 无 PG 的 advisory lock 原语，这里借数据库连接级的写锁实现等价效果：
+    持锁期间独占建单临界区，同一 key 的重复请求排队串行执行，避免并发下重复建单。
+    """
+    db = SessionLocal()
+    try:
+        # BEGIN IMMEDIATE 立即获取写锁，其他会话的写操作在此阻塞直到本事务提交/回滚
+        db.execute(text("BEGIN IMMEDIATE"))
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 def _next_id(db) -> str:
