@@ -24,8 +24,10 @@ SYSTEM_PROMPT = (
     "你是一家虚拟软件公司的智能客服助手。"
     "负责帮助用户解决产品使用问题，并判断是否需要转人工或提交工单。"
     "回答要专业、简洁、友好。"
-    "如果提供了参考资料（知识库条目、订单信息），请基于它们回答，"
-    "并在引用时用 [来源: 标题] 标注出处。"
+    "如果提供了参考资料（知识库条目、订单信息），请基于它们回答。"
+    "引用资料时，在对应句子后面写 <ref id=\"cN\"/> 标注出处，"
+    "其中 cN 是资料编号；只引用确实支持该句的编号，"
+    "没有编号或编号不存在的资料不要引用。"
 )
 
 
@@ -51,14 +53,21 @@ def chat_reply(
         messages.append({"role": "system", "content": " ".join(lines)})
 
     # 注入检索到的知识（作为参考资料）
+    # knowledge 中的条目若带 handle，则以编号形式呈现，模型据此引用
     if knowledge:
-        kb = "\n\n".join(
-            f"[来源: {k['title']}]\n{k['content']}" for k in knowledge
-        )
+        blocks = []
+        for k in knowledge:
+            handle = k.get("handle")
+            label = f"[{handle}] " if handle else ""
+            blocks.append(f"{label}{k['title']}\n{k['content']}")
+        kb = "\n\n".join(blocks)
         messages.append(
             {
                 "role": "system",
-                "content": "以下是相关知识库资料，请基于它们回答并标注来源：\n\n" + kb,
+                "content": (
+                    "以下是相关知识库资料，请基于它们回答。"
+                    "每条资料前的方括号里是它的编号，引用时使用该编号：\n\n" + kb
+                ),
             }
         )
 

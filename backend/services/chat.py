@@ -2,7 +2,7 @@ import time
 import uuid
 
 from backend.database import SessionLocal
-from backend.services import knowledge, llm, orders
+from backend.services import citations, knowledge, llm, orders
 from backend.models import Conversation, Message, TriedStep
 from backend.providers import build_chat_provider
 
@@ -130,7 +130,8 @@ def history(conversation_id: str, limit: int = 8) -> list[dict]:
 def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
     """编排一次对话回复：查订单 → 检索手册 → 生成带来源回答。
 
-    返回 (reply, sources, suggest_ticket)。
+    返回 (reply, sources, suggest_ticket)。sources 里带有的 ``handle``
+    就是回答中引用用的编号，前端可据此回查原文。
     """
     conversation_id = get_or_create_conversation(user_id)
     context = history(conversation_id)
@@ -138,7 +139,16 @@ def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
     # 匿名用户无订单，直接跳过「查订单」环节
     order = orders.query_order(user_id) if user_id != "anonymous" else None
     matched = knowledge.search_knowledge(message)
-    reply = llm.chat_reply(message, context, matched, order, _chat_provider)
+
+    # 为本次检索到的资料分配请求内有效的短句柄，模型只看到编号
+    registry = citations.SourceRegistry()
+    prompt_items = citations.build_prompt_items(matched, registry)
+
+    reply = llm.chat_reply(message, context, prompt_items, order, _chat_provider)
+
+    # 把模型输出里的编号还原成可读的来源标注；
+    # 编造或未注册的编号会被丢弃，避免出现无出处的引用
+    reply = citations.decode_refs(reply, registry)
 
     append_message(conversation_id, "user", message)
     append_message(conversation_id, "assistant", reply)
@@ -150,7 +160,5 @@ def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
         k in message
         for k in ("失败", "报错", "不行", "解决不了", "无效", "工单", "不能用", "退款")
     )
-    sources = [
-        {"id": k["id"], "title": k["title"], "kind": k["kind"]} for k in matched
-    ]
+    sources = citations.public_sources(registry)
     return reply, sources, suggest
