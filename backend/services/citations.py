@@ -182,3 +182,46 @@ def public_sources(registry: SourceRegistry) -> list[dict]:
         }
         for c in registry.citations()
     ]
+
+
+# ---------------------------------------------------------------------------
+# 历史引用处理
+# ---------------------------------------------------------------------------
+
+# 已解码的来源标注：[来源: xxx]
+_SOURCE_LABEL_RE = re.compile(r"\[来源:\s*[^\]]*\]")
+
+
+def strip_citation_marks(text: str) -> str:
+    """剥离文本里的引用标记，只留下可读正文。
+
+    用于历史消息：上一轮回答里引用了哪些来源，那只证明上一轮检索到了
+    这些内容，**不能**作为本轮回答的证据。把标记从历史里去掉，
+    模型就不会把旧引用误当成本轮的可用证据继续沿用。
+    """
+    if not text:
+        return text
+    cleaned = _REF_TAG_RE.sub("", text)
+    cleaned = _REF_LOOSE_RE.sub("", cleaned)
+    cleaned = _SOURCE_LABEL_RE.sub("", cleaned)
+    # 清理引用被移除后残留的连续空格
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    return cleaned.strip()
+
+
+def history_as_context(messages: list[dict]) -> list[dict]:
+    """把历史消息转成喂给模型的上下文。
+
+    助手侧的引用标记会被剥离：历史引用只用于维持对话连贯性
+    （知道上轮聊了什么），不构成对本轮回答的授权。
+    用户侧消息原样保留。
+    """
+    context: list[dict] = []
+    for message in messages:
+        role = message.get("role", "")
+        content = message.get("content", "")
+        if role == "assistant":
+            content = strip_citation_marks(content)
+        context.append({"role": role, "content": content})
+    return context
+

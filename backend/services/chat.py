@@ -134,7 +134,8 @@ def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
     就是回答中引用用的编号，前端可据此回查原文。
     """
     conversation_id = get_or_create_conversation(user_id)
-    context = history(conversation_id)
+    # 历史里的引用标记会被剥离：上轮引用过的来源不构成本轮回答的证据
+    context = citations.history_as_context(history(conversation_id))
 
     # 匿名用户无订单，直接跳过「查订单」环节
     order = orders.query_order(user_id) if user_id != "anonymous" else None
