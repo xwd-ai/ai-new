@@ -2,7 +2,7 @@
 # 各领域契约拆分到子模块，此处统一 re-export。
 
 from backend.schemas.auth import LoginRequest, LoginResponse
-from backend.schemas.chat import ChatRequest, ChatResponse
+from backend.schemas.chat import ChatRequest, ChatResponse, SourceDetail
 from backend.schemas.ticket import CreateTicketRequest, ReplyRequest
 
 __all__ = [
@@ -12,4 +12,5 @@ __all__ = [
     "LoginRequest",
     "LoginResponse",
     "ReplyRequest",
+    "SourceDetail",
 ]

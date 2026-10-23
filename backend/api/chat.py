@@ -1,9 +1,9 @@
-from fastapi import APIRouter, Header
+from fastapi import APIRouter, Header, HTTPException
 
 from backend.database import SessionLocal
-from backend.services import chat as chat_service
+from backend.services import chat as chat_service, knowledge
 from backend.models import Conversation, Message
-from backend.schemas import ChatRequest, ChatResponse
+from backend.schemas import ChatRequest, ChatResponse, SourceDetail
 
 chat_router = APIRouter()
 
@@ -16,6 +16,25 @@ def chat(req: ChatRequest, authorization: str = Header(default="")) -> ChatRespo
     reply, sources, suggest = chat_service.build_reply(user_id, req.message)
 
     return ChatResponse(reply=reply, suggest_ticket=suggest, sources=sources)
+
+
+@chat_router.get("/sources/{source_id}", response_model=SourceDetail)
+def source_detail(source_id: str) -> SourceDetail:
+    """按来源编号回查原文，供回答中的来源标注点击后查看。
+
+    只返回知识库条目本身的内容；不存在时返回 404，便于前端区分
+    「来源已失效」与「加载失败」。
+    """
+    doc = knowledge.get_knowledge(source_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="来源不存在")
+    return SourceDetail(
+        id=doc["id"],
+        title=doc["title"],
+        kind=doc["kind"],
+        content=doc["content"],
+        keywords=doc.get("keywords", []),
+    )
 
 
 @chat_router.get("/conversation")
