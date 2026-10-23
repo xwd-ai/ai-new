@@ -64,6 +64,49 @@ def is_valid_status(value: str) -> bool:
     return value in {s.value for s in TicketStatus}
 
 
+class TicketTransitionError(Exception):
+    """工单状态非法流转业务异常。
+
+    当请求的流转不在合法流转表中，或涉及未知状态值时抛出。
+    调用方据此向用户返回明确的错误信息，而非让底层异常直接上抛。
+    """
+
+    def __init__(
+        self,
+        current: str,
+        target: str,
+        message: str | None = None,
+    ):
+        self.current = current
+        self.target = target
+        self.message = message or f"非法状态流转：{current} -> {target}"
+        super().__init__(self.message)
+
+
+def validate_transition(
+    current: TicketStatus | str,
+    target: TicketStatus | str,
+) -> None:
+    """校验工单状态流转是否合法，非法时抛出 TicketTransitionError。
+
+    入参同时接受枚举或字符串：字符串会先校验是否为已知状态值，
+    再解析为枚举后走合法流转表校验，保证「未知状态」与「非法流转」都能被明确拒绝。
+    """
+    if isinstance(current, str):
+        if not is_valid_status(current):
+            raise TicketTransitionError(current, target, message=f"未知的当前状态：{current}")
+        current = TicketStatus(current)
+    if isinstance(target, str):
+        if not is_valid_status(target):
+            raise TicketTransitionError(
+                current.value, target, message=f"未知的目标状态：{target}"
+            )
+        target = TicketStatus(target)
+
+    if not can_transition(current, target):
+        raise TicketTransitionError(current.value, target.value)
+
+
 class Ticket(Base):
     __tablename__ = "tickets"
 
