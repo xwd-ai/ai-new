@@ -6,6 +6,7 @@ from sqlalchemy import func, text
 
 from backend.database import SessionLocal
 from backend.models import Ticket
+from backend.models.ticket import validate_transition
 
 # 工单持久化到 SQLite 数据库
 # 一个工单对应一次「问题 → 排查 → 建单」的闭环
@@ -112,6 +113,11 @@ def get_ticket(ticket_id: str) -> dict | None:
 
 
 def add_reply(ticket_id: str, replier: str, content: str) -> dict | None:
+    """追加人工回复，并将待处理工单推进到处理中。
+
+    状态变更统一走流转校验：仅 open 状态允许伴随回复自动流转到 in_progress，
+    其余状态回复时不改变状态（保持当前状态不变），非法流转由校验函数拒绝。
+    """
     db = SessionLocal()
     try:
         t = db.query(Ticket).filter(Ticket.id == ticket_id).first()
@@ -120,7 +126,8 @@ def add_reply(ticket_id: str, replier: str, content: str) -> dict | None:
         replies = list(t.replies or [])
         replies.append({"replier": replier, "content": content, "at": time.time()})
         t.replies = replies
-        if t.status == "open":
+        if t.status != "in_progress":
+            validate_transition(t.status, "in_progress")
             t.status = "in_progress"
         db.commit()
         db.refresh(t)
@@ -130,11 +137,17 @@ def add_reply(ticket_id: str, replier: str, content: str) -> dict | None:
 
 
 def update_status(ticket_id: str, status: str) -> dict | None:
+    """更新工单状态，变更前统一经过合法流转校验。
+
+    未知状态值或非法流转会抛出 TicketTransitionError，由接口层捕获后
+    返回明确错误信息，避免非法状态写入数据库。
+    """
     db = SessionLocal()
     try:
         t = db.query(Ticket).filter(Ticket.id == ticket_id).first()
         if not t:
             return None
+        validate_transition(t.status, status)
         t.status = status
         db.commit()
         db.refresh(t)

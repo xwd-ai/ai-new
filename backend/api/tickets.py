@@ -3,6 +3,7 @@ from fastapi import APIRouter, Header
 from backend.database import SessionLocal
 from backend.services import auth, orders, tickets
 from backend.models import TriedStep
+from backend.models.ticket import TicketTransitionError
 from backend.schemas import CreateTicketRequest, ReplyRequest
 
 tickets_router = APIRouter()
@@ -91,5 +92,8 @@ def update_status(body: dict, authorization: str = Header(default="")):
         return {"error": "未登录"}
     if user["role"] != "admin":
         return {"error": "无权限"}
-    t = tickets.update_status(body.get("ticket_id"), body.get("status"))
+    try:
+        t = tickets.update_status(body.get("ticket_id"), body.get("status"))
+    except TicketTransitionError as e:
+        return {"error": str(e)}
     return {"ticket": t}
