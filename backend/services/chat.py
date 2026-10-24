@@ -2,7 +2,7 @@ import time
 import uuid
 
 from backend.database import SessionLocal
-from backend.services import agent, citations, knowledge, llm, orders, tools
+from backend.services import agent, citations, context, knowledge, llm, orders, tools
 from backend.models import Conversation, Message, TriedStep
 from backend.providers import build_chat_provider
 
@@ -160,7 +160,11 @@ def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
     """
     conversation_id = get_or_create_conversation(user_id)
     # 历史里的引用标记会被剥离：上轮引用过的来源不构成本轮回答的证据
-    context = citations.history_as_context(history(conversation_id))
+    # 再按预算压缩，保留最近若干轮完整对话，避免长历史稀释当前问题
+    compacted = context.compact_history(
+        citations.history_as_context(history(conversation_id))
+    )
+    context_messages = compacted.messages
 
     # 匿名用户无订单，直接跳过「查订单」环节
     order = orders.query_order(user_id) if user_id != "anonymous" else None
@@ -179,7 +183,7 @@ def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
     def _step(current: agent.AgentState) -> str:
         return llm.chat_step(
             message,
-            history=context,
+            history=context_messages,
             observations=current.observations,
             order=order,
             knowledge=prompt_items,
