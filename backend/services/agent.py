@@ -68,6 +68,42 @@ class LoopTransition:
 
 
 @dataclass
+class ExecutionSummary:
+    """一次执行的收尾信息。
+
+    三种「完成」需要分开看，混成一个布尔值会让人误判：
+    - ``answer``：回答本身是否产出了内容（用户看到的东西）。
+    - ``completed``：整个执行过程是否正常走完（没有异常中断）。
+    - ``tool_calls``：期间实际执行了几次检索（做了多少事）。
+
+    例如「回答为空但流程正常」「有检索但最终没结论」，都是真实存在的
+    组合，用一个 done 字段表达不了。
+    """
+
+    answer: str
+    completed: bool
+    iterations: int
+    tool_calls: int
+    empty_retries: int
+    terminal: TransitionKind
+    detail: str = ""
+
+    @property
+    def answered(self) -> bool:
+        """是否产出了对用户有意义的回答。"""
+        return bool(self.answer and self.answer.strip())
+
+    def to_dict(self) -> dict:
+        return {
+            "answered": self.answered,
+            "completed": self.completed,
+            "iterations": self.iterations,
+            "tool_calls": self.tool_calls,
+            "terminal": self.terminal.value,
+        }
+
+
+@dataclass
 class AgentState:
     """一次对话执行过程中的可变状态。
 
@@ -113,6 +149,19 @@ def finalize_answer(state: AgentState, fallback: str) -> str:
 def should_continue(state: AgentState, max_iterations: int) -> bool:
     """是否还允许再走一轮。"""
     return state.iteration < max_iterations
+
+
+def summarize(state: AgentState, transition: LoopTransition) -> ExecutionSummary:
+    """把执行状态整理成收尾信息，供调用方记录与展示。"""
+    return ExecutionSummary(
+        answer=transition.content if transition.kind is TransitionKind.COMPLETED else "",
+        completed=transition.kind is TransitionKind.COMPLETED,
+        iterations=state.iteration,
+        tool_calls=len(state.executed),
+        empty_retries=state.empty_retries,
+        terminal=transition.kind,
+        detail=transition.detail,
+    )
 
 
 # ---------------------------------------------------------------------------

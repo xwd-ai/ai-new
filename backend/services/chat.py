@@ -166,6 +166,7 @@ def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
         return citations.build_prompt_items(found, registry)
 
     transition = agent.run_loop(state, step_fn=_step, search_fn=_search)
+    summary = agent.summarize(state, transition)
 
     if transition.kind is agent.TransitionKind.COMPLETED:
         reply = transition.content
