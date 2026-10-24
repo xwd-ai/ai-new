@@ -2,7 +2,7 @@ import time
 import uuid
 
 from backend.database import SessionLocal
-from backend.services import citations, knowledge, llm, orders
+from backend.services import agent, citations, knowledge, llm, orders
 from backend.models import Conversation, Message, TriedStep
 from backend.providers import build_chat_provider
 
@@ -128,7 +128,7 @@ def history(conversation_id: str, limit: int = 8) -> list[dict]:
 
 
 def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
-    """编排一次对话回复：查订单 → 检索手册 → 生成带来源回答。
+    """编排一次对话回复：先查订单，再让模型在循环里决定检索与作答。
 
     返回 (reply, sources, suggest_ticket)。sources 里带有的 ``handle``
     就是回答中引用用的编号，前端可据此回查原文。
@@ -139,13 +139,40 @@ def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
 
     # 匿名用户无订单，直接跳过「查订单」环节
     order = orders.query_order(user_id) if user_id != "anonymous" else None
-    matched = knowledge.search_knowledge(message)
 
     # 为本次检索到的资料分配请求内有效的短句柄，模型只看到编号
     registry = citations.SourceRegistry()
-    prompt_items = citations.build_prompt_items(matched, registry)
 
-    reply = llm.chat_reply(message, context, prompt_items, order, _chat_provider)
+    # 第一轮检索用用户原话，保证「什么都不说也能答」的基本盘
+    first_items = knowledge.search_knowledge(message)
+    prompt_items = citations.build_prompt_items(first_items, registry)
+
+    state = agent.AgentState(query=message)
+    if first_items:
+        state.remember(agent._format_items(prompt_items))
+
+    def _step(current: agent.AgentState) -> str:
+        return llm.chat_step(
+            message,
+            history=context,
+            observations=current.observations,
+            order=order,
+            knowledge=prompt_items,
+            provider=_chat_provider,
+        )
+
+    def _search(query: str) -> list[dict]:
+        found = knowledge.search_knowledge(query)
+        return citations.build_prompt_items(found, registry)
+
+    transition = agent.run_loop(state, step_fn=_step, search_fn=_search)
+
+    if transition.kind is agent.TransitionKind.COMPLETED:
+        reply = transition.content
+    elif transition.kind is agent.TransitionKind.MODEL_ERROR:
+        reply = "抱歉，我这边暂时无法完成回答，请稍后再试。"
+    else:
+        reply = agent.finalize_answer(state, agent._STALLED_ANSWER)
 
     # 把模型输出里的编号还原成可读的来源标注；
     # 编造或未注册的编号会被丢弃，避免出现无出处的引用
@@ -154,8 +181,8 @@ def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
     append_message(conversation_id, "user", message)
     append_message(conversation_id, "assistant", reply)
 
-    if matched:
-        append_tried_step(user_id, f"按《{matched[0]['title']}》排查")
+    if first_items:
+        append_tried_step(user_id, f"按《{first_items[0]['title']}》排查")
 
     suggest = any(
         k in message

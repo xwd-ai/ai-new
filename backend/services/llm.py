@@ -77,3 +77,109 @@ def chat_reply(
 
     chat = provider or _get_provider()
     return chat.chat(messages)
+
+
+# ---------------------------------------------------------------------------
+# 循环执行用
+# ---------------------------------------------------------------------------
+
+# 模型在这一轮里如果还需要更多资料，用这个标记开头提出检索请求。
+# 用可解析的标记而不是自由文本，是为了让「要不要再查一次」这件事
+# 由明确的协议决定，而不是靠猜模型的语气。
+ACTION_PREFIX = "ACTION:"
+_ACTION_PATTERN = "search_knowledge"
+
+
+def chat_step(
+    message: str,
+    *,
+    history: list[dict] | None = None,
+    observations: list[str] | None = None,
+    order: dict | None = None,
+    knowledge: list[dict] | None = None,
+    provider: ChatProvider | None = None,
+) -> str:
+    """执行一轮推理：把已观察到的信息交给模型，拿到它的下一步输出。
+
+    输出有两种形态：
+    - 以 ``ACTION: search_knowledge [关键词]`` 开头：模型还想再查一次。
+    - 其它：模型的最终回答。
+
+    这里只负责组装与调用，不解析语义——解析交给调用方，
+    这样模型即使不按协议输出，也能退化成「直接回答」而不报错。
+    """
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    if order:
+        if order.get("has_order"):
+            lines = [
+                f"该用户的订单信息：{order['product_name']}（{order['product_tier']}），"
+                f"服务状态：{'服务期内' if order['in_service'] else '服务期外'}。"
+                f"包含特性：{'、'.join(order['features'])}。"
+            ]
+        else:
+            lines = ["该用户没有查询到订单记录。"]
+        messages.append({"role": "system", "content": " ".join(lines)})
+
+    if knowledge:
+        blocks = []
+        for k in knowledge:
+            handle = k.get("handle")
+            label = f"[{handle}] " if handle else ""
+            blocks.append(f"{label}{k['title']}\n{k['content']}")
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "以下是相关知识库资料，请基于它们回答。"
+                    "每条资料前的方括号里是它的编号，引用时使用该编号：\n\n"
+                    + "\n\n".join(blocks)
+                ),
+            }
+        )
+
+    if observations:
+        messages.append(
+            {
+                "role": "system",
+                "content": "已经查到的信息如下：\n\n" + "\n\n".join(observations),
+            }
+        )
+
+    if history:
+        messages.extend(history)
+
+    messages.append(
+        {
+            "role": "system",
+            "content": (
+                "如果你还需要继续检索才能回答，请只输出一行："
+                f"`{ACTION_PREFIX} {_ACTION_PATTERN} 关键词`。"
+                "如果信息已经足够，直接给出最终回答，不要再输出该指令。"
+            ),
+        }
+    )
+    messages.append({"role": "user", "content": message})
+
+    chat = provider or _get_provider()
+    return chat.chat(messages)
+
+
+def parse_action(text: str) -> dict | None:
+    """从模型输出中解析检索指令；没有指令时返回 None。"""
+    if not text:
+        return None
+    stripped = text.strip()
+    if not stripped.upper().startswith(ACTION_PREFIX):
+        return None
+    rest = stripped[len(ACTION_PREFIX):].strip()
+    if not rest:
+        return None
+    parts = rest.split(maxsplit=1)
+    action_name = parts[0].lower()
+    if action_name != _ACTION_PATTERN:
+        return None
+    query = parts[1].strip() if len(parts) > 1 else ""
+    if not query:
+        return None
+    return {"action": action_name, "query": query}
