@@ -10,7 +10,8 @@ from backend.models.ticket import validate_transition
 
 # 工单持久化到 SQLite 数据库
 # 一个工单对应一次「问题 → 排查 → 建单」的闭环
-# 工单状态机：open(待处理) -> in_progress(处理中) -> resolved(已解决)
+# 工单状态机：pending_confirm(待确认) -> open(待处理) -> in_progress(处理中) -> resolved(已解决)
+# 建单前可挂起为 pending_confirm，等待用户确认后再进入 open
 # 预置工单逻辑收敛到 backend.seed 模块
 
 
@@ -54,17 +55,22 @@ def create_ticket(
     description: str,
     tried_steps: str,
     evidence: str,
+    pending: bool = False,
 ) -> tuple[dict, bool]:
     """创建工单，返回 (工单数据, 是否新建)。
 
     同一用户同一问题（dedup_key）已有未解决工单时，直接返回原工单，
     并标记 created=False，调用方据此区分「新建」与「命中已有」，避免重复建单。
+
+    pending=True 时表示「建单前挂起」，工单初始进入待确认状态（pending_confirm），
+    等待用户二次确认后才流转为待处理（open）；默认直接以 open 状态建单。
     """
     description = (description or "").strip()
     if not description:
         raise ValueError("问题描述不能为空")
 
     key = _dedup_key(user_id, description)
+    initial_status = "pending_confirm" if pending else "open"
     # 建单临界区接入 advisory lock：同一意图（dedup_key）的并发建单在此串行执行，
     # 先到者建单并提交，后到者重查即可命中已有工单，避免并发下重复建单。
     with advisory_lock(key) as db:
@@ -84,7 +90,7 @@ def create_ticket(
             description=description,
             tried_steps=tried_steps,
             evidence=evidence,
-            status="open",
+            status=initial_status,
             created_at=time.time(),
             replies=[],
         )
