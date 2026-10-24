@@ -2,7 +2,7 @@ import time
 import uuid
 
 from backend.database import SessionLocal
-from backend.services import agent, citations, knowledge, llm, orders
+from backend.services import agent, citations, knowledge, llm, orders, tools
 from backend.models import Conversation, Message, TriedStep
 from backend.providers import build_chat_provider
 
@@ -127,6 +127,31 @@ def history(conversation_id: str, limit: int = 8) -> list[dict]:
         db.close()
 
 
+def _build_tools(user_id: str, registry: citations.SourceRegistry) -> tools.ToolRegistry:
+    """为本轮对话装配可用工具。
+
+    工具只做「取数」，不负责组织回答：检索结果仍由调用方登记句柄、
+    拼进上下文，这样引用身份的分配权始终留在对话层手里。
+    """
+
+    def search_knowledge_tool(query: str = "", **_: object) -> tools.ToolResult:
+        found = knowledge.search_knowledge(query)
+        return tools.ToolResult(success=True, data={"items": found})
+
+    def query_order_tool(**_: object) -> tools.ToolResult:
+        if user_id == "anonymous":
+            return tools.ToolResult(success=True, data={"order": None})
+        order_info = orders.query_order(user_id)
+        return tools.ToolResult(success=True, data={"order": order_info})
+
+    tool_registry = tools.ToolRegistry()
+    tool_registry.register(
+        "search_knowledge", "按关键词检索知识库资料", search_knowledge_tool
+    )
+    tool_registry.register("query_order", "查询当前用户订单与服务期", query_order_tool)
+    return tool_registry
+
+
 def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
     """编排一次对话回复：先查订单，再让模型在循环里决定检索与作答。
 
@@ -164,6 +189,12 @@ def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
     def _search(query: str) -> list[dict]:
         found = knowledge.search_knowledge(query)
         return citations.build_prompt_items(found, registry)
+
+    # 检索经工具系统执行：工具内部自带异常收敛，失败会变成一条观察结果
+    registry_tools = _build_tools(user_id, registry)
+    tool_result = registry_tools.execute("search_knowledge", query=message)
+    if not tool_result.success:
+        state.remember(f"检索失败：{tool_result.error}")
 
     transition = agent.run_loop(state, step_fn=_step, search_fn=_search)
     summary = agent.summarize(state, transition)
