@@ -23,6 +23,14 @@ from enum import Enum
 # 迟迟不给结论，把一次请求拖成无限循环。
 DEFAULT_MAX_ITERATIONS = 6
 
+# 空回答最多重试几次。模型偶尔会返回空内容（例如把预算都花在思考上），
+# 直接放弃太浪费，但也不能无限重试——超过上限就按「无结论」收口。
+MAX_EMPTY_RETRIES = 2
+
+# 连续达到输出上限的轮次上限。一次两次是偶发，连续出现说明模型
+# 被困在「写不完」的状态里，继续下去只是消耗预算。
+MAX_CONSECUTIVE_TRUNCATED = 2
+
 
 class TransitionKind(str, Enum):
     """循环的下一步动作。"""
@@ -76,6 +84,8 @@ class AgentState:
     iteration: int = 0
     # 循环结束时模型的最终回答
     answer: str = ""
+    # 连续空回答次数，拿到实质内容即归零
+    empty_retries: int = 0
 
     def remember(self, text: str) -> None:
         """记录一条观察结果，供下一轮模型参考。"""
@@ -146,7 +156,16 @@ def run_loop(
             )
 
         if not output or not output.strip():
-            # 空输出视为没有结论，交给下一轮；轮次用尽时由上层兜底
+            # 空输出现象：模型把预算花在了思考上，或这一轮没生成内容。
+            # 给有限次重试机会，而不是直接判定失败——偶发的空回复重试一次
+            # 通常就能恢复。超过上限才收口。
+            state.empty_retries += 1
+            if state.empty_retries > MAX_EMPTY_RETRIES:
+                return LoopTransition(
+                    kind=TransitionKind.MAX_ITERATIONS,
+                    content="",
+                    detail=f"连续 {state.empty_retries} 次空回答",
+                )
             if not should_continue(state, max_iterations):
                 return LoopTransition(
                     kind=TransitionKind.MAX_ITERATIONS,
@@ -154,6 +173,9 @@ def run_loop(
                     detail="模型多次返回空内容",
                 )
             continue
+
+        # 拿到实质内容，空回答计数归零
+        state.empty_retries = 0
 
         action = _parse_action(output)
         if action is None:
