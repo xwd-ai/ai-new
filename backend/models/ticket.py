@@ -1,6 +1,6 @@
 from enum import Enum
 
-from sqlalchemy import JSON, Float, String
+from sqlalchemy import JSON, Float, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base
@@ -133,4 +133,32 @@ class Ticket(Base):
             "status": self.status,
             "created_at": self.created_at,
             "replies": self.replies,
+        }
+
+
+class TicketStatusLog(Base):
+    """工单状态变更时间线记录。
+
+    每次工单状态变化（建单、流转、转人工、取消等）落一条日志，
+    记录原状态、新状态、操作人与变更时间，供详情页还原完整处理轨迹。
+    原状态为「初始创建」时 from_status 记为空字符串，表示该条是建单首条。
+    """
+
+    __tablename__ = "ticket_status_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ticket_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    from_status: Mapped[str] = mapped_column(String, default="")
+    to_status: Mapped[str] = mapped_column(String, nullable=False)
+    operator: Mapped[str] = mapped_column(String, default="system")
+    changed_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "ticket_id": self.ticket_id,
+            "from_status": self.from_status,
+            "to_status": self.to_status,
+            "operator": self.operator,
+            "changed_at": self.changed_at,
         }
