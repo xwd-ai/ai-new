@@ -160,3 +160,28 @@ def update_status(ticket_id: str, status: str) -> dict | None:
         return t.to_dict()
     finally:
         db.close()
+
+
+def transfer_to_human(ticket_id: str, reason: str = "") -> dict | None:
+    """将工单转为人工处理，并把转人工原因写入回复时间线。
+
+    转人工作为独立业务动作：入参原因会以 system 来源记录到 replies，
+    随后工单状态流转到 transferred_human。状态变更统一经过流转校验，
+    非法来源状态（如已关闭、已转人工的工单）由校验函数拒绝。
+    """
+    db = SessionLocal()
+    try:
+        t = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+        if not t:
+            return None
+        validate_transition(t.status, "transferred_human")
+        replies = list(t.replies or [])
+        entry = {"replier": "system", "content": f"转人工：{reason}".strip(), "at": time.time()}
+        replies.append(entry)
+        t.replies = replies
+        t.status = "transferred_human"
+        db.commit()
+        db.refresh(t)
+        return t.to_dict()
+    finally:
+        db.close()

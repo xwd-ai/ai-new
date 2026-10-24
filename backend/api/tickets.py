@@ -5,6 +5,7 @@ from backend.services import auth, orders, tickets
 from backend.models import TriedStep
 from backend.models.ticket import TicketTransitionError
 from backend.schemas import CreateTicketRequest, ReplyRequest
+from backend.schemas.ticket import TransferRequest
 
 tickets_router = APIRouter()
 
@@ -101,4 +102,25 @@ def update_status(body: dict, authorization: str = Header(default="")):
         t = tickets.update_status(body.get("ticket_id"), body.get("status"))
     except TicketTransitionError as e:
         return {"error": str(e)}
+    return {"ticket": t}
+
+
+@tickets_router.post("/tickets/transfer")
+def transfer_ticket(req: TransferRequest, authorization: str = Header(default="")):
+    """将工单转人工处理，记录转人工原因。
+
+    仅管理员可转人工；非法来源状态（如已关闭、已转人工的工单）会被
+    状态流转校验拒绝，返回明确错误信息。
+    """
+    user = _current_user(authorization)
+    if not user:
+        return {"error": "未登录"}
+    if user["role"] != "admin":
+        return {"error": "无权限"}
+    try:
+        t = tickets.transfer_to_human(req.ticket_id, req.reason)
+    except TicketTransitionError as e:
+        return {"error": str(e)}
+    if t is None:
+        return {"error": "工单不存在"}
     return {"ticket": t}

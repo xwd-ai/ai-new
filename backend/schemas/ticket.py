@@ -34,3 +34,15 @@ class ReplyRequest(BaseModel):
         if not text:
             raise ValueError("回复内容不能为空")
         return text
+
+
+class TransferRequest(BaseModel):
+    """转人工请求：工单号必填，转人工原因为可选说明。"""
+
+    ticket_id: str = Field(..., min_length=1, max_length=64)
+    reason: str = Field(default="", max_length=500, description="转人工原因")
+
+    @field_validator("reason")
+    @classmethod
+    def _strip_reason(cls, v: str) -> str:
+        return (v or "").strip()
