@@ -6,7 +6,7 @@ from sqlalchemy import func, text
 
 from backend.database import SessionLocal
 from backend.models import Ticket
-from backend.models.ticket import validate_transition
+from backend.models.ticket import TicketStatusLog, validate_transition
 
 # 工单持久化到 SQLite 数据库
 # 一个工单对应一次「问题 → 排查 → 建单」的闭环
@@ -47,6 +47,29 @@ def _next_id(db) -> str:
     else:
         seq = int(max_id.replace("T-", ""))
     return f"T-{seq + 1}"
+
+
+def _log_status_change(
+    db,
+    ticket_id: str,
+    from_status: str,
+    to_status: str,
+    operator: str = "system",
+) -> None:
+    """向时间线写入一条状态变更记录。
+
+    所有写接口在状态发生变化的同一事务内调用本函数，保证状态与
+    时间线落痕一致提交；原状态为「初始创建」时 from_status 记空串。
+    """
+    db.add(
+        TicketStatusLog(
+            ticket_id=ticket_id,
+            from_status=from_status,
+            to_status=to_status,
+            operator=operator,
+            changed_at=time.time(),
+        )
+    )
 
 
 def create_ticket(
@@ -97,6 +120,8 @@ def create_ticket(
         db.add(ticket)
         db.flush()
         db.refresh(ticket)
+        # 建单即首次状态落位，写入首条时间线记录（from_status 为空表示初始创建）
+        _log_status_change(db, ticket.id, "", initial_status, operator="system")
         return ticket.to_dict(), True
 
 
@@ -134,6 +159,7 @@ def add_reply(ticket_id: str, replier: str, content: str) -> dict | None:
         t.replies = replies
         if t.status != "in_progress":
             validate_transition(t.status, "in_progress")
+            _log_status_change(db, t.id, t.status, "in_progress", operator=replier)
             t.status = "in_progress"
         db.commit()
         db.refresh(t)
@@ -154,6 +180,7 @@ def update_status(ticket_id: str, status: str) -> dict | None:
         if not t:
             return None
         validate_transition(t.status, status)
+        _log_status_change(db, t.id, t.status, status, operator="system")
         t.status = status
         db.commit()
         db.refresh(t)
@@ -179,6 +206,7 @@ def transfer_to_human(ticket_id: str, reason: str = "") -> dict | None:
         entry = {"replier": "system", "content": f"转人工：{reason}".strip(), "at": time.time()}
         replies.append(entry)
         t.replies = replies
+        _log_status_change(db, t.id, t.status, "transferred_human", operator="system")
         t.status = "transferred_human"
         db.commit()
         db.refresh(t)
