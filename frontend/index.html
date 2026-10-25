@@ -271,6 +271,20 @@
       font-size: 12px; color: var(--primary); cursor: default;
     }
 
+    /* 执行过程 */
+    .trace {
+      display: flex; flex-direction: column; gap: 4px;
+      padding: 8px 10px; border-radius: 8px;
+      background: var(--surface-2); border: 1px solid var(--border);
+    }
+    .trace-label { font-size: 11px; color: var(--muted-2); letter-spacing: .5px; margin-bottom: 2px; }
+    .trace-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+    .trace-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+    .trace-dot.run { background: var(--primary); }
+    .trace-dot.ok { background: #2f9e44; }
+    .trace-dot.err { background: #e03131; }
+    .trace-dot.warn { background: #e8890c; }
+
     @media (max-width: 1080px) {
       .layout { grid-template-columns: 220px 1fr; }
       .aside { display: none; }
@@ -517,6 +531,41 @@
       scrollBottom();
     }
 
+    // 展示执行过程：把后端返回的事件渲染成一串步骤卡片
+    // 事件是「系统做过什么」的记录，与最终回答分开显示
+    function addTrace(body, trace) {
+      if (!trace || !trace.length) return;
+      // 只展示有实质动作的事件，step 本身没信息量
+      const items = trace.filter(e => e.kind === 'action' || e.kind === 'observe' || e.kind === 'error' || e.kind === 'stopped');
+      if (!items.length) return;
+
+      const wrap = document.createElement('div');
+      wrap.className = 'trace';
+      const label = document.createElement('div');
+      label.className = 'trace-label';
+      label.textContent = '执行过程';
+      wrap.appendChild(label);
+
+      items.forEach(e => {
+        const row = document.createElement('div');
+        row.className = 'trace-row';
+        if (e.kind === 'action') {
+          row.innerHTML = '<span class="trace-dot run"></span>' + '检索知识库：' + escapeHtml(e.query || '');
+        } else if (e.kind === 'observe') {
+          const n = e.count || 0;
+          row.innerHTML = '<span class="trace-dot ok"></span>' + (n > 0 ? '找到 ' + n + ' 条相关资料' : '未找到相关资料');
+        } else if (e.kind === 'error') {
+          row.innerHTML = '<span class="trace-dot err"></span>' + escapeHtml(e.message || '执行出错');
+        } else if (e.kind === 'stopped') {
+          row.innerHTML = '<span class="trace-dot warn"></span>' + escapeHtml(e.reason || '已停止');
+        }
+        wrap.appendChild(row);
+      });
+
+      body.appendChild(wrap);
+      scrollBottom();
+    }
+
     // 展示 AI 回答引用的知识来源
     function addSources(body, sources) {
       if (!sources || !sources.length) return;
@@ -558,12 +607,14 @@
       let reply = '';
       let suggest = false;
       let sources = [];
+      let trace = [];
       try {
         const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify({ message: text }) });
         const data = await res.json();
         reply = data.reply;
         suggest = data.suggest_ticket;
         sources = data.sources || [];
+        trace = data.trace || [];
       } catch (e) {
         reply = '抱歉，我暂时无法连接到服务，请稍后再试。';
       }
@@ -574,7 +625,8 @@
       typing.textContent = reply;
       typing.style.color = '';
 
-      // 展示引用来源
+      // 先展示系统做过什么，再展示引用了什么
+      addTrace(body, trace);
       addSources(body, sources);
 
       if (suggest) {
