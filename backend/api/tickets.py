@@ -124,3 +124,21 @@ def transfer_ticket(req: TransferRequest, authorization: str = Header(default=""
     if t is None:
         return {"error": "工单不存在"}
     return {"ticket": t}
+
+
+@tickets_router.get("/tickets/{ticket_id}")
+def ticket_detail(ticket_id: str, authorization: str = Header(default="")):
+    """查询单个工单详情，返回完整状态时间线（按时间升序）。
+
+    管理员可查看任意工单；普通用户仅可查看本人创建的工单，
+    越权访问返回「无权限」，工单不存在返回「工单不存在」。
+    """
+    user = _current_user(authorization)
+    if not user:
+        return {"error": "未登录"}
+    data = tickets.get_ticket(ticket_id)
+    if data is None:
+        return {"error": "工单不存在"}
+    if user["role"] != "admin" and data["user_id"] != user["id"]:
+        return {"error": "无权限"}
+    return {"ticket": data}

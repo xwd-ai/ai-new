@@ -134,11 +134,34 @@ def list_tickets() -> list[dict]:
         db.close()
 
 
+def _status_timeline(db, ticket_id: str) -> list[dict]:
+    """查询工单的完整状态变更时间线，按发生时间升序返回。
+
+    时间线记录建单落位与每次状态流转，详情页据此还原完整处理轨迹。
+    """
+    logs = (
+        db.query(TicketStatusLog)
+        .filter(TicketStatusLog.ticket_id == ticket_id)
+        .order_by(TicketStatusLog.changed_at.asc(), TicketStatusLog.id.asc())
+        .all()
+    )
+    return [log.to_dict() for log in logs]
+
+
 def get_ticket(ticket_id: str) -> dict | None:
+    """查询工单详情，附带完整状态时间线（按时间升序）。
+
+    返回的工单字典在原有字段基础上追加 status_timeline 列表，
+    供详情页还原「建单 → 每次流转」的完整处理轨迹。
+    """
     db = SessionLocal()
     try:
         t = db.query(Ticket).filter(Ticket.id == ticket_id).first()
-        return t.to_dict() if t else None
+        if not t:
+            return None
+        data = t.to_dict()
+        data["status_timeline"] = _status_timeline(db, ticket_id)
+        return data
     finally:
         db.close()
 
