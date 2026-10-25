@@ -1,8 +1,8 @@
-import time
+﻿import time
 import uuid
 
 from backend.database import SessionLocal
-from backend.services import agent, citations, context, knowledge, llm, orders, tools
+from backend.services import agent, citations, context, escalation, knowledge, llm, orders, tools
 from backend.models import Conversation, Message, TriedStep
 from backend.providers import build_chat_provider
 
@@ -220,13 +220,23 @@ def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
     if first_items:
         append_tried_step(user_id, f"按《{first_items[0]['title']}》排查")
 
-    suggest = any(
-        k in message
-        for k in ("失败", "报错", "不行", "解决不了", "无效", "工单", "不能用", "退款")
+    # 转人工判定：按服务范围与排查情况给结论，并留下判定原因
+    prior_unresolved = any(
+        k in m.get("content", "")
+        for m in context_messages
+        if m.get("role") == "user"
+        for k in ("还是不行", "还是没用", "没解决", "解决不了")
     )
+    decision = escalation.decide_escalation(
+        message,
+        order=order,
+        repeated_unresolved=prior_unresolved,
+    )
+    suggest = decision.suggest
     sources = citations.public_sources(registry)
-    global _last_summary
+    global _last_summary, _last_escalation
     _last_summary = summary
+    _last_escalation = decision
     return reply, sources, suggest
 
 
@@ -234,8 +244,14 @@ def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
 # 单独暴露而不是塞进三元组返回值，是为了不破坏既有调用方的解包写法；
 # 需要执行过程的调用方（如接口层）在这里取。
 _last_summary: agent.ExecutionSummary | None = None
+_last_escalation: escalation.EscalationDecision | None = None
 
 
 def last_summary() -> agent.ExecutionSummary | None:
     """返回最近一次对话的执行摘要（含事件列表）。"""
     return _last_summary
+
+
+def last_escalation() -> escalation.EscalationDecision | None:
+    """返回最近一次对话的转人工判定结果（含原因）。"""
+    return _last_escalation
