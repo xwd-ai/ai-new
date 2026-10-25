@@ -87,6 +87,7 @@ class ExecutionSummary:
     empty_retries: int
     terminal: TransitionKind
     detail: str = ""
+    events: list[dict] = field(default_factory=list)
 
     @property
     def answered(self) -> bool:
@@ -100,6 +101,7 @@ class ExecutionSummary:
             "iterations": self.iterations,
             "tool_calls": self.tool_calls,
             "terminal": self.terminal.value,
+            "events": list(self.events),
         }
 
 
@@ -122,6 +124,20 @@ class AgentState:
     answer: str = ""
     # 连续空回答次数，拿到实质内容即归零
     empty_retries: int = 0
+    # 执行过程中发出的事件，供前端按时间顺序展示
+    events: list[dict] = field(default_factory=list)
+    # 是否在执行过程中收集事件（关闭时不产生任何额外开销）
+    emit_events: bool = True
+
+    def emit(self, kind: str, **payload: object) -> None:
+        """记录一条执行事件。
+
+        事件是「执行过程」的记录，不是最终回答本身：即使回答失败，
+        也能从事件里看到系统做过什么、卡在哪一步。
+        """
+        if not self.emit_events:
+            return
+        self.events.append({"kind": kind, "iteration": self.iteration, **payload})
 
     def remember(self, text: str) -> None:
         """记录一条观察结果，供下一轮模型参考。"""
@@ -131,6 +147,15 @@ class AgentState:
     def action_key(self, action: dict) -> str:
         """把动作归一化成去重键，用于判断「这一步是否已经做过」。"""
         return f"{action.get('action', '')}:{action.get('query', '')}"
+
+
+# 事件类型：前端按这些名字决定怎么渲染一条执行记录
+EVENT_STEP = "step"              # 开始一轮推理
+EVENT_ACTION = "action"          # 模型要求执行检索
+EVENT_OBSERVE = "observe"        # 检索结果已返回
+EVENT_DONE = "done"              # 产出最终回答
+EVENT_STOPPED = "stopped"        # 因轮次或异常终止
+EVENT_ERROR = "error"            # 模型或工具出错
 
 
 def finalize_answer(state: AgentState, fallback: str) -> str:
@@ -161,6 +186,7 @@ def summarize(state: AgentState, transition: LoopTransition) -> ExecutionSummary
         empty_retries=state.empty_retries,
         terminal=transition.kind,
         detail=transition.detail,
+        events=list(state.events),
     )
 
 
@@ -194,14 +220,17 @@ def run_loop(
     """
     while True:
         state.iteration += 1
+        state.emit(EVENT_STEP, round=state.iteration)
 
         try:
             output = step_fn(state)
         except Exception as exc:  # noqa: BLE001 - 模型异常要转成可观测的终止态
+            detail = f"模型调用失败: {exc}"
+            state.emit(EVENT_ERROR, message=detail)
             return LoopTransition(
                 kind=TransitionKind.MODEL_ERROR,
                 content="",
-                detail=f"模型调用失败: {exc}",
+                detail=detail,
             )
 
         if not output or not output.strip():
@@ -209,13 +238,17 @@ def run_loop(
             # 给有限次重试机会，而不是直接判定失败——偶发的空回复重试一次
             # 通常就能恢复。超过上限才收口。
             state.empty_retries += 1
+            state.emit(EVENT_ERROR, message="本轮模型返回空内容", retry=state.empty_retries)
             if state.empty_retries > MAX_EMPTY_RETRIES:
+                detail = f"连续 {state.empty_retries} 次空回答"
+                state.emit(EVENT_STOPPED, reason=detail)
                 return LoopTransition(
                     kind=TransitionKind.MAX_ITERATIONS,
                     content="",
-                    detail=f"连续 {state.empty_retries} 次空回答",
+                    detail=detail,
                 )
             if not should_continue(state, max_iterations):
+                state.emit(EVENT_STOPPED, reason="模型多次返回空内容")
                 return LoopTransition(
                     kind=TransitionKind.MAX_ITERATIONS,
                     content="",
@@ -230,6 +263,7 @@ def run_loop(
         if action is None:
             # 没有检索指令，说明这是最终回答
             state.answer = output.strip()
+            state.emit(EVENT_DONE, length=len(state.answer))
             return LoopTransition(
                 kind=TransitionKind.COMPLETED,
                 content=state.answer,
@@ -239,24 +273,30 @@ def run_loop(
         key = state.action_key(action)
         if key in state.executed:
             # 同一个动作重复要求：说明模型在原地打转，直接收口
+            detail = f"重复请求同一检索动作: {key}"
+            state.emit(EVENT_STOPPED, reason=detail)
             return LoopTransition(
                 kind=TransitionKind.MAX_ITERATIONS,
                 content="",
-                detail=f"重复请求同一检索动作: {key}",
+                detail=detail,
             )
         state.executed.append(key)
+        state.emit(EVENT_ACTION, action=action["action"], query=action["query"])
 
         try:
             items = search_fn(action["query"])
         except Exception as exc:  # noqa: BLE001 - 检索失败不应中断整个对话
             state.remember(f"检索「{action['query']}」时出错：{exc}")
+            state.emit(EVENT_ERROR, message=f"检索失败: {exc}", query=action["query"])
         else:
             if items:
                 state.remember(_format_items(items))
             else:
                 state.remember(f"检索「{action['query']}」没有找到相关资料。")
+            state.emit(EVENT_OBSERVE, count=len(items), query=action["query"])
 
         if not should_continue(state, max_iterations):
+            state.emit(EVENT_STOPPED, reason="达到最大轮次")
             return LoopTransition(
                 kind=TransitionKind.MAX_ITERATIONS,
                 content="",

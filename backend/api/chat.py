@@ -15,7 +15,14 @@ def chat(req: ChatRequest, authorization: str = Header(default="")) -> ChatRespo
 
     reply, sources, suggest = chat_service.build_reply(user_id, req.message)
 
-    return ChatResponse(reply=reply, suggest_ticket=suggest, sources=sources)
+    summary = chat_service.last_summary()
+    trace = summary.to_dict()["events"] if summary else []
+    return ChatResponse(
+        reply=reply,
+        suggest_ticket=suggest,
+        sources=sources,
+        trace=trace,
+    )
 
 
 @chat_router.get("/sources/{source_id}", response_model=SourceDetail)

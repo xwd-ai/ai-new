@@ -225,4 +225,17 @@ def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
         for k in ("失败", "报错", "不行", "解决不了", "无效", "工单", "不能用", "退款")
     )
     sources = citations.public_sources(registry)
+    global _last_summary
+    _last_summary = summary
     return reply, sources, suggest
+
+
+# 最近一次对话的执行摘要。
+# 单独暴露而不是塞进三元组返回值，是为了不破坏既有调用方的解包写法；
+# 需要执行过程的调用方（如接口层）在这里取。
+_last_summary: agent.ExecutionSummary | None = None
+
+
+def last_summary() -> agent.ExecutionSummary | None:
+    """返回最近一次对话的执行摘要（含事件列表）。"""
+    return _last_summary

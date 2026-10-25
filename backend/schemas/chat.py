@@ -9,6 +9,8 @@ class ChatResponse(BaseModel):
     reply: str
     suggest_ticket: bool = False
     sources: list = []
+    # 执行过程事件：前端可据此展示「检索了什么、跑了几轮」
+    trace: list = []
 
 
 class SourceDetail(BaseModel):
