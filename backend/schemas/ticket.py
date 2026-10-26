@@ -7,7 +7,6 @@ class CreateTicketRequest(BaseModel):
     description: str = Field(..., min_length=1, max_length=500, description="问题描述")
     tried_steps: str = Field(default="", max_length=1000, description="已尝试步骤")
     evidence: str = Field(default="", max_length=1000, description="排查依据")
-    pending: bool = Field(default=False, description="是否建单前挂起为待确认状态")
 
     @field_validator("description")
     @classmethod

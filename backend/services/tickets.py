@@ -78,22 +78,22 @@ def create_ticket(
     description: str,
     tried_steps: str,
     evidence: str,
-    pending: bool = False,
 ) -> tuple[dict, bool]:
-    """创建工单，返回 (工单数据, 是否新建)。
+    """创建工单（两阶段建单的第一阶段），返回 (工单数据, 是否新建)。
+
+    建单先落地为待确认草稿（pending_confirm），不直接进入待处理（open）：
+    草稿等待用户二次确认后，再经确认接口流转为 open 正式工单。
 
     同一用户同一问题（dedup_key）已有未解决工单时，直接返回原工单，
     并标记 created=False，调用方据此区分「新建」与「命中已有」，避免重复建单。
-
-    pending=True 时表示「建单前挂起」，工单初始进入待确认状态（pending_confirm），
-    等待用户二次确认后才流转为待处理（open）；默认直接以 open 状态建单。
     """
     description = (description or "").strip()
     if not description:
         raise ValueError("问题描述不能为空")
 
     key = _dedup_key(user_id, description)
-    initial_status = "pending_confirm" if pending else "open"
+    # 两阶段建单：初始一律落待确认草稿，待确认接口流转为 open 后才成为正式工单
+    initial_status = "pending_confirm"
     # 建单临界区接入 advisory lock：同一意图（dedup_key）的并发建单在此串行执行，
     # 先到者建单并提交，后到者重查即可命中已有工单，避免并发下重复建单。
     with advisory_lock(key) as db:

@@ -45,10 +45,9 @@ def create_ticket(req: CreateTicketRequest, authorization: str = Header(default=
         description=req.description,
         tried_steps=tried_steps,
         evidence=req.evidence,
-        pending=req.pending,
     )
     if created:
-        message = "工单已挂起待确认" if req.pending else "工单已创建"
+        message = "工单已生成待确认草稿，请确认后创建"
     else:
         message = "该问题已有未解决工单，已返回原工单"
     return {
