@@ -151,6 +151,36 @@ def confirm_ticket(ticket_id: str) -> dict | None:
         db.close()
 
 
+def cancel_ticket(ticket_id: str, reason: str = "") -> dict | None:
+    """取消待确认草稿，将其流转为已关闭终态，并记录取消原因。
+
+    两阶段建单的取消分支：pending_confirm 草稿由用户主动放弃后流转为 closed。
+    取消原因以 system 来源写入 replies，时间线同时落一条流转记录，供后续复盘。
+    幂等语义：若工单已不在待确认状态（已 open、已关闭、已被并发确认或取消），
+    不抛错也不重复流转，原样返回当前工单；工单不存在时返回 None。
+    """
+    db = SessionLocal()
+    try:
+        t = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+        if not t:
+            return None
+        # 已非待确认状态视为已终结，幂等返回，不重复流转
+        if t.status != "pending_confirm":
+            return t.to_dict()
+        validate_transition(t.status, "closed")
+        replies = list(t.replies or [])
+        entry = {"replier": "system", "content": f"取消工单：{reason}".strip(), "at": time.time()}
+        replies.append(entry)
+        t.replies = replies
+        _log_status_change(db, t.id, t.status, "closed", operator="system")
+        t.status = "closed"
+        db.commit()
+        db.refresh(t)
+        return t.to_dict()
+    finally:
+        db.close()
+
+
 def list_tickets() -> list[dict]:
     db = SessionLocal()
     try:

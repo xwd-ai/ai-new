@@ -51,3 +51,15 @@ class ConfirmRequest(BaseModel):
     """工单确认请求：待确认草稿经此确认后正式进入待处理。"""
 
     ticket_id: str = Field(..., min_length=1, max_length=64)
+
+
+class CancelRequest(BaseModel):
+    """工单取消请求：待确认草稿经此取消后流转为已关闭，取消原因为可选说明。"""
+
+    ticket_id: str = Field(..., min_length=1, max_length=64)
+    reason: str = Field(default="", max_length=500, description="取消原因")
+
+    @field_validator("reason")
+    @classmethod
+    def _strip_reason(cls, v: str) -> str:
+        return (v or "").strip()

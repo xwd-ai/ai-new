@@ -5,7 +5,7 @@ from backend.services import auth, orders, tickets
 from backend.models import TriedStep
 from backend.models.ticket import TicketTransitionError
 from backend.schemas import CreateTicketRequest, ReplyRequest
-from backend.schemas.ticket import ConfirmRequest, TransferRequest
+from backend.schemas.ticket import CancelRequest, ConfirmRequest, TransferRequest
 
 tickets_router = APIRouter()
 
@@ -137,6 +137,25 @@ def confirm_ticket(req: ConfirmRequest, authorization: str = Header(default=""))
         return {"error": "未登录"}
     try:
         t = tickets.confirm_ticket(req.ticket_id)
+    except TicketTransitionError as e:
+        return {"error": str(e)}
+    if t is None:
+        return {"error": "工单不存在"}
+    return {"ticket": t}
+
+
+@tickets_router.post("/tickets/cancel")
+def cancel_ticket(req: CancelRequest, authorization: str = Header(default="")):
+    """取消待确认草稿，将其流转为已关闭，并记录取消原因。
+
+    幂等：重复取消或取消已终结工单时原样返回，不产生副作用；
+    工单不存在返回「工单不存在」，非法来源状态由流转校验拒绝。
+    """
+    user = _current_user(authorization)
+    if not user:
+        return {"error": "未登录"}
+    try:
+        t = tickets.cancel_ticket(req.ticket_id, req.reason)
     except TicketTransitionError as e:
         return {"error": str(e)}
     if t is None:
