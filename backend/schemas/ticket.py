@@ -45,3 +45,9 @@ class TransferRequest(BaseModel):
     @classmethod
     def _strip_reason(cls, v: str) -> str:
         return (v or "").strip()
+
+
+class ConfirmRequest(BaseModel):
+    """工单确认请求：待确认草稿经此确认后正式进入待处理。"""
+
+    ticket_id: str = Field(..., min_length=1, max_length=64)

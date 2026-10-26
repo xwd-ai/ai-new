@@ -125,6 +125,32 @@ def create_ticket(
         return ticket.to_dict(), True
 
 
+def confirm_ticket(ticket_id: str) -> dict | None:
+    """确认待确认草稿，将其正式流转为待处理工单（幂等）。
+
+    两阶段建单的第二阶段：pending_confirm 草稿经用户二次确认后流转为 open。
+    幂等语义：若工单已不在待确认状态（例如已 open、已关闭、已被并发确认），
+    不抛错也不重复流转，直接原样返回当前工单，重复确认不会产生副作用。
+    工单不存在时返回 None，由接口层区分「不存在」与「已确认」。
+    """
+    db = SessionLocal()
+    try:
+        t = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+        if not t:
+            return None
+        # 已非待确认状态视为已确认/已终结，幂等返回，不重复流转
+        if t.status != "pending_confirm":
+            return t.to_dict()
+        validate_transition(t.status, "open")
+        _log_status_change(db, t.id, t.status, "open", operator="system")
+        t.status = "open"
+        db.commit()
+        db.refresh(t)
+        return t.to_dict()
+    finally:
+        db.close()
+
+
 def list_tickets() -> list[dict]:
     db = SessionLocal()
     try:
