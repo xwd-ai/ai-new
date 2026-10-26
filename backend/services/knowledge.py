@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 
 from backend.database import SessionLocal
 from backend.models import KnowledgeDoc
+from backend.services.retrieval_config import RetrievalConfig, load_retrieval_config
 
 # BM25 参数：k1 控制词频饱和速度，b 控制文档长度归一化强度
 _BM25_K1 = 1.5
@@ -191,15 +192,11 @@ def get_knowledge(knowledge_id: str) -> dict | None:
 # 向量召回
 # ---------------------------------------------------------------------------
 
-# 候选预取深度：召回阶段多取一些，给后续去重与重排留出空间。
-# 目标条数较多时按倍数放大，但至少保证一个基础池。
-_PREFETCH_MULTIPLIER = 5
-_PREFETCH_FLOOR = 50
-
-
-def _prefetch_depth(top_k: int) -> int:
+# 候选预取深度由配置决定（见 retrieval_config）；这里保留函数作为统一入口
+def _prefetch_depth(top_k: int, config: RetrievalConfig | None = None) -> int:
     """计算召回应取回的候选条数。"""
-    return max(top_k * _PREFETCH_MULTIPLIER, _PREFETCH_FLOOR)
+    cfg = config or load_retrieval_config()
+    return cfg.prefetch_depth(top_k)
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -275,32 +272,32 @@ def search_knowledge_by_vector(
 # 多路融合（RRF）
 # ---------------------------------------------------------------------------
 
-# RRF 平滑常数：越大越弱化「第一名」的优势，结果更平均
-_RRF_K = 60
-# 两路召回的相对权重：向量路更擅长语义相近，关键词路更擅长精确术语
-_RRF_VECTOR_WEIGHT = 0.7
-_RRF_KEYWORD_WEIGHT = 0.3
-
-
+# RRF 默认参数来自配置；函数签名保留可覆盖入口，便于测试与单次调参
 def fuse_rrf(
     *,
     vector_results: list[dict],
     keyword_results: list[dict],
     top_k: int = 3,
-    k: int = _RRF_K,
-    vector_weight: float = _RRF_VECTOR_WEIGHT,
-    keyword_weight: float = _RRF_KEYWORD_WEIGHT,
+    k: int | None = None,
+    vector_weight: float | None = None,
+    keyword_weight: float | None = None,
+    config: RetrievalConfig | None = None,
 ) -> list[dict]:
     """用 RRF（倒数排名融合）合并两路召回结果。
 
     融合只依赖各自列表中的**名次**，不直接相加原始分数——向量相似度与
-    BM25 分数量纲不同，直接相加会让其中一路压倒另一路。
+    BM25 分数量级不同，直接相加会让其中一路压倒另一路。
 
     融合分再按理论最大值 ``(vw+kw)/(k+1)`` 归一化到 [0, 1]，
     使混合结果与单路结果的分数仍可比较。
     """
     if not vector_results and not keyword_results:
         return []
+
+    cfg = config or load_retrieval_config()
+    k = cfg.rrf_k if k is None else k
+    vector_weight = cfg.vector_weight if vector_weight is None else vector_weight
+    keyword_weight = cfg.keyword_weight if keyword_weight is None else keyword_weight
 
     # 记录每个条目在两路中的 1-based 名次（同一路内重复取最优名次）
     vector_rank: dict[str, int] = {}
@@ -569,7 +566,8 @@ def rerank_results(
 
 # MMR 的 λ：越大越看重相关性，越小越看重多样性。
 # 0.7 表示「相关性仍是主导，但明显重复的内容会被挤到后面」。
-_MMR_LAMBDA = 0.7
+# MMR 的 λ 由配置提供，这里保留常量名作为文档提示
+_MMR_LAMBDA_DEFAULT = 0.7
 
 
 def _jaccard(a: set[str], b: set[str]) -> float:
@@ -597,7 +595,7 @@ def select_mmr(
     results: list[dict],
     top_k: int,
     *,
-    lambda_: float = _MMR_LAMBDA,
+    lambda_: float | None = None,
 ) -> list[dict]:
     """用最大边际相关（MMR）从候选中选出既相关又互不重复的若干条。
 
@@ -609,6 +607,9 @@ def select_mmr(
     """
     if top_k <= 0 or not results:
         return []
+
+    if lambda_ is None:
+        lambda_ = load_retrieval_config().mmr_lambda
 
     candidates = list(results)
     if len(candidates) <= top_k:
@@ -644,7 +645,7 @@ def rerank_with_mmr(
     rerank_provider=None,
     top_k: int = 3,
     threshold: float = 0.0,
-    lambda_: float = _MMR_LAMBDA,
+    lambda_: float | None = None,
 ) -> list[dict]:
     """重排后再做 MMR 去冗余，返回最终用于回答的若干条。
 
