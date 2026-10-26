@@ -7,6 +7,7 @@ Embedding / Rerank 时无需改动业务链路。
 
 import os
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Protocol, Sequence
 
 from openai import OpenAI
@@ -203,3 +204,71 @@ def build_embedding_provider() -> EmbeddingProvider:
 def build_rerank_provider() -> RerankProvider:
     """按环境变量装配一个 Rerank 能力实现。"""
     return OpenAICompatRerankProvider()
+
+
+# ---------------------------------------------------------------------------
+# 配置检查
+# ---------------------------------------------------------------------------
+
+# 占位密钥：本地联调时允许不填真实密钥，但要能识别出来并给出提示，
+# 而不是等到真正调用模型才报一个看不懂的 SDK 错误。
+_PLACEHOLDER_KEYS = {"", "sk-placeholder-not-real-key", "your-api-key"}
+
+
+@dataclass
+class CapabilityStatus:
+    """一项模型能力的配置状态。"""
+
+    capability: str
+    available: bool
+    # 配置齐全且不是占位值时为空；否则说明缺什么、怎么补
+    hint: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "capability": self.capability,
+            "available": self.available,
+            "hint": self.hint,
+        }
+
+
+def _check_key(env_name: str = "DEEPSEEK_API_KEY") -> tuple[bool, str]:
+    """检查密钥是否可用，返回 (是否可用, 提示)。"""
+    value = (os.getenv(env_name) or "").strip()
+    if not value:
+        return False, f"未配置 {env_name}，请在 backend/.env 中填写后重启服务"
+    if value.lower() in _PLACEHOLDER_KEYS:
+        return False, f"{env_name} 仍是占位值，替换为真实密钥后重启服务"
+    return True, ""
+
+
+def inspect_capabilities() -> list[CapabilityStatus]:
+    """检查各项模型能力的配置状态。
+
+    把「能不能用」提前告诉调用方，比等到请求链路上抛异常再排查成本低得多。
+    缺失任何一项都不影响应用启动——检索与对话都有降级路径。
+    """
+    ok, hint = _check_key()
+
+    chat_status = CapabilityStatus("chat", ok, hint)
+    embedding_status = CapabilityStatus("embedding", ok, hint or "")
+    rerank_status = CapabilityStatus("rerank", ok, hint or "")
+
+    if ok:
+        # 配置齐全时再检查模型名是否落在合理形态，避免拼写错误一路带到调用
+        chat_model = (os.getenv("DEEPSEEK_MODEL") or "deepseek-chat").strip()
+        if chat_model and " " in chat_model:
+            chat_status = CapabilityStatus(
+                "chat", False, f"DEEPSEEK_MODEL 含空格，可能是误填：{chat_model!r}"
+            )
+
+    return [chat_status, embedding_status, rerank_status]
+
+
+def capability_report() -> dict:
+    """汇总报告，便于健康检查接口直接返回。"""
+    statuses = inspect_capabilities()
+    return {
+        "all_available": all(s.available for s in statuses),
+        "capabilities": [s.to_dict() for s in statuses],
+    }

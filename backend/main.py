@@ -34,7 +34,14 @@ app.mount("/assets", StaticFiles(directory=FRONTEND_DIR), name="assets")
 
 @app.get("/health")
 def health() -> JSONResponse:
-    return JSONResponse({"status": "ok"})
+    """健康检查：同时报告模型能力配置状态。
+
+    模型配置缺失不影响服务启动（检索与对话都有降级），但在这里提前
+    暴露出来，省去「请求失败后逐层排查」的时间。
+    """
+    from backend.providers import capability_report
+
+    return JSONResponse({"status": "ok", "models": capability_report()})
 
 
 @app.get("/")
