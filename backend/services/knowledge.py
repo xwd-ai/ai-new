@@ -662,6 +662,113 @@ def rerank_with_mmr(
     return select_mmr(reranked, top_k, lambda_=lambda_)
 
 
+# ---------------------------------------------------------------------------
+# 检索诊断
+# ---------------------------------------------------------------------------
+
+
+def diagnose(
+    query: str,
+    *,
+    top_k: int = 3,
+    embedding_provider=None,
+    rerank_provider=None,
+    threshold: float = 0.0,
+    config: RetrievalConfig | None = None,
+) -> dict:
+    """完整解释一次检索：每一环取了什么、丢了多少、为什么。
+
+    排查「为什么搜不到」时，最耗时的往往不是修，而是不知道问题出在
+    哪一环：是没召回、被融合挤掉了、被阈值拦了，还是被去冗余合并了。
+    这里把每一阶段的输入输出都摊开，直接看出断点在哪。
+
+    只读操作，不改变检索行为；可以安全地挂在调试接口上。
+    """
+    cfg = config or load_retrieval_config()
+    depth = cfg.prefetch_depth(top_k)
+
+    keyword_hits = search_knowledge(query, top_k=depth)
+    vector_hits = search_knowledge_by_vector(
+        query, top_k=depth, embedding_provider=embedding_provider
+    )
+
+    stages: list[dict] = [
+        {
+            "stage": "keyword_recall",
+            "count": len(keyword_hits),
+            "ids": [h["id"] for h in keyword_hits],
+        },
+        {
+            "stage": "vector_recall",
+            "count": len(vector_hits),
+            "ids": [h["id"] for h in vector_hits],
+            "skipped": not vector_hits,
+        },
+    ]
+
+    if vector_hits:
+        fused = fuse_rrf(
+            vector_results=vector_hits,
+            keyword_results=keyword_hits,
+            top_k=depth,
+            config=cfg,
+        )
+        stages.append(
+            {
+                "stage": "rrf_fusion",
+                "count": len(fused),
+                "ids": [f["id"] for f in fused],
+            }
+        )
+    else:
+        fused = keyword_hits
+        stages.append(
+            {
+                "stage": "rrf_fusion",
+                "count": len(fused),
+                "ids": [f["id"] for f in fused],
+                "skipped": "no_vector",
+                "note": "向量路不可用，直接使用关键词结果",
+            }
+        )
+
+    reranked, rerank_diag = rerank_results(
+        query,
+        fused,
+        rerank_provider=rerank_provider,
+        top_k=depth,
+        threshold=threshold,
+        with_diagnostics=True,
+    )
+    stages.append(
+        {
+            "stage": "rerank",
+            "count": len(reranked),
+            "ids": [r["id"] for r in reranked],
+            "detail": rerank_diag,
+        }
+    )
+
+    final = select_mmr(reranked, top_k)
+    stages.append(
+        {
+            "stage": "mmr",
+            "count": len(final),
+            "ids": [f["id"] for f in final],
+            "dropped": len(reranked) - len(final),
+        }
+    )
+
+    return {
+        "query": query,
+        "top_k": top_k,
+        "prefetch_depth": depth,
+        "config": cfg.to_dict(),
+        "stages": stages,
+        "final_ids": [f["id"] for f in final],
+    }
+
+
 
 
 
