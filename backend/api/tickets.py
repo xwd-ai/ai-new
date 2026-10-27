@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Header
+from fastapi import APIRouter, Header, Query
 
 from backend.database import SessionLocal
 from backend.services import auth, orders, tickets
@@ -58,16 +58,36 @@ def create_ticket(req: CreateTicketRequest, authorization: str = Header(default=
 
 
 @tickets_router.get("/tickets")
-def list_tickets(authorization: str = Header(default="")):
+def list_tickets(
+    status: list[str] | None = Query(default=None, description="按状态筛选，支持单状态、逗号分隔多状态与重复传参"),
+    authorization: str = Header(default=""),
+):
+    """查询工单列表，支持按状态筛选（单状态 / 多状态）。
+
+    status 支持 status=open、status=open,closed、status=open&status=closed
+    三种写法；不传或传 all 表示不筛选。未知状态直接返回明确错误，不静默给空列表。
+    管理员看全部工单，普通用户只看本人工单；响应回显本次生效的状态条件。
+    """
     user = _current_user(authorization)
     if not user:
         return {"error": "未登录"}
-    # 管理员看全部；普通用户只看自己的
-    if user["role"] == "admin":
-        items = tickets.list_tickets()
+    try:
+        statuses = tickets.normalize_status_filter(status)
+    except ValueError as e:
+        return {"error": str(e)}
+    # 管理员看全部；普通用户只看自己的，隔离条件下推到查询层
+    scope_user = None if user["role"] == "admin" else user["id"]
+    items = tickets.list_tickets(statuses=statuses, user_id=scope_user)
+    if statuses:
+        message = f"按状态 {'/'.join(statuses)} 筛选到 {len(items)} 个工单"
     else:
-        items = [t for t in tickets.list_tickets() if t["user_id"] == user["id"]]
-    return {"tickets": items}
+        message = f"共 {len(items)} 个工单"
+    return {
+        "tickets": items,
+        "total": len(items),
+        "statuses": statuses or [],
+        "message": message,
+    }
 
 
 @tickets_router.get("/order")

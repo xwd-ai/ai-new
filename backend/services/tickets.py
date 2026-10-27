@@ -6,7 +6,7 @@ from sqlalchemy import func, text
 
 from backend.database import SessionLocal
 from backend.models import Ticket
-from backend.models.ticket import TicketStatusLog, validate_transition
+from backend.models.ticket import TicketStatusLog, is_valid_status, validate_transition
 
 # 工单持久化到 SQLite 数据库
 # 一个工单对应一次「问题 → 排查 → 建单」的闭环
@@ -314,11 +314,52 @@ def list_pending_tickets(
         db.close()
 
 
-def list_tickets() -> list[dict]:
+def normalize_status_filter(values: list[str] | str | None) -> list[str] | None:
+    """把列表状态筛选入参归一化为去重后的状态列表。
+
+    支持三种写法：单状态（status=open）、逗号分隔多状态（status=open,closed）、
+    重复传参（status=open&status=closed）。每项先去空白并转小写，再去重，
+    输出顺序与入参一致，便于响应回显本次生效的筛选条件。
+    未传值或传 all 视为不筛选，返回 None；出现未知状态时抛 ValueError，
+    由接口层转换成明确的错误信息，避免静默返回空列表。
+    """
+    if not values:
+        return None
+    if isinstance(values, str):
+        values = [values]
+
+    selected: list[str] = []
+    for raw in values:
+        for part in str(raw or "").split(","):
+            status = part.strip().lower()
+            if not status or status == "all":
+                continue
+            if not is_valid_status(status):
+                raise ValueError(f"未知的工单状态：{status}")
+            if status not in selected:
+                selected.append(status)
+    return selected or None
+
+
+def list_tickets(
+    statuses: list[str] | None = None,
+    user_id: str | None = None,
+) -> list[dict]:
+    """查询工单列表，支持按状态与所属用户筛选。
+
+    statuses 为空表示不按状态筛选；给出多个状态时按状态集合命中过滤，
+    单状态与多状态走同一条查询路径。user_id 非空时只返回该用户的工单，
+    把用户隔离下推到查询层，避免先全量取回再在内存里过滤。
+    列表按建单时间倒序，最新工单排在最前。
+    """
     db = SessionLocal()
     try:
-        tickets = db.query(Ticket).order_by(Ticket.created_at.desc()).all()
-        return [t.to_dict() for t in tickets]
+        query = db.query(Ticket)
+        if statuses:
+            query = query.filter(Ticket.status.in_(statuses))
+        if user_id:
+            query = query.filter(Ticket.user_id == user_id)
+        return [t.to_dict() for t in query.order_by(Ticket.created_at.desc()).all()]
     finally:
         db.close()
 
