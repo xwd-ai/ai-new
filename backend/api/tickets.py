@@ -188,6 +188,46 @@ def expire_pending_tickets(
     return {"result": result, "message": message}
 
 
+@tickets_router.get("/tickets/pending")
+def pending_tickets(
+    include_expired: bool = False,
+    timeout_seconds: int | None = None,
+    all_users: bool = False,
+    authorization: str = Header(default=""),
+):
+    """拉取待确认草稿列表，供前端展示确认卡片。
+
+    默认只返回仍可确认的草稿；include_expired=true 时连同已超时但尚未收敛的
+    草稿一起返回，每条附带 expires_at / remaining_seconds / expired，前端可据此
+    展示确认倒计时。普通用户只能看到自己的草稿，管理员需要全量视图时传
+    all_users=true。timeout_seconds 可覆盖默认超时阈值，用于联调验证。
+    """
+    user = _current_user(authorization)
+    if not user:
+        return {"error": "未登录"}
+    # 普通用户强制按本人隔离；管理员默认也只看自己的，显式要求时才看全量
+    scope_user = None if (user["role"] == "admin" and all_users) else user["id"]
+    result = tickets.list_pending_tickets(
+        user_id=scope_user,
+        include_expired=include_expired,
+        timeout_seconds=timeout_seconds,
+    )
+    items = result["items"]
+    if not items:
+        message = "暂无待确认工单"
+    elif result["expired"]:
+        message = f"共 {result['total']} 个待确认工单，其中 {result['expired']} 个已超时"
+    else:
+        message = f"共 {result['total']} 个待确认工单"
+    return {
+        "tickets": items,
+        "total": result["total"],
+        "expired": result["expired"],
+        "timeout_seconds": result["timeout_seconds"],
+        "message": message,
+    }
+
+
 @tickets_router.get("/tickets/{ticket_id}")
 def ticket_detail(ticket_id: str, authorization: str = Header(default="")):
     """查询单个工单详情，返回完整状态时间线（按时间升序）。

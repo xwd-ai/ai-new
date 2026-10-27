@@ -255,6 +255,65 @@ def expire_pending_tickets(
         }
 
 
+def _pending_item(t: Ticket, timeout: int, now: float) -> dict:
+    """把待确认草稿组装为确认列表项。
+
+    在工单原有字段外补充超时信息：expires_at 为该草稿的确认截止时间，
+    remaining_seconds 为剩余可确认秒数（超时后归零），expired 标记是否已失效，
+    前端据此展示倒计时或「已失效」提示。
+    """
+    data = t.to_dict()
+    expires_at = (t.created_at or now) + timeout
+    remaining = expires_at - now
+    data["expires_at"] = expires_at
+    data["remaining_seconds"] = max(0, int(remaining))
+    data["expired"] = remaining <= 0
+    return data
+
+
+def list_pending_tickets(
+    user_id: str | None = None,
+    include_expired: bool = False,
+    timeout_seconds: int | None = None,
+    now: float | None = None,
+) -> dict:
+    """查询待确认草稿列表，供前端拉取确认列表。
+
+    默认只返回仍可确认的草稿：超过待确认超时阈值的草稿已被超时收敛任务关闭，
+    不再出现在列表里；include_expired=True 时一并返回已超时但尚未收敛的草稿，
+    并以 expired / remaining_seconds 标记其状态，避免前端拿到无法确认的条目。
+    user_id 非空时只返回该用户的草稿，用于普通用户视角的列表隔离；
+    管理员需要全量视图时不传 user_id。列表按建单时间倒序，最新草稿排在最前。
+    """
+    timeout = (
+        PENDING_CONFIRM_TIMEOUT_SECONDS
+        if timeout_seconds is None
+        else max(0, int(timeout_seconds))
+    )
+    ts = time.time() if now is None else now
+    deadline = ts - timeout
+
+    db = SessionLocal()
+    try:
+        query = db.query(Ticket).filter(Ticket.status == "pending_confirm")
+        if user_id:
+            query = query.filter(Ticket.user_id == user_id)
+        if not include_expired:
+            # 建单时间晚于截止时间即为仍可确认的草稿
+            query = query.filter(Ticket.created_at > deadline)
+        rows = query.order_by(Ticket.created_at.desc()).all()
+        items = [_pending_item(t, timeout, ts) for t in rows]
+        return {
+            "items": items,
+            "total": len(items),
+            "expired": sum(1 for item in items if item["expired"]),
+            "timeout_seconds": timeout,
+            "deadline": deadline,
+        }
+    finally:
+        db.close()
+
+
 def list_tickets() -> list[dict]:
     db = SessionLocal()
     try:
