@@ -14,6 +14,13 @@ from backend.models.ticket import TicketStatusLog, validate_transition
 # 建单前可挂起为 pending_confirm，等待用户确认后再进入 open
 # 预置工单逻辑收敛到 backend.seed 模块
 
+# 待确认草稿的超时阈值（秒）：超时未确认的草稿收敛为已关闭，避免僵尸工单堆积
+PENDING_CONFIRM_TIMEOUT_SECONDS = 30 * 60
+# 单次扫描最多收敛的工单数，分批消化积压，避免一次扫描长时间占用写锁
+EXPIRE_BATCH_LIMIT = 200
+# 超时收敛的写锁键：同一时刻只允许一个扫描任务在临界区内收敛
+_EXPIRE_LOCK_KEY = "ticket:pending_confirm:expire"
+
 
 def _dedup_key(user_id: str, description: str) -> str:
     return hashlib.sha256(f"{user_id}::{description}".encode()).hexdigest()
@@ -179,6 +186,73 @@ def cancel_ticket(ticket_id: str, reason: str = "") -> dict | None:
         return t.to_dict()
     finally:
         db.close()
+
+
+def expire_pending_tickets(
+    timeout_seconds: int | None = None,
+    limit: int | None = None,
+    now: float | None = None,
+) -> dict:
+    """扫描超时未确认的待确认草稿，批量收敛为已关闭。
+
+    超时判定以建单时间为基准：创建时间早于「当前时间 - 超时阈值」且仍处于
+    pending_confirm 的工单视为超时草稿。收敛动作在单个事务内完成，每个工单
+    写入一条取消说明与一条状态时间线，保证状态与落痕一致提交。
+
+    并发控制：整个扫描收敛过程持有固定 key 的写锁，多个调度触发时串行执行，
+    先到者收敛完毕，后到者按同条件重查已无候选，不会重复关闭。
+    分批消化：单次最多处理 limit 条，返回的 remaining 表示仍有超时草稿待收敛，
+    调用方可据此决定是否继续下一批。
+
+    返回扫描与收敛统计，closed_ids 为本次被关闭的工单号。
+    """
+    timeout = PENDING_CONFIRM_TIMEOUT_SECONDS if timeout_seconds is None else max(0, int(timeout_seconds))
+    batch = EXPIRE_BATCH_LIMIT if limit is None else max(1, int(limit))
+    ts = time.time() if now is None else now
+    deadline = ts - timeout
+
+    with advisory_lock(_EXPIRE_LOCK_KEY) as db:
+        candidates = (
+            db.query(Ticket)
+            .filter(Ticket.status == "pending_confirm", Ticket.created_at <= deadline)
+            .order_by(Ticket.created_at.asc())
+            .limit(batch)
+            .all()
+        )
+        closed_ids = []
+        for t in candidates:
+            # 锁内重查的状态为最终依据，已被确认或取消的工单不再处理
+            if t.status != "pending_confirm":
+                continue
+            replies = list(t.replies or [])
+            replies.append(
+                {
+                    "replier": "system",
+                    "content": f"待确认超时（阈值 {timeout} 秒）自动关闭",
+                    "at": ts,
+                }
+            )
+            t.replies = replies
+            _log_status_change(db, t.id, t.status, "closed", operator="system")
+            t.status = "closed"
+            closed_ids.append(t.id)
+
+        # 会话关闭了自动 flush，先显式落库再统计，避免把本批已关闭的工单算进剩余
+        db.flush()
+        # 本次批量之外的超时草稿数量，供调用方判断是否需要继续下一批
+        remaining = (
+            db.query(func.count(Ticket.id))
+            .filter(Ticket.status == "pending_confirm", Ticket.created_at <= deadline)
+            .scalar()
+        )
+        return {
+            "timeout_seconds": timeout,
+            "deadline": deadline,
+            "scanned": len(candidates),
+            "closed": len(closed_ids),
+            "closed_ids": closed_ids,
+            "remaining": int(remaining or 0),
+        }
 
 
 def list_tickets() -> list[dict]:

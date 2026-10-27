@@ -163,6 +163,31 @@ def cancel_ticket(req: CancelRequest, authorization: str = Header(default="")):
     return {"ticket": t}
 
 
+@tickets_router.post("/tickets/expire")
+def expire_pending_tickets(
+    timeout_seconds: int | None = None,
+    limit: int | None = None,
+    authorization: str = Header(default=""),
+):
+    """扫描并批量收敛超时未确认的待确认草稿。
+
+    仅管理员可触发，供定时任务或运营手动调用：超过超时阈值仍未确认的草稿
+    统一关闭，并写入取消说明与状态时间线。timeout_seconds / limit 可覆盖默认
+    阈值与单批上限，返回的 remaining 大于 0 表示仍有超时草稿待下一批处理。
+    """
+    user = _current_user(authorization)
+    if not user:
+        return {"error": "未登录"}
+    if user["role"] != "admin":
+        return {"error": "无权限"}
+    result = tickets.expire_pending_tickets(timeout_seconds=timeout_seconds, limit=limit)
+    if result["closed"]:
+        message = f"已关闭 {result['closed']} 个超时待确认工单"
+    else:
+        message = "没有需要关闭的超时待确认工单"
+    return {"result": result, "message": message}
+
+
 @tickets_router.get("/tickets/{ticket_id}")
 def ticket_detail(ticket_id: str, authorization: str = Header(default="")):
     """查询单个工单详情，返回完整状态时间线（按时间升序）。
