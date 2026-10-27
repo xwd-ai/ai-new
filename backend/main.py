@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.api.auth import auth_router
 from backend.api.chat import chat_router
+from backend.api.knowledge import knowledge_router
 from backend.api.tickets import tickets_router
 from backend.database import init_db
 from backend.seed import seed_all
@@ -23,6 +24,7 @@ app.add_middleware(
 app.include_router(chat_router, prefix="/api")
 app.include_router(auth_router, prefix="/api")
 app.include_router(tickets_router, prefix="/api")
+app.include_router(knowledge_router, prefix="/api")
 
 # 初始化数据库并预置演示数据（进程启动时执行一次）
 init_db()

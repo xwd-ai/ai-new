@@ -3,12 +3,15 @@
 
 from backend.schemas.auth import LoginRequest, LoginResponse
 from backend.schemas.chat import ChatRequest, ChatResponse, SourceDetail
+from backend.schemas.knowledge import IngestRequest, IngestResponse
 from backend.schemas.ticket import CreateTicketRequest, ReplyRequest
 
 __all__ = [
     "ChatRequest",
     "ChatResponse",
     "CreateTicketRequest",
+    "IngestRequest",
+    "IngestResponse",
     "LoginRequest",
     "LoginResponse",
     "ReplyRequest",
