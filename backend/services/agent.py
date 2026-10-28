@@ -1,4 +1,4 @@
-"""对话执行循环。
+﻿"""对话执行循环。
 
 把「查订单 → 检索 → 生成」这条固定流水线，改造成一个可循环的执行过程：
 每一步都可以读取已经观察到的信息，再决定下一步做什么，直到模型认为
@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+
+from backend.logging_conf import timed
 
 # 单次对话允许的最大循环轮次。设置上界是为了避免模型反复要求检索、
 # 迟迟不给结论，把一次请求拖成无限循环。
@@ -222,16 +224,19 @@ def run_loop(
         state.iteration += 1
         state.emit(EVENT_STEP, round=state.iteration)
 
-        try:
-            output = step_fn(state)
-        except Exception as exc:  # noqa: BLE001 - 模型异常要转成可观测的终止态
-            detail = f"模型调用失败: {exc}"
-            state.emit(EVENT_ERROR, message=detail)
-            return LoopTransition(
-                kind=TransitionKind.MODEL_ERROR,
-                content="",
-                detail=detail,
-            )
+        with timed("agent.step", round=state.iteration) as step_info:
+            try:
+                output = step_fn(state)
+            except Exception as exc:  # noqa: BLE001 - 模型异常要转成可观测的终止态
+                step_info["outcome"] = "model_error"
+                detail = f"模型调用失败: {exc}"
+                state.emit(EVENT_ERROR, message=detail)
+                return LoopTransition(
+                    kind=TransitionKind.MODEL_ERROR,
+                    content="",
+                    detail=detail,
+                )
+            step_info["output_len"] = len(output or "")
 
         if not output or not output.strip():
             # 空输出现象：模型把预算花在了思考上，或这一轮没生成内容。

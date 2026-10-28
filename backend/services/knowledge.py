@@ -17,6 +17,7 @@ import re
 from dataclasses import dataclass, field
 
 from backend.database import SessionLocal
+from backend.logging_conf import log_event
 from backend.models import KnowledgeDoc
 from backend.services.retrieval_config import RetrievalConfig, load_retrieval_config
 
@@ -153,6 +154,7 @@ def search_knowledge(query: str, top_k: int = 3) -> list[dict]:
     query_tokens = tokenize(query)
     docs = _all_docs()
     if not docs:
+        log_event("retrieval.keyword", query_len=len(query or ""), hits=0, reason="empty_corpus")
         return []
 
     raw_scores = _bm25_scores(query_tokens, docs)
@@ -176,7 +178,15 @@ def search_knowledge(query: str, top_k: int = 3) -> list[dict]:
 
     # 分数降序；同分时保持原始顺序，保证结果稳定可复现
     results.sort(key=lambda r: r.score, reverse=True)
-    return [r.to_dict() for r in results[:top_k]]
+    top = results[:top_k]
+    log_event(
+        "retrieval.keyword",
+        query_len=len(query or ""),
+        candidate=len(results),
+        hits=len(top),
+        top_ids=[r.id for r in top],
+    )
+    return [r.to_dict() for r in top]
 
 
 def get_knowledge(knowledge_id: str) -> dict | None:
