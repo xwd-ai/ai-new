@@ -60,21 +60,27 @@ def create_ticket(req: CreateTicketRequest, authorization: str = Header(default=
 @tickets_router.get("/tickets")
 def list_tickets(
     status: list[str] | None = Query(default=None, description="按状态筛选，支持单状态、逗号分隔多状态与重复传参"),
+    keyword: str | None = Query(default=None, description="关键词，模糊匹配工单号/问题描述/客户名"),
+    q: str | None = Query(default=None, description="关键词别名，与 keyword 等价"),
     page: int | None = Query(default=None, description="页码，从 1 开始"),
     page_size: int | None = Query(default=None, description="每页条数，默认 20，上限 100"),
     order: str | None = Query(default=None, description="按建单时间排序，asc 正序 / desc 逆序（默认）"),
     authorization: str = Header(default=""),
 ):
-    """分页查询工单列表，支持按状态筛选与按建单时间正逆序排序。
+    """分页查询工单列表，支持按状态、关键词筛选与按建单时间正逆序排序。
 
     status 支持 status=open、status=open,closed、status=open&status=closed
     三种写法；不传或传 all 表示不筛选。未知状态直接返回明确错误，不静默给空列表。
-    page / page_size 控制分页，order 控制时间正逆序；分页参数非法时返回明确错误。
+    keyword（或等价的 q）按工单号、问题描述、客户名做模糊匹配，任一命中即保留，
+    可与状态筛选、分页、排序叠加使用。page / page_size 控制分页，order 控制时间正逆序；
+    分页参数或关键词非法时返回明确错误。
     管理员看全部工单，普通用户只看本人工单；响应回显生效的筛选、分页与排序条件。
     """
     user = _current_user(authorization)
     if not user:
         return {"error": "未登录"}
+    # keyword 优先，未传时回退到别名 q，便于前端沿用搜索框参数名
+    raw_keyword = keyword if keyword is not None else q
     try:
         statuses = tickets.normalize_status_filter(status)
         result = tickets.list_tickets(
@@ -83,12 +89,18 @@ def list_tickets(
             page=page,
             page_size=page_size,
             order=order,
+            keyword=raw_keyword,
         )
     except ValueError as e:
         return {"error": str(e)}
 
     items = result["items"]
-    scope = f"按状态 {'/'.join(statuses)} 筛选到" if statuses else "共"
+    conditions = []
+    if statuses:
+        conditions.append(f"状态 {'/'.join(statuses)}")
+    if result["keyword"]:
+        conditions.append(f"关键词「{result['keyword']}」")
+    scope = f"按 {' + '.join(conditions)} 筛选到" if conditions else "共"
     if result["pages"] > 1:
         message = f"{scope} {result['total']} 个工单，当前第 {result['page']}/{result['pages']} 页"
     else:
@@ -102,6 +114,7 @@ def list_tickets(
         "has_more": result["has_more"],
         "order": result["order"],
         "statuses": statuses or [],
+        "keyword": result["keyword"],
         "message": message,
     }
 

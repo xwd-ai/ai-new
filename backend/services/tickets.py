@@ -2,7 +2,7 @@ import hashlib
 import time
 from contextlib import contextmanager
 
-from sqlalchemy import func, text
+from sqlalchemy import func, or_, text
 
 from backend.database import SessionLocal
 from backend.models import Ticket
@@ -24,6 +24,11 @@ _EXPIRE_LOCK_KEY = "ticket:pending_confirm:expire"
 # 列表分页默认值与单页上限：默认每页 20 条，上限 100 条，避免一次拉全表
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
+
+# 列表关键词长度上限：超长输入直接拒绝，避免构造超长匹配模式拖慢查询
+MAX_KEYWORD_LENGTH = 50
+# LIKE 转义符：关键词里的 % 与 _ 按字面量匹配，不当通配符使用
+_LIKE_ESCAPE = "\\"
 
 
 def _dedup_key(user_id: str, description: str) -> str:
@@ -375,18 +380,63 @@ def normalize_order(order: str | None) -> str:
     raise ValueError("排序方向只支持 asc 或 desc")
 
 
+def normalize_keyword(keyword: str | None) -> str | None:
+    """归一化列表关键词：压缩连续空白、去首尾空白，空值表示不搜索。
+
+    关键词按字面量参与匹配，其中的 % 与 _ 不作为通配符使用；
+    超过长度上限的输入抛 ValueError，由接口层转成明确的错误信息，
+    而不是静默截断后给出与预期不符的结果。
+    """
+    if keyword is None:
+        return None
+    value = " ".join(str(keyword).split())
+    if not value:
+        return None
+    if len(value) > MAX_KEYWORD_LENGTH:
+        raise ValueError(f"关键词长度不能超过 {MAX_KEYWORD_LENGTH} 个字符")
+    return value
+
+
+def _escape_like(value: str) -> str:
+    """转义 LIKE 通配符，让关键词中的 % _ \\ 按普通字符匹配。"""
+    return (
+        value.replace(_LIKE_ESCAPE, _LIKE_ESCAPE * 2)
+        .replace("%", _LIKE_ESCAPE + "%")
+        .replace("_", _LIKE_ESCAPE + "_")
+    )
+
+
+def _apply_keyword(query, keyword: str):
+    """在查询上追加关键词过滤：工单号、问题描述、客户名任一命中即保留。
+
+    匹配不区分大小写（SQLite 下由 ilike 转为 lower 比较），
+    三个字段之间是「或」关系，与状态、用户、分页条件之间是「与」关系。
+    """
+    pattern = f"%{_escape_like(keyword)}%"
+    return query.filter(
+        or_(
+            Ticket.id.ilike(pattern, escape=_LIKE_ESCAPE),
+            Ticket.description.ilike(pattern, escape=_LIKE_ESCAPE),
+            Ticket.user_name.ilike(pattern, escape=_LIKE_ESCAPE),
+        )
+    )
+
+
 def list_tickets(
     statuses: list[str] | None = None,
     user_id: str | None = None,
     page: int | None = None,
     page_size: int | None = None,
     order: str | None = None,
+    keyword: str | None = None,
 ) -> dict:
-    """分页查询工单列表，支持按状态、所属用户筛选与时间正逆序排序。
+    """分页查询工单列表，支持按状态、所属用户、关键词筛选与时间正逆序排序。
 
     statuses 为空表示不按状态筛选；给出多个状态时按状态集合命中过滤，
     单状态与多状态走同一条查询路径。user_id 非空时只返回该用户的工单，
     把用户隔离下推到查询层，避免先全量取回再在内存里过滤。
+    keyword 非空时按工单号、问题描述、客户名做模糊匹配，任一字段命中即保留，
+    并与状态、用户、分页条件叠加生效。
 
     分页采用偏移量方式：total 为符合筛选条件的总条数（不受分页限制），
     pages 为总页数，has_more 标记后面是否还有下一页。排序以建单时间为准，
@@ -394,6 +444,7 @@ def list_tickets(
     """
     current, size = normalize_pagination(page, page_size)
     direction = normalize_order(order)
+    search = normalize_keyword(keyword)
 
     db = SessionLocal()
     try:
@@ -402,6 +453,8 @@ def list_tickets(
             query = query.filter(Ticket.status.in_(statuses))
         if user_id:
             query = query.filter(Ticket.user_id == user_id)
+        if search:
+            query = _apply_keyword(query, search)
 
         total = query.count()
         order_column = Ticket.created_at.asc() if direction == "asc" else Ticket.created_at.desc()
@@ -415,6 +468,7 @@ def list_tickets(
             "pages": pages,
             "has_more": current * size < total,
             "order": direction,
+            "keyword": search,
         }
     finally:
         db.close()
