@@ -19,9 +19,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from backend.database import SessionLocal
 from backend.models import KnowledgeDoc
@@ -206,6 +209,7 @@ def ingest(
     fingerprint = content_fingerprint(title, content)
     existing = _find_existing(fingerprint)
     if existing is not None:
+        record_checkpoint(fingerprint, STAGE_STORED, existing.id)
         return IngestResult(
             knowledge_id=existing.id,
             created=False,
@@ -213,6 +217,8 @@ def ingest(
             stage=STAGE_STORED,
             detail="内容已存在，返回已有记录",
         )
+
+    record_checkpoint(fingerprint, STAGE_PARSED, "")
 
     chunks = split_into_chunks(content)
     checkpoint.mark(STAGE_CHUNKED)
@@ -239,9 +245,87 @@ def ingest(
         db.close()
 
     checkpoint.mark(STAGE_STORED)
+    record_checkpoint(fingerprint, STAGE_STORED, doc_id)
     return IngestResult(
         knowledge_id=doc_id,
         created=True,
         chunks=len(chunks),
         stage=STAGE_STORED,
     )
+
+
+# ---------------------------------------------------------------------------
+# 断点续处理
+# ---------------------------------------------------------------------------
+
+# 已处理指纹的记录：持久化到磁盘，进程重启后仍能判断「这份内容做过没有」。
+# 只记录指纹与阶段，不记录内容——内容本身在知识表里，重复存一份纯属浪费。
+_CHECKPOINT_TTL_SECONDS = 7 * 24 * 3600
+
+
+def _checkpoint_path() -> Path:
+    """检查点文件位置：与数据库同目录，随项目一起被忽略提交。"""
+    return Path(__file__).resolve().parent.parent / "ingest_checkpoints.json"
+
+
+def _load_checkpoints() -> dict[str, dict]:
+    """读取检查点；文件损坏或不存在时返回空表。"""
+    path = _checkpoint_path()
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        # 检查点损坏不应阻断入库：当作没有记录，重新处理即可
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {k: v for k, v in raw.items() if isinstance(v, dict)}
+
+
+def _save_checkpoints(data: dict[str, dict]) -> None:
+    """写回检查点；写入失败不影响主流程。
+
+    检查点只是加速与诊断用的旁路信息：丢掉它最多导致重做一步，
+    不该让一次成功的入库因为写不了这个文件而失败。
+    """
+    path = _checkpoint_path()
+    try:
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        return
+
+
+def record_checkpoint(fingerprint: str, stage: str, knowledge_id: str) -> None:
+    """记录某份内容的处理阶段。"""
+    data = _load_checkpoints()
+    now = time.time()
+    # 顺带清理过期记录，避免文件无限增长
+    data = {
+        k: v
+        for k, v in data.items()
+        if now - float(v.get("at", 0)) < _CHECKPOINT_TTL_SECONDS
+    }
+    data[fingerprint] = {
+        "stage": stage,
+        "knowledge_id": knowledge_id,
+        "at": now,
+    }
+    _save_checkpoints(data)
+
+
+def previous_stage(fingerprint: str) -> dict | None:
+    """查询这份内容上次处理到哪一步；没有记录时返回 None。
+
+    用于排查「为什么重试很快返回」：若上次已入库，本次命中幂等；
+    若上次停在 parsed，说明当时是分块或写库阶段失败的。
+    """
+    data = _load_checkpoints()
+    record = data.get(fingerprint)
+    if not record:
+        return None
+    if time.time() - float(record.get("at", 0)) >= _CHECKPOINT_TTL_SECONDS:
+        return None
+    return record
