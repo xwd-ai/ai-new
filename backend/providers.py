@@ -12,6 +12,8 @@ from typing import Protocol, Sequence
 
 from openai import OpenAI
 
+from backend.errors import ModelConfigurationError
+
 
 class Message(dict):
     """一条对话消息，等价于 OpenAI 的 messages 元素。
@@ -193,6 +195,9 @@ class OpenAICompatRerankProvider:
 
 def build_chat_provider() -> ChatProvider:
     """按环境变量装配一个 Chat 能力实现。"""
+    ok, hint = _check_key()
+    if not ok:
+        raise ModelConfigurationError(hint)
     return OpenAICompatChatProvider()
 
 

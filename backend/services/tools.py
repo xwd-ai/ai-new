@@ -20,6 +20,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
+from backend.errors import classify_error
+
 # 只读工具白名单：列在这里的工具声明自身没有副作用，可以安全并发。
 # 新增工具时默认不在名单内——想并发必须显式加进来。
 READ_ONLY_TOOLS = frozenset(
@@ -47,6 +49,8 @@ class ToolResult:
     output: str = ""
     error: str = ""
     data: dict = field(default_factory=dict)
+    error_code: str = ""
+    retryable: bool = False
 
 
 @dataclass
@@ -111,7 +115,11 @@ class ToolRegistry:
         try:
             return spec.handler(**kwargs)
         except Exception as exc:  # noqa: BLE001 - 工具异常转成可观测结果
-            return ToolResult(success=False, error=f"工具 {name} 执行失败: {exc}")
+            error = classify_error(exc)
+            return ToolResult(
+                success=False, error=f"工具执行失败：{error.message}",
+                error_code=error.code, retryable=error.retryable,
+            )
 
     def __len__(self) -> int:
         return len(self._tools)

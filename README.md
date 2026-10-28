@@ -54,6 +54,41 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
 
 浏览器打开 http://127.0.0.1:8000/ ，输入「专业版导出功能一直失败」即可体验完整链路。
 
+## 对话故障提示
+
+`GET /health` 中的 `models` 报告模型配置是否齐全、是否仍为占位值；它不调用供应商接口，因此不代表模型在线或密钥已通过认证。
+
+`POST /api/chat` 的模型调用失败时，仍返回 HTTP 200 和原有的 `reply`、`sources`、`suggest_ticket`、`trace` 字段。`reply` 提供中文故障提示；服务异常对应的 `trace` 错误事件增加 `error_code` 和 `retryable`，例如：
+
+```json
+{"kind": "error", "iteration": 1, "message": "模型调用失败：服务响应超时，请稍后重试。", "error_code": "timeout", "retryable": true}
+```
+
+| `error_code` | 含义 | `retryable` |
+|---|---|---|
+| `timeout` | 调用超时 | `true` |
+| `connection_error` | 无法连接服务 | `true` |
+| `rate_limited` | 模型服务限流 | `true` |
+| `model_configuration` | 缺失或占位密钥、模型服务认证或权限失败 | `false` |
+| `upstream_unavailable` | 模型服务返回 5xx | `true` |
+| `model_request_rejected` | 模型服务拒绝请求 | `false` |
+| `internal_error` | 未识别的执行异常 | `false` |
+
+`retryable` 表示是否适合稍后重试，不表示本轮已经执行了重试。配置和请求错误应由管理员排查；原始异常文本不会进入这些故障提示、执行事件或检索失败观察。
+
+空密钥或已识别的占位密钥不会阻止应用导入；首次生成回答时会提示联系管理员，且不会创建聊天模型客户端。首轮或后续检索失败时记录错误事件，允许模型继续回答，此时可能没有来源。上述分类只覆盖对话中的模型调用、知识检索和工具执行；数据库读写、知识库管理 API 和启动异常未统一纳入。
+
+## 运行测试
+
+在仓库根目录执行，使用项目虚拟环境（以下为 Windows PowerShell 命令）：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r backend/requirements-dev.txt
+.\.venv\Scripts\python.exe -m pytest backend/tests -q
+```
+
+开发依赖包含 `pytest` 和 `httpx`。测试使用临时 SQLite 数据库和模拟模型，覆盖工单流程、故障分类、缺失配置、检索降级与来源引用，不验证真实模型供应商的可用性。
+
 ## 演示账号
 
 | 账号 | 密码 | 角色 |

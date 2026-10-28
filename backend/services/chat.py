@@ -4,13 +4,13 @@ import uuid
 from backend.database import SessionLocal
 from backend.services import agent, citations, context, escalation, knowledge, llm, orders, tools
 from backend.models import Conversation, Message, TriedStep
-from backend.providers import build_chat_provider
+from backend.providers import ChatProvider
 
 # 对话链路：会话与消息的存取、已尝试步骤的记录，以及「查订单 + 检索手册 + 生成回答」的编排。
 # 路由定义在 backend.api.chat，此处仅承载存储与业务编排逻辑。
 
-# 对话链路的 Chat 能力，由适配层装配；可在测试时替换为假实现
-_chat_provider = build_chat_provider()
+# 未注入时由 llm 在首次调用时装配，缺少配置不阻止应用导入。
+_chat_provider: ChatProvider | None = None
 
 
 def current_user(authorization: str):
@@ -173,12 +173,21 @@ def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
     registry = citations.SourceRegistry()
 
     # 第一轮检索用用户原话，保证「什么都不说也能答」的基本盘
-    first_items = knowledge.search_knowledge(message)
+    registry_tools = _build_tools(user_id, registry)
+    tool_result = registry_tools.execute("search_knowledge", query=message)
+    first_items = tool_result.data.get("items", []) if tool_result.success else []
     prompt_items = citations.build_prompt_items(first_items, registry)
 
     state = agent.AgentState(query=message)
     if first_items:
         state.remember(agent._format_items(prompt_items))
+    if not tool_result.success:
+        detail = f"知识检索失败：{tool_result.error}"
+        state.remember(detail)
+        state.emit(
+            agent.EVENT_ERROR, message=detail,
+            error_code=tool_result.error_code, retryable=tool_result.retryable,
+        )
 
     def _step(current: agent.AgentState) -> str:
         return llm.chat_step(
@@ -194,19 +203,13 @@ def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
         found = knowledge.search_knowledge(query)
         return citations.build_prompt_items(found, registry)
 
-    # 检索经工具系统执行：工具内部自带异常收敛，失败会变成一条观察结果
-    registry_tools = _build_tools(user_id, registry)
-    tool_result = registry_tools.execute("search_knowledge", query=message)
-    if not tool_result.success:
-        state.remember(f"检索失败：{tool_result.error}")
-
     transition = agent.run_loop(state, step_fn=_step, search_fn=_search)
     summary = agent.summarize(state, transition)
 
     if transition.kind is agent.TransitionKind.COMPLETED:
         reply = transition.content
     elif transition.kind is agent.TransitionKind.MODEL_ERROR:
-        reply = "抱歉，我这边暂时无法完成回答，请稍后再试。"
+        reply = transition.detail
     else:
         reply = agent.finalize_answer(state, agent._STALLED_ANSWER)
 

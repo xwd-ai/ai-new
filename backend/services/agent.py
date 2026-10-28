@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
+from backend.errors import classify_error
 from backend.logging_conf import timed
 
 # 单次对话允许的最大循环轮次。设置上界是为了避免模型反复要求检索、
@@ -228,9 +229,15 @@ def run_loop(
             try:
                 output = step_fn(state)
             except Exception as exc:  # noqa: BLE001 - 模型异常要转成可观测的终止态
+                error = classify_error(exc)
                 step_info["outcome"] = "model_error"
-                detail = f"模型调用失败: {exc}"
-                state.emit(EVENT_ERROR, message=detail)
+                step_info["error_code"] = error.code
+                step_info["error_type"] = type(exc).__name__
+                detail = f"模型调用失败：{error.message}"
+                state.emit(
+                    EVENT_ERROR, message=detail,
+                    error_code=error.code, retryable=error.retryable,
+                )
                 return LoopTransition(
                     kind=TransitionKind.MODEL_ERROR,
                     content="",
@@ -291,8 +298,13 @@ def run_loop(
         try:
             items = search_fn(action["query"])
         except Exception as exc:  # noqa: BLE001 - 检索失败不应中断整个对话
-            state.remember(f"检索「{action['query']}」时出错：{exc}")
-            state.emit(EVENT_ERROR, message=f"检索失败: {exc}", query=action["query"])
+            error = classify_error(exc)
+            detail = f"检索失败：{error.message}"
+            state.remember(detail)
+            state.emit(
+                EVENT_ERROR, message=detail, query=action["query"],
+                error_code=error.code, retryable=error.retryable,
+            )
         else:
             if items:
                 state.remember(_format_items(items))
