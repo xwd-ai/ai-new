@@ -1,8 +1,9 @@
 import hashlib
+import re
 import time
 from contextlib import contextmanager
 
-from sqlalchemy import func, text
+from sqlalchemy import func, or_, text
 
 from backend.database import SessionLocal
 from backend.models import Ticket
@@ -24,6 +25,23 @@ _EXPIRE_LOCK_KEY = "ticket:pending_confirm:expire"
 # 列表分页默认值与单页上限：默认每页 20 条，上限 100 条，避免一次拉全表
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
+
+# 列表关键词长度上限：超长输入直接拒绝，避免构造超长匹配模式拖慢查询
+MAX_KEYWORD_LENGTH = 50
+# LIKE 转义符：关键词里的 % 与 _ 按字面量匹配，不当通配符使用
+_LIKE_ESCAPE = "\\"
+
+# 排查信息结构化的上限：条目总数与单条长度双重限制，避免详情响应被超长文本撑爆
+MAX_TROUBLESHOOT_ITEMS = 50
+MAX_TROUBLESHOOT_ITEM_LENGTH = 200
+# 条目分隔符：换行、中英文分号、间隔点（建单时多步合并写入的写法）、短横线列表
+_ITEM_SEPARATOR_RE = re.compile(r"[\r\n]+|[;；]+|\s*[·•]\s*|\s+-\s+")
+# 条目自带的序号前缀：1. / 1) / （1）/ ① / - / *，解析时剥离，序号由服务重新编号
+_ITEM_PREFIX_RE = re.compile(r"^\s*(?:[（(]?\d{1,2}[)）.、]|[①-⑳]|[-*•])\s*")
+# 正文中的连续编号：每个编号都是一个条目的起点，用于把粘连的列表还原成多条
+_NUMBER_PREFIX_RE = re.compile(r"[（(]?\d{1,2}[)）.、]|[①-⑳]")
+# 依据条目内的来源标注：「…（来源：产品手册第 3 节）」，剥离后作为独立字段
+_SOURCE_RE = re.compile(r"[（(【\[]\s*(?:来源|出处|依据)\s*[:：]?\s*(?P<source>[^）)】\]]+?)\s*[）)】\]]")
 
 
 def _dedup_key(user_id: str, description: str) -> str:
@@ -375,18 +393,63 @@ def normalize_order(order: str | None) -> str:
     raise ValueError("排序方向只支持 asc 或 desc")
 
 
+def normalize_keyword(keyword: str | None) -> str | None:
+    """归一化列表关键词：压缩连续空白、去首尾空白，空值表示不搜索。
+
+    关键词按字面量参与匹配，其中的 % 与 _ 不作为通配符使用；
+    超过长度上限的输入抛 ValueError，由接口层转成明确的错误信息，
+    而不是静默截断后给出与预期不符的结果。
+    """
+    if keyword is None:
+        return None
+    value = " ".join(str(keyword).split())
+    if not value:
+        return None
+    if len(value) > MAX_KEYWORD_LENGTH:
+        raise ValueError(f"关键词长度不能超过 {MAX_KEYWORD_LENGTH} 个字符")
+    return value
+
+
+def _escape_like(value: str) -> str:
+    """转义 LIKE 通配符，让关键词中的 % _ \\ 按普通字符匹配。"""
+    return (
+        value.replace(_LIKE_ESCAPE, _LIKE_ESCAPE * 2)
+        .replace("%", _LIKE_ESCAPE + "%")
+        .replace("_", _LIKE_ESCAPE + "_")
+    )
+
+
+def _apply_keyword(query, keyword: str):
+    """在查询上追加关键词过滤：工单号、问题描述、客户名任一命中即保留。
+
+    匹配不区分大小写（SQLite 下由 ilike 转为 lower 比较），
+    三个字段之间是「或」关系，与状态、用户、分页条件之间是「与」关系。
+    """
+    pattern = f"%{_escape_like(keyword)}%"
+    return query.filter(
+        or_(
+            Ticket.id.ilike(pattern, escape=_LIKE_ESCAPE),
+            Ticket.description.ilike(pattern, escape=_LIKE_ESCAPE),
+            Ticket.user_name.ilike(pattern, escape=_LIKE_ESCAPE),
+        )
+    )
+
+
 def list_tickets(
     statuses: list[str] | None = None,
     user_id: str | None = None,
     page: int | None = None,
     page_size: int | None = None,
     order: str | None = None,
+    keyword: str | None = None,
 ) -> dict:
-    """分页查询工单列表，支持按状态、所属用户筛选与时间正逆序排序。
+    """分页查询工单列表，支持按状态、所属用户、关键词筛选与时间正逆序排序。
 
     statuses 为空表示不按状态筛选；给出多个状态时按状态集合命中过滤，
     单状态与多状态走同一条查询路径。user_id 非空时只返回该用户的工单，
     把用户隔离下推到查询层，避免先全量取回再在内存里过滤。
+    keyword 非空时按工单号、问题描述、客户名做模糊匹配，任一字段命中即保留，
+    并与状态、用户、分页条件叠加生效。
 
     分页采用偏移量方式：total 为符合筛选条件的总条数（不受分页限制），
     pages 为总页数，has_more 标记后面是否还有下一页。排序以建单时间为准，
@@ -394,6 +457,7 @@ def list_tickets(
     """
     current, size = normalize_pagination(page, page_size)
     direction = normalize_order(order)
+    search = normalize_keyword(keyword)
 
     db = SessionLocal()
     try:
@@ -402,6 +466,8 @@ def list_tickets(
             query = query.filter(Ticket.status.in_(statuses))
         if user_id:
             query = query.filter(Ticket.user_id == user_id)
+        if search:
+            query = _apply_keyword(query, search)
 
         total = query.count()
         order_column = Ticket.created_at.asc() if direction == "asc" else Ticket.created_at.desc()
@@ -415,9 +481,120 @@ def list_tickets(
             "pages": pages,
             "has_more": current * size < total,
             "order": direction,
+            "keyword": search,
         }
     finally:
         db.close()
+
+
+def _split_numbered(text: str) -> list[str]:
+    """按正文里的连续编号把一个片段切成多条。
+
+    仅当片段以编号开头时才按编号切分，避免把正文里的版本号、金额等
+    「数字 + 标点」误当成列表序号；不以编号开头时整段视为一条。
+    """
+    matches = list(_NUMBER_PREFIX_RE.finditer(text))
+    if not matches or matches[0].start() != 0:
+        single = _ITEM_PREFIX_RE.sub("", text).strip()
+        return [single] if single else []
+
+    items: list[str] = []
+    for position, matched in enumerate(matches):
+        end = matches[position + 1].start() if position + 1 < len(matches) else len(text)
+        piece = text[matched.end() : end].strip()
+        if piece:
+            items.append(piece)
+    return items
+
+
+def _split_troubleshoot_items(raw: str | None) -> list[str]:
+    """把一段排查文本切成条目片段。
+
+    文本可能由多步合并写入（如「重启客户端 · 检查网络」），也可能是一段带
+    序号的连续列表（如「1. 重启 2. 换网络」），因此先按通用分隔符切分，
+    再对每个片段按编号二次切分，保证两种写法都能还原成独立条目。
+    """
+    if not raw:
+        return []
+    segments: list[str] = []
+    for part in _ITEM_SEPARATOR_RE.split(str(raw)):
+        text = part.strip()
+        if text:
+            segments.extend(_split_numbered(text))
+    return segments
+
+
+def _clean_troubleshoot_item(text: str) -> str:
+    """清洗单条排查文本：剥离序号前缀、压缩空白、超长截断。"""
+    value = _ITEM_PREFIX_RE.sub("", (text or "").strip())
+    value = " ".join(value.split())
+    if len(value) > MAX_TROUBLESHOOT_ITEM_LENGTH:
+        # 留出一位给省略号，保证截断后长度仍不超过上限
+        value = value[: MAX_TROUBLESHOOT_ITEM_LENGTH - 1].rstrip() + "…"
+    return value
+
+
+def parse_tried_steps(raw: str | None) -> list[dict]:
+    """把已尝试步骤解析为结构化条目列表。
+
+    每条包含自增序号与文本，重复条目只保留首次出现，
+    条数上限为 MAX_TROUBLESHOOT_ITEMS，超出部分丢弃。
+    """
+    items: list[dict] = []
+    seen: set[str] = set()
+    for segment in _split_troubleshoot_items(raw):
+        text = _clean_troubleshoot_item(segment)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        items.append({"index": len(items) + 1, "text": text})
+        if len(items) >= MAX_TROUBLESHOOT_ITEMS:
+            break
+    return items
+
+
+def parse_evidence(raw: str | None) -> list[dict]:
+    """把排查依据解析为结构化条目列表，并拆出可选的来源字段。
+
+    依据里常见的写法是「结论（来源：产品手册第 3 节）」，解析时把括号内的
+    来源剥离为独立字段，文本只保留结论本身；没有来源标注时 source 为空串。
+    """
+    items: list[dict] = []
+    seen: set[str] = set()
+    for segment in _split_troubleshoot_items(raw):
+        text = segment
+        source = ""
+        matched = _SOURCE_RE.search(text)
+        if matched:
+            source = matched.group("source").strip()
+            # 连同来源标注前的分隔空格一起去掉，避免留下悬空的标点
+            text = (text[: matched.start()] + text[matched.end() :]).strip(" \t，,；;")
+        text = _clean_troubleshoot_item(text)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        items.append({"index": len(items) + 1, "text": text, "source": source})
+        if len(items) >= MAX_TROUBLESHOOT_ITEMS:
+            break
+    return items
+
+
+def build_troubleshooting(tried_steps: str | None, evidence: str | None) -> dict:
+    """组装工单的排查信息结构块。
+
+    原始文本字段仍按原样返回以兼容既有前端，这里额外给出结构化的步骤与依据
+    条目及计数，详情页可直接逐条渲染，不必再自行切分字符串。
+    """
+    steps = parse_tried_steps(tried_steps)
+    sources = parse_evidence(evidence)
+    return {
+        "tried_steps": steps,
+        "evidence": sources,
+        "tried_step_count": len(steps),
+        "evidence_count": len(sources),
+        "has_tried_steps": bool(steps),
+        "has_evidence": bool(sources),
+    }
 
 
 def _status_timeline(db, ticket_id: str) -> list[dict]:
@@ -435,10 +612,11 @@ def _status_timeline(db, ticket_id: str) -> list[dict]:
 
 
 def get_ticket(ticket_id: str) -> dict | None:
-    """查询工单详情，附带完整状态时间线（按时间升序）。
+    """查询工单详情，附带结构化排查信息与完整状态时间线（按时间升序）。
 
-    返回的工单字典在原有字段基础上追加 status_timeline 列表，
-    供详情页还原「建单 → 每次流转」的完整处理轨迹。
+    返回的工单字典在原有字段基础上追加：
+    - troubleshooting：已尝试步骤与排查依据的结构化条目及计数
+    - status_timeline：建单与每次流转的状态轨迹
     """
     db = SessionLocal()
     try:
@@ -446,6 +624,7 @@ def get_ticket(ticket_id: str) -> dict | None:
         if not t:
             return None
         data = t.to_dict()
+        data["troubleshooting"] = build_troubleshooting(t.tried_steps, t.evidence)
         data["status_timeline"] = _status_timeline(db, ticket_id)
         return data
     finally:
