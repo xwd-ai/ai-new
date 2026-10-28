@@ -41,18 +41,43 @@
 
 ## 快速开始
 
-```bash
+以下命令在仓库根目录的 Windows PowerShell 中执行，使用项目虚拟环境。
+
+```powershell
 # 安装依赖
-pip install -r backend/requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r backend/requirements.txt
 
 # 配置模型密钥（复制模板后填写）
-cp backend/.env.example backend/.env
+Copy-Item backend/.env.example backend/.env
 
 # 启动（默认 127.0.0.1:8000）
-python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 浏览器打开 http://127.0.0.1:8000/ ，输入「专业版导出功能一直失败」即可体验完整链路。
+
+## 数据库迁移
+
+`backend/requirements.txt` 已包含 Alembic。迁移默认复用应用的数据库引擎，操作 `backend/app.db`，无需在 `alembic.ini` 中另配连接串。已有数据库升级前，先停止服务并备份数据库，再执行：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r backend/requirements.txt
+# 查看迁移目标与数据库当前版本
+.\.venv\Scripts\python.exe -m alembic heads
+.\.venv\Scripts\python.exe -m alembic current
+# 升级并检查结构是否与应用模型一致
+.\.venv\Scripts\python.exe -m alembic upgrade head
+.\.venv\Scripts\python.exe -m alembic current
+.\.venv\Scripts\python.exe -m alembic check
+```
+
+当前目标版本为 `e5b7a91c2046`，冻结了 10 张业务表的结构；`d1178ec7c657` 保留为历史接入点。空库、由应用 `create_all` 建立的旧库，以及已登记历史版本的库，都通过 `upgrade head` 接入。迁移先检查已有表的列、类型、可空性、主键及重复唯一键，再创建缺失表或补齐约束；不兼容结构或重复键会中止升级，保留已有数据，不自动删除或合并记录。
+
+旧知识表缺少的 `fingerprint` 列及索引会补齐，补列不回填旧资料的指纹；已存在的指纹和正文保持原值。缺失的用户名、工单去重键唯一约束也会补齐。重复升级不会重复创建结构。不要通过 `stamp` 绕过检查。
+
+需要重建的表若含自定义触发器、CHECK 或外键约束，会在结构变更前拒绝自动升级；必需索引存在同名但定义冲突时也会拒绝。此类旧库需先人工核对。
+
+应用启动仍保留 `create_all` 和原有补列逻辑，不会自动运行 Alembic，升级需显式执行上述命令。基线不支持自动降级或 `--sql` 离线模式；需要回退时使用升级前的数据库备份恢复。
 
 ## 对话故障提示
 
@@ -78,6 +103,25 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
 
 空密钥或已识别的占位密钥不会阻止应用导入；首次生成回答时会提示联系管理员，且不会创建聊天模型客户端。首轮或后续检索失败时记录错误事件，允许模型继续回答，此时可能没有来源。上述分类只覆盖对话中的模型调用、知识检索和工具执行；数据库读写、知识库管理 API 和启动异常未统一纳入。
 
+## 日志配置
+
+应用日志输出到标准输出，支持以下环境变量；修改后重启服务生效：
+
+| 变量 | 默认值 | 行为 |
+|---|---|---|
+| `LOG_LEVEL` | `INFO` | 控制应用日志级别，非法值退回 `INFO` |
+| `LOG_FORMAT` | 纯文本 | 设置为 `json` 时输出单行 JSON，其余值使用纯文本 |
+
+例如启用 JSON 日志：
+
+```powershell
+$env:LOG_LEVEL = "INFO"
+$env:LOG_FORMAT = "json"
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+当前埋点包括关键词检索 `retrieval.keyword` 的命中情况，以及对话每轮 `agent.step` 的毫秒耗时、输出长度或模型错误分类。日志覆盖范围限于这些调用点，尚未覆盖所有 HTTP 请求或全部检索阶段。
+
 ## 运行测试
 
 在仓库根目录执行，使用项目虚拟环境（以下为 Windows PowerShell 命令）：
@@ -88,6 +132,8 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 开发依赖包含 `pytest` 和 `httpx`。测试使用临时 SQLite 数据库和模拟模型，覆盖工单流程、故障分类、缺失配置、检索降级与来源引用，不验证真实模型供应商的可用性。
+
+迁移测试通过 `Config.attributes["connection"]` 注入临时连接，覆盖空库建表、旧库及已登记历史版本的库接入、资料保留、指纹列和索引补齐、唯一约束修复、重复升级，以及不兼容结构、重复键和基线降级的拒绝行为，不操作实际 `backend/app.db`。
 
 ## 演示账号
 

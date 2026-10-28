@@ -12,7 +12,7 @@ config = context.config
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # add your model's MetaData object here
 # for 'autogenerate' support
@@ -32,25 +32,16 @@ target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
-    """Run migrations in 'offline' mode.
+    """基线依赖在线结构检查，明确拒绝离线 SQL 导出。"""
+    raise RuntimeError("基线迁移需要检查已有表结构，不支持 --sql 离线模式。")
 
-    This configures the context with just a URL
-    and not an Engine, though an Engine is acceptable
-    here as well.  By skipping the Engine creation
-    we don't even need a DBAPI to be available.
 
-    Calls to context.execute() here emit the given string to the
-    script output.
-
-    """
-    url = config.get_main_option("sqlalchemy.url")
+def _run_migrations(connection) -> None:
     context.configure(
-        url=url,
+        connection=connection,
         target_metadata=target_metadata,
-        literal_binds=True,
-        dialect_opts={"paramstyle": "named"},
+        render_as_batch=True,
     )
-
     with context.begin_transaction():
         context.run_migrations()
 
@@ -62,18 +53,14 @@ def run_migrations_online() -> None:
     同一个数据库文件——两处各写一份 URL，迟早会出现「迁移跑在 A 库、
     应用连的是 B 库」这种难查的问题。
     """
-    from backend.database import engine
+    connection = config.attributes.get("connection")
+    if connection is not None:
+        _run_migrations(connection)
+    else:
+        from backend.database import engine
 
-    with engine.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-            # SQLite 不支持大部分 ALTER，用批处理模式模拟
-            render_as_batch=True,
-        )
-
-        with context.begin_transaction():
-            context.run_migrations()
+        with engine.connect() as connection:
+            _run_migrations(connection)
 
 
 if context.is_offline_mode():
