@@ -60,31 +60,47 @@ def create_ticket(req: CreateTicketRequest, authorization: str = Header(default=
 @tickets_router.get("/tickets")
 def list_tickets(
     status: list[str] | None = Query(default=None, description="按状态筛选，支持单状态、逗号分隔多状态与重复传参"),
+    page: int | None = Query(default=None, description="页码，从 1 开始"),
+    page_size: int | None = Query(default=None, description="每页条数，默认 20，上限 100"),
+    order: str | None = Query(default=None, description="按建单时间排序，asc 正序 / desc 逆序（默认）"),
     authorization: str = Header(default=""),
 ):
-    """查询工单列表，支持按状态筛选（单状态 / 多状态）。
+    """分页查询工单列表，支持按状态筛选与按建单时间正逆序排序。
 
     status 支持 status=open、status=open,closed、status=open&status=closed
     三种写法；不传或传 all 表示不筛选。未知状态直接返回明确错误，不静默给空列表。
-    管理员看全部工单，普通用户只看本人工单；响应回显本次生效的状态条件。
+    page / page_size 控制分页，order 控制时间正逆序；分页参数非法时返回明确错误。
+    管理员看全部工单，普通用户只看本人工单；响应回显生效的筛选、分页与排序条件。
     """
     user = _current_user(authorization)
     if not user:
         return {"error": "未登录"}
     try:
         statuses = tickets.normalize_status_filter(status)
+        result = tickets.list_tickets(
+            statuses=statuses,
+            user_id=None if user["role"] == "admin" else user["id"],
+            page=page,
+            page_size=page_size,
+            order=order,
+        )
     except ValueError as e:
         return {"error": str(e)}
-    # 管理员看全部；普通用户只看自己的，隔离条件下推到查询层
-    scope_user = None if user["role"] == "admin" else user["id"]
-    items = tickets.list_tickets(statuses=statuses, user_id=scope_user)
-    if statuses:
-        message = f"按状态 {'/'.join(statuses)} 筛选到 {len(items)} 个工单"
+
+    items = result["items"]
+    scope = f"按状态 {'/'.join(statuses)} 筛选到" if statuses else "共"
+    if result["pages"] > 1:
+        message = f"{scope} {result['total']} 个工单，当前第 {result['page']}/{result['pages']} 页"
     else:
-        message = f"共 {len(items)} 个工单"
+        message = f"{scope} {result['total']} 个工单"
     return {
         "tickets": items,
-        "total": len(items),
+        "total": result["total"],
+        "page": result["page"],
+        "page_size": result["page_size"],
+        "pages": result["pages"],
+        "has_more": result["has_more"],
+        "order": result["order"],
         "statuses": statuses or [],
         "message": message,
     }

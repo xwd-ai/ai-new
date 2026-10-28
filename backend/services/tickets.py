@@ -21,6 +21,10 @@ EXPIRE_BATCH_LIMIT = 200
 # 超时收敛的写锁键：同一时刻只允许一个扫描任务在临界区内收敛
 _EXPIRE_LOCK_KEY = "ticket:pending_confirm:expire"
 
+# 列表分页默认值与单页上限：默认每页 20 条，上限 100 条，避免一次拉全表
+DEFAULT_PAGE_SIZE = 20
+MAX_PAGE_SIZE = 100
+
 
 def _dedup_key(user_id: str, description: str) -> str:
     return hashlib.sha256(f"{user_id}::{description}".encode()).hexdigest()
@@ -341,17 +345,56 @@ def normalize_status_filter(values: list[str] | str | None) -> list[str] | None:
     return selected or None
 
 
+def normalize_pagination(page: int | None, page_size: int | None) -> tuple[int, int]:
+    """校验并归一化分页参数，返回 (页码, 每页条数)。
+
+    页码从 1 开始，小于 1 视为非法；每页条数默认 20，超过上限时拒绝而不是
+    静默截断，避免调用方以为拿到了期望的条数。非法入参抛 ValueError，
+    由接口层转成明确的错误信息。
+    """
+    current = 1 if page is None else int(page)
+    if current < 1:
+        raise ValueError("页码必须大于等于 1")
+    size = DEFAULT_PAGE_SIZE if page_size is None else int(page_size)
+    if size < 1:
+        raise ValueError("每页条数必须大于等于 1")
+    if size > MAX_PAGE_SIZE:
+        raise ValueError(f"每页条数不能超过 {MAX_PAGE_SIZE}")
+    return current, size
+
+
+def normalize_order(order: str | None) -> str:
+    """归一化排序方向：按建单时间正序（asc）或逆序（desc），默认逆序。"""
+    if not order:
+        return "desc"
+    value = str(order).strip().lower()
+    if value in ("asc", "ascending", "created_asc"):
+        return "asc"
+    if value in ("desc", "descending", "created_desc"):
+        return "desc"
+    raise ValueError("排序方向只支持 asc 或 desc")
+
+
 def list_tickets(
     statuses: list[str] | None = None,
     user_id: str | None = None,
-) -> list[dict]:
-    """查询工单列表，支持按状态与所属用户筛选。
+    page: int | None = None,
+    page_size: int | None = None,
+    order: str | None = None,
+) -> dict:
+    """分页查询工单列表，支持按状态、所属用户筛选与时间正逆序排序。
 
     statuses 为空表示不按状态筛选；给出多个状态时按状态集合命中过滤，
     单状态与多状态走同一条查询路径。user_id 非空时只返回该用户的工单，
     把用户隔离下推到查询层，避免先全量取回再在内存里过滤。
-    列表按建单时间倒序，最新工单排在最前。
+
+    分页采用偏移量方式：total 为符合筛选条件的总条数（不受分页限制），
+    pages 为总页数，has_more 标记后面是否还有下一页。排序以建单时间为准，
+    并以工单号作为次序兜底，保证同一时间戳的记录在翻页时顺序稳定、不重不漏。
     """
+    current, size = normalize_pagination(page, page_size)
+    direction = normalize_order(order)
+
     db = SessionLocal()
     try:
         query = db.query(Ticket)
@@ -359,7 +402,20 @@ def list_tickets(
             query = query.filter(Ticket.status.in_(statuses))
         if user_id:
             query = query.filter(Ticket.user_id == user_id)
-        return [t.to_dict() for t in query.order_by(Ticket.created_at.desc()).all()]
+
+        total = query.count()
+        order_column = Ticket.created_at.asc() if direction == "asc" else Ticket.created_at.desc()
+        rows = query.order_by(order_column, Ticket.id.asc()).offset((current - 1) * size).limit(size).all()
+        pages = (total + size - 1) // size
+        return {
+            "items": [t.to_dict() for t in rows],
+            "total": total,
+            "page": current,
+            "page_size": size,
+            "pages": pages,
+            "has_more": current * size < total,
+            "order": direction,
+        }
     finally:
         db.close()
 
