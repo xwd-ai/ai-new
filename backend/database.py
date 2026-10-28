@@ -12,6 +12,9 @@ _engine = create_engine(
     echo=False,
 )
 
+# 对外暴露引擎：迁移脚本需要与应用共用同一个连接目标
+engine = _engine
+
 SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False)
 
 
