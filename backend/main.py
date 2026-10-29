@@ -11,6 +11,7 @@ from backend.api.knowledge import knowledge_router
 from backend.api.tickets import tickets_router
 from backend.database import init_db
 from backend.seed import seed_all
+from backend.schemas import HealthResponse
 
 app = FastAPI(title="AI 客服与工单助手", version="0.1.0")
 
@@ -34,7 +35,7 @@ FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 app.mount("/assets", StaticFiles(directory=FRONTEND_DIR), name="assets")
 
 
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse, summary="检查服务与模型配置")
 def health() -> JSONResponse:
     """健康检查：同时报告模型能力配置状态。
 

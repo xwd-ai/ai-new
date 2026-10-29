@@ -69,3 +69,23 @@ class IngestResponse(BaseModel):
     chunks: int
     stage: str
     detail: str = ""
+
+
+class KnowledgeSummary(BaseModel):
+    id: str
+    title: str
+    kind: str
+
+
+class KnowledgeListResponse(BaseModel):
+    total: int
+    items: list[KnowledgeSummary]
+
+
+class KnowledgeDiagnosisResponse(BaseModel):
+    query: str
+    top_k: int = Field(description="实际使用的返回条数，输入会截断到 1～20")
+    prefetch_depth: int
+    config: dict = Field(description="本次检索配置")
+    stages: list[dict] = Field(description="各检索阶段的数量、条目编号与诊断信息")
+    final_ids: list[str]

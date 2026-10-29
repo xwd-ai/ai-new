@@ -5,7 +5,7 @@
 
 from fastapi import APIRouter, Header, HTTPException
 
-from backend.schemas import IngestRequest, IngestResponse
+from backend.schemas import ErrorResponse, IngestRequest, IngestResponse, KnowledgeListResponse
 from backend.services import chat as chat_service
 from backend.services import ingest as ingest_service
 from backend.services import knowledge
@@ -21,7 +21,14 @@ def _require_admin(authorization: str) -> dict:
     return user
 
 
-@knowledge_router.post("/knowledge/ingest", response_model=IngestResponse)
+@knowledge_router.post(
+    "/knowledge/ingest", response_model=IngestResponse, summary="提交文本资料入库",
+    description="仅管理员可写入 JSON 文本资料。按规范化标题与正文计算指纹；重复返回 created=false、chunks=0。",
+    responses={
+        403: {"model": ErrorResponse, "description": "未登录或不具备管理员权限"},
+        422: {"model": ErrorResponse, "description": "输入校验失败或入库参数不合法"},
+    },
+)
 def ingest_knowledge(
     req: IngestRequest, authorization: str = Header(default="")
 ) -> IngestResponse:
@@ -43,7 +50,10 @@ def ingest_knowledge(
     return IngestResponse(**result.to_dict())
 
 
-@knowledge_router.get("/knowledge/items")
+@knowledge_router.get(
+    "/knowledge/items", response_model=KnowledgeListResponse, summary="列出知识条目摘要",
+    responses={403: {"model": ErrorResponse, "description": "未登录或不具备管理员权限"}},
+)
 def list_knowledge(authorization: str = Header(default="")) -> dict:
     """列出已入库的资料，供管理端核对。"""
     _require_admin(authorization)

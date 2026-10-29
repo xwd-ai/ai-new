@@ -1,14 +1,22 @@
-from fastapi import APIRouter, Header, HTTPException
+from typing import Annotated
+
+from fastapi import APIRouter, Header, HTTPException, Query
 
 from backend.database import SessionLocal
 from backend.services import chat as chat_service, knowledge
 from backend.models import Conversation, Message
-from backend.schemas import ChatRequest, ChatResponse, SourceDetail
+from backend.schemas import (
+    ChatRequest, ChatResponse, ConversationResponse, ErrorResponse,
+    KnowledgeDiagnosisResponse, SourceDetail,
+)
 
 chat_router = APIRouter()
 
 
-@chat_router.post("/chat", response_model=ChatResponse)
+@chat_router.post(
+    "/chat", response_model=ChatResponse, summary="生成对话回答",
+    description="允许匿名请求；无效登录态按匿名处理。模型调用失败仍返回 200，故障提示见 reply 与 trace。",
+)
 def chat(req: ChatRequest, authorization: str = Header(default="")) -> ChatResponse:
     user = chat_service.current_user(authorization)
     user_id = user["id"] if user else "anonymous"
@@ -25,7 +33,10 @@ def chat(req: ChatRequest, authorization: str = Header(default="")) -> ChatRespo
     )
 
 
-@chat_router.get("/sources/{source_id}", response_model=SourceDetail)
+@chat_router.get(
+    "/sources/{source_id}", response_model=SourceDetail, summary="回查知识来源原文",
+    responses={404: {"model": ErrorResponse, "description": "来源不存在"}},
+)
 def source_detail(source_id: str) -> SourceDetail:
     """按来源编号回查原文，供回答中的来源标注点击后查看。
 
@@ -44,10 +55,13 @@ def source_detail(source_id: str) -> SourceDetail:
     )
 
 
-@chat_router.get("/knowledge/diagnose")
+@chat_router.get(
+    "/knowledge/diagnose", response_model=KnowledgeDiagnosisResponse, summary="诊断知识检索",
+    responses={403: {"model": ErrorResponse, "description": "未登录或不具备管理员权限"}},
+)
 def diagnose_knowledge(
     q: str,
-    top_k: int = 3,
+    top_k: Annotated[int, Query(description="实际截断到 1～20，不因整数超出范围返回 422")] = 3,
     authorization: str = Header(default=""),
 ) -> dict:
     """诊断一次检索，返回每个阶段的命中情况。
@@ -63,7 +77,10 @@ def diagnose_knowledge(
     return knowledge.diagnose(q, top_k=max(1, min(top_k, 20)))
 
 
-@chat_router.get("/conversation")
+@chat_router.get(
+    "/conversation", response_model=ConversationResponse, summary="读取最近会话的消息",
+    description="未登录或登录态无效时返回空消息列表；有效用户仅返回其最近会话。",
+)
 def conversation(authorization: str = Header(default="")):
     user = chat_service.current_user(authorization)
     if not user:
