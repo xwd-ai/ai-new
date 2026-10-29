@@ -277,6 +277,39 @@ def pending_tickets(
     }
 
 
+@tickets_router.get("/tickets/{ticket_id}/transfer-decision")
+def transfer_decision(
+    ticket_id: str,
+    user_text: str = Query(default="", max_length=500, description="用户当前消息，用于识别主动要求转人工"),
+    feature: str = Query(default="", max_length=50, description="问题涉及的功能，用于判断是否在当前版本能力内"),
+    authorization: str = Header(default=""),
+):
+    """按规则判定工单是否需要转人工，返回命中原因与判定依据。
+
+    三条规则按优先级返回：用户主动要求、超出服务范围（无订单 / 服务到期 /
+    版本不含该功能）、多次排查无效（已尝试步骤或人工回复达到阈值）。
+    判定只读：不改变工单状态，也不追加回复，调用方据此决定是否调用转人工接口。
+    服务范围取自工单所属用户的订单而非当前登录账号，管理员查看他人工单时结论
+    仍对应工单本人的服务范围。普通用户仅可判定本人工单，越权返回「无权限」。
+    """
+    user = _current_user(authorization)
+    if not user:
+        return {"error": "未登录"}
+    data = tickets.get_ticket(ticket_id)
+    if data is None:
+        return {"error": "工单不存在"}
+    if user["role"] != "admin" and data["user_id"] != user["id"]:
+        return {"error": "无权限"}
+
+    decision = tickets.evaluate_transfer_rule(
+        data,
+        order=orders.query_order(data["user_id"]),
+        user_text=user_text,
+        feature=feature,
+    )
+    return {"decision": decision, "message": decision["message"]}
+
+
 def _detail_message(data: dict) -> str:
     """按详情各分区内容拼装一句话摘要，空分区给出「暂无」提示。
 

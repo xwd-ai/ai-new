@@ -8,7 +8,12 @@ from sqlalchemy import func, or_, text
 
 from backend.database import SessionLocal
 from backend.models import Ticket
-from backend.models.ticket import TicketStatusLog, is_valid_status, validate_transition
+from backend.models.ticket import (
+    TicketStatusLog,
+    can_transition,
+    is_valid_status,
+    validate_transition,
+)
 
 # 工单持久化到 SQLite 数据库
 # 一个工单对应一次「问题 → 排查 → 建单」的闭环
@@ -52,6 +57,28 @@ _SYSTEM_REPLIER = "system"
 _REPLIER_KEYS = ("replier", "author", "operator", "user_name", "name")
 _CONTENT_KEYS = ("content", "text", "message")
 _TIME_KEYS = ("at", "time", "created_at", "timestamp")
+
+# 转人工阈值：已尝试步骤达到该条数仍无结论，视为多次排查无效
+TRANSFER_TRIED_STEP_THRESHOLD = 3
+# 转人工阈值：人工回复达到该轮数问题仍未闭环，视为反复沟通无效
+TRANSFER_HUMAN_REPLY_THRESHOLD = 2
+# 用户主动要求转人工的说法，命中任一即视为明确诉求
+_TRANSFER_REQUEST_RE = re.compile(
+    r"转人工|人工客服|人工服务|人工处理|真人客服|找人工|找客服|联系客服|升级处理",
+    re.IGNORECASE,
+)
+# 判定原因码与展示文案，字典顺序即响应中的输出顺序（用户诉求优先）
+TRANSFER_REASON_LABELS = {
+    "user_requested": "用户主动要求转人工",
+    "out_of_scope": "超出服务范围",
+    "ineffective_retries": "多次排查无效",
+}
+# 超出服务范围的三种细分情形，用于回显具体判定依据
+SCOPE_REASON_TEXT = {
+    "no_order": "未查询到有效订单",
+    "service_expired": "服务已到期或订单非有效状态",
+    "feature_not_included": "不包含该功能",
+}
 
 
 def _dedup_key(user_id: str, description: str) -> str:
@@ -876,3 +903,156 @@ def transfer_to_human(ticket_id: str, reason: str = "") -> dict | None:
         return t.to_dict()
     finally:
         db.close()
+
+
+def detect_transfer_request(text: str | None) -> str:
+    """识别文本中是否包含用户主动要求转人工的说法。
+
+    命中时返回命中的说法，供判定结果回显依据；未命中返回空串。
+    只做关键词匹配，不做语义推断，避免把普通问题描述误判为转人工诉求。
+    """
+    matched = _TRANSFER_REQUEST_RE.search(text or "")
+    return matched.group(0) if matched else ""
+
+
+def _check_service_scope(order: dict | None, feature: str) -> dict:
+    """按订单信息判断当前问题是否超出服务范围。
+
+    依次判断三点：有没有订单、订单是否在服务期内、问题涉及的功能是否在
+    当前版本的能力范围内。feature 为空时跳过功能比对，只按订单与服务期判定。
+    返回是否超范围、细分原因码与可直接展示的说明。
+    """
+    if not order or not order.get("has_order"):
+        return {
+            "out_of_scope": True,
+            "code": "no_order",
+            "detail": SCOPE_REASON_TEXT["no_order"],
+        }
+    if not order.get("in_service"):
+        return {
+            "out_of_scope": True,
+            "code": "service_expired",
+            "detail": SCOPE_REASON_TEXT["service_expired"],
+        }
+
+    target = " ".join(str(feature or "").split())
+    if target:
+        features = [str(item) for item in (order.get("features") or [])]
+        # 双向包含：用户说「导出」而版本特性写作「批量导出」时仍视为在范围内
+        if not any(target in item or item in target for item in features):
+            tier = order.get("product_name") or order.get("product_tier") or "当前版本"
+            return {
+                "out_of_scope": True,
+                "code": "feature_not_included",
+                "detail": f"{tier}{SCOPE_REASON_TEXT['feature_not_included']}「{target}」",
+            }
+    return {"out_of_scope": False, "code": "", "detail": ""}
+
+
+def evaluate_transfer_rule(
+    ticket: dict,
+    order: dict | None = None,
+    user_text: str = "",
+    feature: str = "",
+    tried_step_count: int | None = None,
+    human_reply_count: int | None = None,
+) -> dict:
+    """按三条规则判定工单是否需要转人工，给出命中原因与判定依据。
+
+    规则与优先级：
+    1. 用户主动要求：用户消息或工单描述里出现转人工诉求，最优先，用户意愿
+       不被其他规则覆盖；
+    2. 超出服务范围：无订单、服务已到期、所问功能不在当前版本能力内；
+    3. 多次排查无效：已尝试步骤数达到阈值，或人工回复轮数达到阈值仍未闭环。
+
+    判定只读不写：不改变工单状态，也不追加回复，是否真的转人工由调用方决定。
+    工单已处终态或当前状态不允许流转到转人工时 applicable 为 False，
+    直接给出「无需判定」，避免对已关闭、待确认的工单给出误导性建议。
+    """
+    status = ticket.get("status", "")
+    applicable = can_transition(status, "transferred_human")
+
+    tried = (
+        len(parse_tried_steps(ticket.get("tried_steps")))
+        if tried_step_count is None
+        else max(0, int(tried_step_count))
+    )
+    human = (
+        build_reply_timeline(ticket.get("replies"), ticket.get("created_at"))["human_count"]
+        if human_reply_count is None
+        else max(0, int(human_reply_count))
+    )
+
+    reasons: list[dict] = []
+    keyword = ""
+    if applicable:
+        keyword = detect_transfer_request(
+            f"{user_text}\n{ticket.get('description', '')}"
+        )
+        if keyword:
+            reasons.append(
+                {
+                    "code": "user_requested",
+                    "label": TRANSFER_REASON_LABELS["user_requested"],
+                    "detail": f"命中「{keyword}」",
+                }
+            )
+
+        scope = _check_service_scope(order, feature)
+        if scope["out_of_scope"]:
+            reasons.append(
+                {
+                    "code": "out_of_scope",
+                    "label": TRANSFER_REASON_LABELS["out_of_scope"],
+                    "detail": scope["detail"],
+                }
+            )
+
+        # 排查无效的两种表现只记一条原因码，避免同一原因重复出现在原因文本里
+        if tried >= TRANSFER_TRIED_STEP_THRESHOLD:
+            reasons.append(
+                {
+                    "code": "ineffective_retries",
+                    "label": TRANSFER_REASON_LABELS["ineffective_retries"],
+                    "detail": f"已尝试 {tried} 步仍无结论",
+                }
+            )
+        elif human >= TRANSFER_HUMAN_REPLY_THRESHOLD:
+            reasons.append(
+                {
+                    "code": "ineffective_retries",
+                    "label": TRANSFER_REASON_LABELS["ineffective_retries"],
+                    "detail": f"已有 {human} 条人工回复仍未闭环",
+                }
+            )
+
+    reason_text = "；".join(f"{item['label']}（{item['detail']}）" for item in reasons)
+    if not applicable:
+        message = f"工单当前状态为 {status}，无需做转人工判定"
+    elif reasons:
+        message = f"建议转人工：{reason_text}"
+    else:
+        message = "暂不需要转人工：问题在服务范围内，排查轮次也未达到阈值"
+
+    return {
+        "ticket_id": ticket.get("id"),
+        "status": status,
+        "applicable": applicable,
+        "should_transfer": bool(applicable and reasons),
+        "suggested_status": "transferred_human" if (applicable and reasons) else "",
+        "reason_codes": [item["code"] for item in reasons],
+        "reasons": reasons,
+        "reason_text": reason_text,
+        "basis": {
+            "tried_step_count": tried,
+            "tried_step_threshold": TRANSFER_TRIED_STEP_THRESHOLD,
+            "human_reply_count": human,
+            "human_reply_threshold": TRANSFER_HUMAN_REPLY_THRESHOLD,
+            "feature": " ".join(str(feature or "").split()),
+            "has_order": bool(order and order.get("has_order")),
+            "in_service": bool(order and order.get("has_order") and order.get("in_service")),
+            "matched_keyword": keyword,
+        },
+        "message": message,
+    }
+
