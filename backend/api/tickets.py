@@ -279,11 +279,13 @@ def pending_tickets(
 
 @tickets_router.get("/tickets/{ticket_id}")
 def ticket_detail(ticket_id: str, authorization: str = Header(default="")):
-    """查询单个工单详情，返回结构化排查信息与完整状态时间线。
+    """查询单个工单详情，返回结构化排查信息、状态时间线与回复时间线。
 
     troubleshooting 汇总已尝试步骤与排查依据：每个条目带自增序号，依据条目
     还会拆出来源字段；同时给出条目计数与是否有内容的标记，前端可直接逐条渲染。
-    原始 tried_steps / evidence 文本照旧返回，保证既有展示不受影响。
+    reply_timeline 逐条给出回复人、内容、时间与来源（人工/系统），并附人工回复数、
+    系统说明数、首次人工响应耗时，取消原因与转人工说明也能在同一时间线里还原。
+    原始 tried_steps / evidence / replies 字段照旧返回，保证既有展示不受影响。
     管理员可查看任意工单；普通用户仅可查看本人创建的工单，
     越权访问返回「无权限」，工单不存在返回「工单不存在」。
     """
@@ -297,11 +299,20 @@ def ticket_detail(ticket_id: str, authorization: str = Header(default="")):
         return {"error": "无权限"}
 
     troubleshooting = data["troubleshooting"]
+    reply_timeline = data["reply_timeline"]
+    parts = [f"工单 {data['id']}"]
     if troubleshooting["has_tried_steps"] or troubleshooting["has_evidence"]:
-        message = (
-            f"工单 {data['id']} 留存 {troubleshooting['tried_step_count']} 条已尝试步骤、"
+        parts.append(
+            f"留存 {troubleshooting['tried_step_count']} 条已尝试步骤、"
             f"{troubleshooting['evidence_count']} 条排查依据"
         )
     else:
-        message = f"工单 {data['id']} 暂无已尝试步骤与排查依据"
-    return {"ticket": data, "message": message}
+        parts.append("暂无已尝试步骤与排查依据")
+    if reply_timeline["has_replies"]:
+        parts.append(
+            f"共 {reply_timeline['total']} 条回复（人工 {reply_timeline['human_count']} 条、"
+            f"系统 {reply_timeline['system_count']} 条）"
+        )
+    else:
+        parts.append("暂无回复记录")
+    return {"ticket": data, "message": "，".join(parts)}

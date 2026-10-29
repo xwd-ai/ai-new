@@ -2,6 +2,7 @@ import hashlib
 import re
 import time
 from contextlib import contextmanager
+from datetime import datetime
 
 from sqlalchemy import func, or_, text
 
@@ -42,6 +43,15 @@ _ITEM_PREFIX_RE = re.compile(r"^\s*(?:[（(]?\d{1,2}[)）.、]|[①-⑳]|[-*•]
 _NUMBER_PREFIX_RE = re.compile(r"[（(]?\d{1,2}[)）.、]|[①-⑳]")
 # 依据条目内的来源标注：「…（来源：产品手册第 3 节）」，剥离后作为独立字段
 _SOURCE_RE = re.compile(r"[（(【\[]\s*(?:来源|出处|依据)\s*[:：]?\s*(?P<source>[^）)】\]]+?)\s*[）)】\]]")
+
+# 详情回复时间线的条数上限：超出后只保留最近若干条，避免长会话把详情响应撑大
+MAX_REPLY_ITEMS = 100
+# 系统来源标记：该回复人不计为人工回复，仅用于取消、超时、转人工等系统说明
+_SYSTEM_REPLIER = "system"
+# 回复字段的兼容别名：历史数据里回复人/内容/时间可能落在不同键名下
+_REPLIER_KEYS = ("replier", "author", "operator", "user_name", "name")
+_CONTENT_KEYS = ("content", "text", "message")
+_TIME_KEYS = ("at", "time", "created_at", "timestamp")
 
 
 def _dedup_key(user_id: str, description: str) -> str:
@@ -611,12 +621,121 @@ def _status_timeline(db, ticket_id: str) -> list[dict]:
     return [log.to_dict() for log in logs]
 
 
+def _first_value(raw: dict, keys: tuple[str, ...], default=None):
+    """按候选键顺序取出第一个非空值，用于兼容历史数据的字段别名。"""
+    for key in keys:
+        value = raw.get(key)
+        if value is not None and value != "":
+            return value
+    return default
+
+
+def _format_reply_time(value) -> tuple[float | None, str]:
+    """把回复时间归一化为 (时间戳, 本地时间字符串)。
+
+    时间可能是秒级浮点时间戳，也可能是数字字符串；缺失或无法解析时
+    时间戳返回 None、字符串返回空串，由调用方按「时间未知」处理。
+    """
+    if isinstance(value, bool):
+        return None, ""
+    try:
+        ts = float(value)
+    except (TypeError, ValueError):
+        return None, ""
+    if ts <= 0:
+        return None, ""
+    return ts, datetime.fromtimestamp(ts).isoformat(timespec="seconds")
+
+
+def _normalize_reply(raw, index: int) -> dict | None:
+    """把一条原始回复归一化为时间线条目（序号/回复人/内容/时间/来源）。
+
+    原始回复约定为 {replier, content, at}，同时兼容只存了纯文本的旧数据；
+    内容为空的条目直接丢弃，避免详情里出现空白行。
+    回复人非 system 时标记为人工回复，前端据此区分人工回复与系统说明。
+    """
+    if isinstance(raw, str):
+        replier, content, at = "", raw, None
+    elif isinstance(raw, dict):
+        replier = _first_value(raw, _REPLIER_KEYS, "")
+        content = _first_value(raw, _CONTENT_KEYS, "")
+        at = _first_value(raw, _TIME_KEYS)
+    else:
+        return None
+
+    text = " ".join(str(content or "").split())
+    if not text:
+        return None
+    name = str(replier or "").strip() or _SYSTEM_REPLIER
+    is_human = name != _SYSTEM_REPLIER
+    ts, ts_text = _format_reply_time(at)
+    return {
+        "index": index,
+        "replier": name,
+        "content": text,
+        "at": ts,
+        "at_text": ts_text,
+        "source": "human" if is_human else "system",
+        "is_human": is_human,
+    }
+
+
+def build_reply_timeline(
+    replies,
+    created_at: float | None = None,
+) -> dict:
+    """组装工单的回复时间线，按回复发生顺序逐条返回。
+
+    每条包含自增序号、回复人、内容、时间戳与本地时间字符串，并用 source /
+    is_human 区分人工回复与系统说明（取消原因、超时关闭、转人工等）。
+    同时给出人工/系统回复计数、首末回复时间与首次人工响应耗时，
+    详情页与运营复盘都无需再自行遍历原始数组做统计。
+
+    回复条数超过上限时只保留最近 MAX_REPLY_ITEMS 条并标记 truncated，
+    序号按保留后的顺序重排，保证前端渲染的序号连续。
+    """
+    items: list[dict] = []
+    for raw in list(replies or []):
+        entry = _normalize_reply(raw, len(items) + 1)
+        if entry:
+            items.append(entry)
+
+    truncated = len(items) > MAX_REPLY_ITEMS
+    if truncated:
+        items = items[-MAX_REPLY_ITEMS:]
+        for position, entry in enumerate(items, 1):
+            entry["index"] = position
+
+    human_items = [entry for entry in items if entry["is_human"]]
+    system_items = [entry for entry in items if not entry["is_human"]]
+
+    # 首次人工响应耗时：从建单到第一条人工回复的间隔，无人工回复或时间缺失时为空
+    first_response = None
+    if human_items and human_items[0]["at"] is not None and created_at:
+        first_response = max(0, int(round(human_items[0]["at"] - created_at)))
+
+    return {
+        "items": items,
+        "total": len(items),
+        "human_count": len(human_items),
+        "system_count": len(system_items),
+        "has_replies": bool(items),
+        "has_human_reply": bool(human_items),
+        "first_reply_at": items[0]["at"] if items else None,
+        "last_reply_at": items[-1]["at"] if items else None,
+        "last_human_reply_at": human_items[-1]["at"] if human_items else None,
+        "first_response_seconds": first_response,
+        "truncated": truncated,
+    }
+
+
 def get_ticket(ticket_id: str) -> dict | None:
-    """查询工单详情，附带结构化排查信息与完整状态时间线（按时间升序）。
+    """查询工单详情，附带结构化排查信息、完整状态时间线与回复时间线。
 
     返回的工单字典在原有字段基础上追加：
     - troubleshooting：已尝试步骤与排查依据的结构化条目及计数
     - status_timeline：建单与每次流转的状态轨迹
+    - reply_timeline：人工回复与系统说明的时间线，含回复人、内容、时间与计数
     """
     db = SessionLocal()
     try:
@@ -626,6 +745,7 @@ def get_ticket(ticket_id: str) -> dict | None:
         data = t.to_dict()
         data["troubleshooting"] = build_troubleshooting(t.tried_steps, t.evidence)
         data["status_timeline"] = _status_timeline(db, ticket_id)
+        data["reply_timeline"] = build_reply_timeline(t.replies, t.created_at)
         return data
     finally:
         db.close()
