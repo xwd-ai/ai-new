@@ -14,7 +14,7 @@ from backend import database, models  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[2]
 OLD_REVISION = "d1178ec7c657"
-HEAD_REVISION = "e5b7a91c2046"
+HEAD_REVISION = "c94e1a7f5208"
 
 
 @pytest.fixture()
@@ -38,6 +38,8 @@ def _version(connection):
 def _legacy_schema(connection, *, fingerprint=True, check=False):
     metadata = sa.MetaData()
     for table in database.Base.metadata.sorted_tables:
+        if table.name == "knowledge_ingest_leases":
+            continue
         if table.name == "knowledge_docs" and not fingerprint:
             sa.Table(
                 table.name, metadata,
@@ -246,3 +248,29 @@ def test_conflicting_index_definition_is_rejected_before_version_advance(migrati
     with pytest.raises(RuntimeError, match="索引.*不兼容"):
         command.upgrade(config, "head")
     assert _version(connection) == OLD_REVISION
+
+
+def test_previous_head_upgrade_adds_lease_table_without_changing_knowledge(migration_env):
+    config, connection = migration_env
+    command.upgrade(config, "e5b7a91c2046")
+    assert not sa.inspect(connection).has_table("knowledge_ingest_leases")
+    connection.execute(sa.text(
+        "INSERT INTO knowledge_docs (id, kind, title, keywords, content) "
+        "VALUES ('k-old', 'manual', '原资料', '[]', '原正文')"
+    ))
+    connection.commit()
+    command.upgrade(config, "head")
+    assert _version(connection) == HEAD_REVISION
+    assert connection.scalar(sa.text("SELECT content FROM knowledge_docs WHERE id='k-old'")) == "原正文"
+    assert sa.inspect(connection).has_table("knowledge_ingest_leases")
+    assert compare_metadata(MigrationContext.configure(connection), database.Base.metadata) == []
+
+
+def test_incompatible_existing_lease_table_does_not_advance_revision(migration_env):
+    config, connection = migration_env
+    command.upgrade(config, "e5b7a91c2046")
+    connection.exec_driver_sql("CREATE TABLE knowledge_ingest_leases (id INTEGER PRIMARY KEY)")
+    connection.commit()
+    with pytest.raises(RuntimeError, match="不兼容"):
+        command.upgrade(config, "head")
+    assert _version(connection) == "e5b7a91c2046"

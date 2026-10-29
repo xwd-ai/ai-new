@@ -1,4 +1,4 @@
-from sqlalchemy import JSON, String
+from sqlalchemy import Float, JSON, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base
@@ -12,7 +12,7 @@ class KnowledgeDoc(Base):
     title: Mapped[str] = mapped_column(String, nullable=False)
     keywords: Mapped[list] = mapped_column(JSON, nullable=False)
     content: Mapped[str] = mapped_column(String, nullable=False)
-    # 内容指纹：用于识别重复入库的同内容资料，重命名不会产生第二份
+    # 标题与正文的规范化指纹，用于识别同一资料的重复入库
     fingerprint: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
 
     def to_dict(self) -> dict:
@@ -23,3 +23,11 @@ class KnowledgeDoc(Base):
             "keywords": self.keywords,
             "content": self.content,
         }
+
+
+class KnowledgeIngestLease(Base):
+    __tablename__ = "knowledge_ingest_leases"
+
+    fingerprint: Mapped[str] = mapped_column(String, primary_key=True)
+    owner: Mapped[str] = mapped_column(String, nullable=False)
+    expires_at: Mapped[float] = mapped_column(Float, nullable=False)

@@ -6,8 +6,7 @@
 因此这里做三件事：
 
 1. **幂等**：同一份内容重复提交，返回已有记录，不新建。判定依据是
-   内容指纹（标题 + 正文的规范化哈希），而不是文件名——重命名同一份
-   资料不该产生第二份知识。
+   内容指纹（标题 + 正文的规范化哈希）；修改标题可能生成新的资料。
 2. **分块**：长正文按长度与重叠切开，切点尽量落在段落边界，
    避免把一句话从中间劈开。
 3. **检查点**：每份资料记录处理到哪一步（已解析 / 已分块 / 已入库），
@@ -20,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import time
 import uuid
@@ -28,6 +28,7 @@ from pathlib import Path
 
 from backend.database import SessionLocal
 from backend.models import KnowledgeDoc
+from backend.services import ingest_leases
 
 # 分块参数：单块目标长度与相邻块重叠，保证跨块语义不断裂
 CHUNK_SIZE = 512
@@ -207,51 +208,62 @@ def ingest(
     checkpoint.mark(STAGE_PARSED)
 
     fingerprint = content_fingerprint(title, content)
-    existing = _find_existing(fingerprint)
-    if existing is not None:
-        record_checkpoint(fingerprint, STAGE_STORED, existing.id)
-        return IngestResult(
-            knowledge_id=existing.id,
-            created=False,
-            chunks=0,
-            stage=STAGE_STORED,
-            detail="内容已存在，返回已有记录",
-        )
-
-    record_checkpoint(fingerprint, STAGE_PARSED, "")
-
-    chunks = split_into_chunks(content)
-    checkpoint.mark(STAGE_CHUNKED)
-    checkpoint.chunk_count = len(chunks)
-
-    doc_id = knowledge_id or f"k-{uuid.uuid4().hex[:12]}"
-    db = SessionLocal()
-    try:
-        db.add(
-            KnowledgeDoc(
-                id=doc_id,
-                kind=kind,
-                title=title,
-                keywords=_derive_keywords(title, content, keywords),
-                content=content,
-                fingerprint=fingerprint,
+    with ingest_leases.hold(fingerprint, SessionLocal) as lease:
+        # 必须在获取租约之后重查，避免先前的执行者刚完成入库。
+        existing = _find_existing(fingerprint)
+        if existing is not None:
+            record_checkpoint(fingerprint, STAGE_STORED, existing.id)
+            return IngestResult(
+                knowledge_id=existing.id,
+                created=False,
+                chunks=0,
+                stage=STAGE_STORED,
+                detail="内容已存在，返回已有记录",
             )
-        )
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
 
-    checkpoint.mark(STAGE_STORED)
-    record_checkpoint(fingerprint, STAGE_STORED, doc_id)
-    return IngestResult(
-        knowledge_id=doc_id,
-        created=True,
-        chunks=len(chunks),
-        stage=STAGE_STORED,
-    )
+        record_checkpoint(fingerprint, STAGE_PARSED, "")
+
+        chunks = split_into_chunks(content)
+        checkpoint.mark(STAGE_CHUNKED)
+        checkpoint.chunk_count = len(chunks)
+
+        doc_id = knowledge_id or f"k-{uuid.uuid4().hex[:12]}"
+        created = True
+        db = SessionLocal()
+        try:
+            # 续租检查与知识落库同一事务；失去所有权的旧执行者不能提交。
+            lease.refresh(db)
+            existing = db.query(KnowledgeDoc).filter(KnowledgeDoc.fingerprint == fingerprint).first()
+            if existing is not None:
+                doc_id = existing.id
+                created = False
+            else:
+                db.add(
+                    KnowledgeDoc(
+                        id=doc_id,
+                        kind=kind,
+                        title=title,
+                        keywords=_derive_keywords(title, content, keywords),
+                        content=content,
+                        fingerprint=fingerprint,
+                    )
+                )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+        checkpoint.mark(STAGE_STORED)
+        record_checkpoint(fingerprint, STAGE_STORED, doc_id)
+        return IngestResult(
+            knowledge_id=doc_id,
+            created=created,
+            chunks=len(chunks) if created else 0,
+            stage=STAGE_STORED,
+            detail="" if created else "内容已存在，返回已有记录",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +292,17 @@ def _load_checkpoints() -> dict[str, dict]:
         return {}
     if not isinstance(raw, dict):
         return {}
-    return {k: v for k, v in raw.items() if isinstance(v, dict)}
+    records = {}
+    for key, value in raw.items():
+        if not isinstance(value, dict):
+            continue
+        try:
+            if not math.isfinite(float(value.get("at", 0))):
+                continue
+        except (TypeError, ValueError):
+            continue
+        records[key] = value
+    return records
 
 
 def _save_checkpoints(data: dict[str, dict]) -> None:

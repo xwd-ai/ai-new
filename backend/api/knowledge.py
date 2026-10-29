@@ -9,6 +9,7 @@ from backend.schemas import ErrorResponse, IngestRequest, IngestResponse, Knowle
 from backend.services import chat as chat_service
 from backend.services import ingest as ingest_service
 from backend.services import knowledge
+from backend.services.ingest_leases import IngestBusyError, IngestLeaseLostError
 
 knowledge_router = APIRouter()
 
@@ -26,6 +27,10 @@ def _require_admin(authorization: str) -> dict:
     description="仅管理员可写入 JSON 文本资料。按规范化标题与正文计算指纹；重复返回 created=false、chunks=0。",
     responses={
         403: {"model": ErrorResponse, "description": "未登录或不具备管理员权限"},
+        409: {
+            "model": ErrorResponse, "description": "相同资料正在处理或入库租约已失效，请稍后重试",
+            "headers": {"Retry-After": {"description": "建议至少等待的秒数，不保证届时已处理完成", "schema": {"type": "integer"}}},
+        },
         422: {"model": ErrorResponse, "description": "输入校验失败或入库参数不合法"},
     },
 )
@@ -45,6 +50,8 @@ def ingest_knowledge(
             kind=req.kind,
             keywords=req.keywords,
         )
+    except (IngestBusyError, IngestLeaseLostError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc), headers={"Retry-After": "1"}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return IngestResponse(**result.to_dict())
