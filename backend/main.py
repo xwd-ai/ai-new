@@ -60,3 +60,8 @@ def login_page() -> FileResponse:
 @app.get("/admin")
 def admin_page() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "admin.html")
+
+
+@app.get("/settings")
+def settings_page() -> FileResponse:
+    return FileResponse(FRONTEND_DIR / "settings.html")

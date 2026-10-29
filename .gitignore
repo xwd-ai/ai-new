@@ -25,3 +25,7 @@ dist/
 
 # 入库检查点（运行期产物）
 backend/ingest_checkpoints.json
+
+# 管理页保存的检索设置与中断写入的临时文件
+backend/retrieval_settings.json
+backend/retrieval_settings.json.*.tmp

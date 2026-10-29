@@ -20,6 +20,8 @@
 | `POST /api/knowledge/ingest` | 管理员 | `IngestResponse` |
 | `GET /api/knowledge/items` | 管理员 | `KnowledgeListResponse` |
 | `GET /api/knowledge/diagnose` | 管理员 | `KnowledgeDiagnosisResponse` |
+| `GET /api/knowledge/settings` | 管理员 | `RetrievalSettings` |
+| `PUT /api/knowledge/settings` | 管理员 | `RetrievalSettings` |
 | `GET /health` | 无需登录 | `HealthResponse` |
 
 对于结构合法的管理员请求，未登录、登录态无效或普通客户均返回 HTTP 403 和 `{"detail":"需要管理员权限"}`，当前不会返回 401。输入格式校验可能先于权限检查执行，非法输入可先返回 422。
@@ -126,6 +128,36 @@
 响应包含 `query`、实际 `top_k`、`prefetch_depth`、本次 `config`、各阶段 `stages` 和最终 `final_ids`。阶段名包括 `keyword_recall`、`vector_recall`、`rrf_fusion`、`rerank`、`mmr`；各阶段记录数量与条目编号，并可能包含 `skipped`、`note`、`detail`、`dropped`。
 
 当前 HTTP 路由没有装配向量和重排 provider，诊断通常报告向量跳过、融合退回关键词结果、重排跳过；服务层具备对应能力不代表此接口已经发起模型调用。实际对话目前也使用关键词检索，诊断不是对某次对话的追踪回放。
+
+## 检索设置
+
+`GET /api/knowledge/settings` 返回六项当前生效设置。`PUT /api/knowledge/settings` 必须完整提交下列六项，成功时返回所保存的对象：
+
+| 字段 | 类型 | 范围 | 默认值 |
+|---|---|---|---|
+| `prefetch_floor` | 整数 | 1～1000 | 50 |
+| `prefetch_multiplier` | 整数 | 1～20 | 5 |
+| `rrf_k` | 整数 | 1～1000 | 60 |
+| `vector_weight` | 有限数值 | 0～1 | 0.7 |
+| `keyword_weight` | 有限数值 | 0～1 | 0.3 |
+| `mmr_lambda` | 有限数值 | 0～1 | 0.7 |
+
+不接受数字字符串、布尔值、未知字段、非有限数值或缺少字段；两路权重不能同时为零，无需相加等于 1。非法输入返回 422，原设置不变。非管理员返回 403。文件写入失败返回 503 和 `{"detail":"检索设置保存失败，请检查配置目录写权限或稍后重试"}`，原子替换前的失败不会覆盖已有设置。
+
+保存值优先于对应环境变量，写入本地 `backend/retrieval_settings.json`，后续调用重新读取、重启保留。最后成功写入者生效，无编辑冲突检测；不同配置文件的部署副本不自动同步。文件不存在时使用环境变量和默认值，文件损坏、不可读或校验失败时整体退回这两层并记录日志。环境两路权重同时为零时使用默认 0.7/0.3。候选深度为 `max(top_k * prefetch_multiplier, prefetch_floor)`；诊断响应的旧字段 `config.prefetch_depth_floor` 对应设置中的 `prefetch_floor`。
+
+HTTP 诊断实际使用预取与 MMR 设置，MMR 仅在候选数多于目标条数时筛选；RRF 设置仅在服务层存在向量结果时使用。当前对话仍使用原有关键词检索，这些参数不会改变该路径或启用向量/重排模型。其他管理员可能同时更新设置，诊断响应中的 `config` 是本次实际采用的参数快照。
+
+管理员登录取得 `$headers` 后可执行以下 PowerShell 示例（会保存全局检索设置，适用于共享本地配置文件的调用）：
+
+```powershell
+$baseUrl = 'http://127.0.0.1:8000'
+$settings = Invoke-RestMethod -Uri "$baseUrl/api/knowledge/settings" -Headers $headers
+$settings.mmr_lambda = 0.7
+$settingsBody = $settings | ConvertTo-Json -Compress
+Invoke-RestMethod -Method Put -Uri "$baseUrl/api/knowledge/settings" -Headers $headers -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($settingsBody))
+Invoke-RestMethod -Uri "$baseUrl/api/knowledge/diagnose?q=$([Uri]::EscapeDataString('导出失败'))&top_k=3" -Headers $headers
+```
 
 ## 健康报告
 

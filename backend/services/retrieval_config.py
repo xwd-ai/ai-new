@@ -4,8 +4,8 @@
 它们此前散落在各处的常量里，调整一次要改代码、改完还得重新理解上下文。
 
 这里把它们集中成一个配置对象，默认值就是当前实际生效的数值——因此
-不设任何环境变量时，行为与改造前完全一致。需要调参时通过环境变量覆盖，
-不必动代码逻辑。
+未设置管理页覆盖值或环境变量时使用默认值。管理页保存值优先于环境变量，
+无需修改代码或重启进程。
 
 只暴露真正会影响检索效果的参数。内部实现细节（如分词正则）不在此列：
 它们属于算法的一部分，不该随着部署环境漂移。
@@ -13,8 +13,14 @@
 
 from __future__ import annotations
 
+import json
 import os
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
+
+from backend.logging_conf import log_event
+from backend.schemas.retrieval import RetrievalSettings
 
 
 def _env_float(name: str, default: float, *, low: float, high: float) -> float:
@@ -103,8 +109,8 @@ class RetrievalConfig:
 
 
 def load_retrieval_config() -> RetrievalConfig:
-    """按环境变量装配检索参数；未配置的项保持默认值。"""
-    return RetrievalConfig(
+    """管理页保存值优先于环境变量；每次读取使共享文件的进程及时生效。"""
+    config = RetrievalConfig(
         prefetch_multiplier=_env_int("RETRIEVAL_PREFETCH_MULTIPLIER", 5, low=1, high=20),
         prefetch_floor=_env_int("RETRIEVAL_PREFETCH_FLOOR", 50, low=1, high=1000),
         rrf_k=_env_int("RETRIEVAL_RRF_K", 60, low=1, high=1000),
@@ -124,3 +130,42 @@ def load_retrieval_config() -> RetrievalConfig:
         composite_source=_env_float("RETRIEVAL_COMPOSITE_SOURCE", 0.1, low=0.0, high=1.0),
         mmr_lambda=_env_float("RETRIEVAL_MMR_LAMBDA", 0.7, low=0.0, high=1.0),
     )
+    if config.vector_weight + config.keyword_weight <= 0:
+        config.vector_weight, config.keyword_weight = 0.7, 0.3
+    try:
+        data = json.loads(_settings_path().read_text(encoding="utf-8"))
+        saved = RetrievalSettings.model_validate(data)
+    except FileNotFoundError:
+        return config
+    except (OSError, ValueError) as exc:
+        log_event("retrieval.settings_read", error_type=type(exc).__name__)
+        return config
+    for name, value in saved.model_dump().items():
+        setattr(config, name, value)
+    return config
+
+
+def _settings_path() -> Path:
+    return Path(__file__).resolve().parent.parent / "retrieval_settings.json"
+
+
+def current_settings() -> RetrievalSettings:
+    config = load_retrieval_config()
+    return RetrievalSettings(**{
+        name: getattr(config, name) for name in RetrievalSettings.model_fields
+    })
+
+
+def save_settings(settings: RetrievalSettings) -> RetrievalSettings:
+    """完整替换六项设置；原子换名避免读取半份 JSON，最后成功写入者生效。"""
+    target = _settings_path()
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=target.parent,
+        prefix=target.name + ".", suffix=".tmp", delete=False,
+    ) as output:
+        output.write(settings.model_dump_json(indent=2))
+        output.flush()
+        os.fsync(output.fileno())
+        temporary = output.name
+    os.replace(temporary, target)
+    return settings

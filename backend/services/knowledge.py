@@ -370,7 +370,8 @@ def search_knowledge_hybrid(
     向量路不可用（未配置模型或调用失败）时自动退化为纯关键词检索，
     保证检索始终有结果、不会因为模型不可用而整体失败。
     """
-    depth = _prefetch_depth(top_k)
+    cfg = load_retrieval_config()
+    depth = _prefetch_depth(top_k, cfg)
 
     keyword_results = search_knowledge(query, top_k=depth)
     vector_results = search_knowledge_by_vector(
@@ -385,6 +386,7 @@ def search_knowledge_hybrid(
         vector_results=vector_results,
         keyword_results=keyword_results,
         top_k=top_k,
+        config=cfg,
     )
 
 
@@ -759,7 +761,7 @@ def diagnose(
         }
     )
 
-    final = select_mmr(reranked, top_k)
+    final = select_mmr(reranked, top_k, lambda_=cfg.mmr_lambda)
     stages.append(
         {
             "stage": "mmr",

@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>检索设置 · AI 客服与工单助手</title>
+  <style>
+    :root { --bg:#f3f5f9; --surface:#fff; --text:#1a1d27; --muted:#657086; --primary:#4f6ef7; --border:#dce2ed; --error:#ad2634; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:15px/1.6 -apple-system,BlinkMacSystemFont,"Microsoft YaHei",sans-serif; }
+    header { padding:18px max(24px,calc((100vw - 1120px)/2)); background:var(--surface); border-bottom:1px solid var(--border); display:flex; justify-content:space-between; gap:16px; }
+    a { color:var(--primary); text-underline-offset:4px; }
+    main { max-width:1168px; padding:28px 24px 48px; margin:auto; }
+    h1 { font-size:28px; margin:0 0 8px; letter-spacing:-.5px; }
+    h2 { font-size:19px; margin:0 0 12px; }
+    p { margin:0 0 12px; }
+    .intro { color:var(--muted); max-width:800px; }
+    .notice { padding:14px 18px; border-left:3px solid var(--primary); background:#eef1fe; margin:20px 0 24px; }
+    .workspace { display:grid; grid-template-columns:minmax(0,1.2fr) minmax(0,1fr); gap:24px; align-items:start; }
+    .panel { border:1px solid var(--border); border-radius:14px; background:var(--surface); padding:24px; }
+    fieldset { border:0; border-top:1px solid var(--border); padding:20px 0 4px; margin:18px 0 0; min-width:0; }
+    legend { font-weight:650; padding:0 12px 0 0; }
+    .fields { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+    label { display:block; font-size:14px; font-weight:600; }
+    input { width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:8px; color:var(--text); background:#fff; font:inherit; margin:6px 0 2px; }
+    input[type=range] { padding:0; accent-color:var(--primary); }
+    output { float:right; font-family:Consolas,monospace; }
+    small { display:block; color:var(--muted); font-size:12px; font-weight:400; }
+    button { border:1px solid var(--border); border-radius:8px; padding:10px 16px; cursor:pointer; background:#fff; color:var(--text); font:inherit; font-size:14px; font-weight:600; }
+    button.primary { background:var(--primary); border-color:var(--primary); color:white; }
+    button:disabled, input:disabled { opacity:.55; cursor:not-allowed; }
+    :focus-visible { outline:3px solid #a7b5ff; outline-offset:3px; }
+    .actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:24px; }
+    .status { color:var(--muted); min-height:26px; margin:12px 0 0; overflow-wrap:anywhere; }
+    .status.error { color:var(--error); }
+    .query { margin:18px 0; }
+    table { width:100%; border-collapse:collapse; margin:20px 0 12px; font-size:13px; }
+    th, td { text-align:left; padding:10px 6px; border-bottom:1px solid var(--border); }
+    th { font-weight:500; color:var(--muted); }
+    .count { font:600 16px Consolas,monospace; color:var(--primary); }
+    #finalIds { overflow-wrap:anywhere; font-family:Consolas,"Microsoft YaHei",monospace; }
+    [hidden] { display:none !important; }
+    @media(max-width:760px) { .workspace { grid-template-columns:1fr; } main { padding:24px 16px; } .panel { padding:20px; } header { padding:16px; } }
+    @media(max-width:400px) { .fields { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <header><strong>AI 客服与工单助手</strong><a href="/admin">返回工单管理</a></header>
+  <main>
+    <h1>检索设置</h1>
+    <p class="intro">调整候选范围与结果多样性，再用一个问题检查各阶段的命中情况。</p>
+    <div class="notice">当前对话使用关键词检索，这里的参数不会改变对话检索。试查支持候选预取与 MMR；HTTP 尚未启用向量和重排模型，RRF 参数仅在服务层启用混合检索时生效。</div>
+    <p id="access" class="status" role="status">正在核对管理员身份…</p>
+    <p id="loginLink" hidden><a href="/login">前往登录</a></p>
+    <div class="workspace">
+      <section class="panel" aria-labelledby="parametersTitle">
+        <h2 id="parametersTitle">检索参数</h2>
+        <p class="intro">保存后用于后续调用，重启保留。共享同一配置文件的服务读取相同设置。</p>
+        <form id="settingsForm">
+          <fieldset id="settingsFields" disabled>
+            <legend>01 · 候选预取</legend>
+            <div class="fields">
+              <label>候选下限<input id="prefetch_floor" type="number" min="1" max="1000" step="1" required /><small>1–1000 条</small></label>
+              <label>预取倍数<input id="prefetch_multiplier" type="number" min="1" max="20" step="1" required /><small>1–20 倍目标条数</small></label>
+            </div>
+            <small>实际候选上限取「目标条数 × 倍数」与「候选下限」中的较大值。</small>
+          </fieldset>
+          <fieldset id="fusionFields" disabled>
+            <legend>02 · 两路融合</legend>
+            <p class="intro">仅在服务层提供向量结果时使用；当前试查会跳过此阶段。</p>
+            <label>RRF 平滑值<input id="rrf_k" type="number" min="1" max="1000" step="1" required /><small>数值越大，排名先后造成的差异越平缓。</small></label>
+            <div class="fields">
+              <label>向量权重<input id="vector_weight" type="number" min="0" max="1" step="any" required /></label>
+              <label>关键词权重<input id="keyword_weight" type="number" min="0" max="1" step="any" required /></label>
+            </div>
+            <small>两项范围均为 0–1，可独立设置，不能同时为 0。</small>
+          </fieldset>
+          <fieldset id="mmrFields" disabled>
+            <legend>03 · 结果多样性</legend>
+            <label for="mmr_lambda">MMR 相关性权重 <output id="mmrValue" for="mmr_lambda">—</output></label>
+            <input id="mmr_lambda" type="range" min="0" max="1" step="any" />
+            <small>接近 0 更偏好多样性，接近 1 更偏好相关性；仅在候选多于目标条数时筛选。</small>
+          </fieldset>
+          <div class="actions"><button id="save" class="primary" disabled>保存设置</button><button id="undo" type="button" disabled>撤销未保存修改</button></div>
+          <p id="saveStatus" class="status" role="status" aria-live="polite"></p>
+        </form>
+      </section>
+      <section class="panel" aria-labelledby="previewTitle">
+        <h2 id="previewTitle">检索试查</h2>
+        <p class="intro">使用服务当前已保存的设置。修改参数后请先保存，再检查结果。</p>
+        <form id="previewForm">
+          <fieldset id="previewFields" disabled>
+            <legend>输入问题</legend>
+            <label for="query">要查找的内容</label><input id="query" placeholder="例如：导出失败怎么办" maxlength="500" required />
+            <label for="topK" class="query">目标条数<input id="topK" type="number" min="1" max="20" value="3" step="1" required /></label>
+            <button id="preview" class="primary">运行试查</button>
+          </fieldset>
+        </form>
+        <p id="previewStatus" class="status" role="status" aria-live="polite"></p>
+        <div id="result" hidden>
+          <table><caption id="depth"></caption><thead><tr><th scope="col">阶段</th><th scope="col">条数</th><th scope="col">状态</th></tr></thead><tbody id="stages"></tbody></table>
+          <p><strong>最终来源 ID</strong></p><p id="finalIds"></p>
+          <small>这是独立检索试查，不代表某次对话实际使用的来源。</small>
+        </div>
+      </section>
+    </div>
+  </main>
+  <script src="/assets/retrieval-settings.js" defer></script>
+</body>
+</html>

@@ -9,6 +9,8 @@ from backend.schemas import ErrorResponse, IngestRequest, IngestResponse, Knowle
 from backend.services import chat as chat_service
 from backend.services import ingest as ingest_service
 from backend.services import knowledge
+from backend.services import retrieval_config
+from backend.schemas.retrieval import RetrievalSettings
 from backend.services.ingest_leases import IngestBusyError, IngestLeaseLostError
 
 knowledge_router = APIRouter()
@@ -20,6 +22,34 @@ def _require_admin(authorization: str) -> dict:
     if not user or user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="需要管理员权限")
     return user
+
+
+@knowledge_router.get(
+    "/knowledge/settings", response_model=RetrievalSettings, summary="读取当前检索设置",
+    responses={403: {"model": ErrorResponse, "description": "需要管理员权限"}},
+)
+def get_retrieval_settings(authorization: str = Header(default="")) -> RetrievalSettings:
+    _require_admin(authorization)
+    return retrieval_config.current_settings()
+
+
+@knowledge_router.put(
+    "/knowledge/settings", response_model=RetrievalSettings, summary="保存检索设置",
+    description="完整提交六项参数，保存到本地配置文件；后续检索调用读取，不改变当前对话的关键词检索路径。",
+    responses={
+        403: {"model": ErrorResponse, "description": "需要管理员权限"},
+        422: {"model": ErrorResponse, "description": "参数越界、类型错误或两路权重同时为零"},
+        503: {"model": ErrorResponse, "description": "配置文件保存失败"},
+    },
+)
+def put_retrieval_settings(
+    settings: RetrievalSettings, authorization: str = Header(default=""),
+) -> RetrievalSettings:
+    _require_admin(authorization)
+    try:
+        return retrieval_config.save_settings(settings)
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail="检索设置保存失败，请检查配置目录写权限或稍后重试") from exc
 
 
 @knowledge_router.post(
