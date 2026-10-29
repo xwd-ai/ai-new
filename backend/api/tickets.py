@@ -277,27 +277,12 @@ def pending_tickets(
     }
 
 
-@tickets_router.get("/tickets/{ticket_id}")
-def ticket_detail(ticket_id: str, authorization: str = Header(default="")):
-    """查询单个工单详情，返回结构化排查信息、状态时间线与回复时间线。
+def _detail_message(data: dict) -> str:
+    """按详情各分区内容拼装一句话摘要，空分区给出「暂无」提示。
 
-    troubleshooting 汇总已尝试步骤与排查依据：每个条目带自增序号，依据条目
-    还会拆出来源字段；同时给出条目计数与是否有内容的标记，前端可直接逐条渲染。
-    reply_timeline 逐条给出回复人、内容、时间与来源（人工/系统），并附人工回复数、
-    系统说明数、首次人工响应耗时，取消原因与转人工说明也能在同一时间线里还原。
-    原始 tried_steps / evidence / replies 字段照旧返回，保证既有展示不受影响。
-    管理员可查看任意工单；普通用户仅可查看本人创建的工单，
-    越权访问返回「无权限」，工单不存在返回「工单不存在」。
+    摘要只依赖组装好的详情结构，不再单独回查数据：排查信息看是否有条目，
+    回复看总数与人工/系统分布，前端与接口响应共用同一份统计结果。
     """
-    user = _current_user(authorization)
-    if not user:
-        return {"error": "未登录"}
-    data = tickets.get_ticket(ticket_id)
-    if data is None:
-        return {"error": "工单不存在"}
-    if user["role"] != "admin" and data["user_id"] != user["id"]:
-        return {"error": "无权限"}
-
     troubleshooting = data["troubleshooting"]
     reply_timeline = data["reply_timeline"]
     parts = [f"工单 {data['id']}"]
@@ -315,4 +300,29 @@ def ticket_detail(ticket_id: str, authorization: str = Header(default="")):
         )
     else:
         parts.append("暂无回复记录")
-    return {"ticket": data, "message": "，".join(parts)}
+    return "，".join(parts)
+
+
+@tickets_router.get("/tickets/{ticket_id}")
+def ticket_detail(ticket_id: str, authorization: str = Header(default="")):
+    """查询单个工单详情，返回结构化排查信息、状态时间线与回复时间线。
+
+    troubleshooting 汇总已尝试步骤与排查依据：每个条目带自增序号，依据条目
+    还会拆出来源字段；同时给出条目计数与是否有内容的标记，前端可直接逐条渲染。
+    reply_timeline 逐条给出回复人、内容、时间与来源（人工/系统），并附人工回复数、
+    系统说明数、首次人工响应耗时，取消原因与转人工说明也能在同一时间线里还原。
+    detail_summary 汇总各分区的关键指标（状态链路、流转次数、回复计数等），
+    供前端做一屏概览。原始 tried_steps / evidence / replies 字段照旧返回，
+    保证既有展示不受影响。
+    管理员可查看任意工单；普通用户仅可查看本人创建的工单，
+    越权访问返回「无权限」，工单不存在返回「工单不存在」。
+    """
+    user = _current_user(authorization)
+    if not user:
+        return {"error": "未登录"}
+    data = tickets.get_ticket(ticket_id)
+    if data is None:
+        return {"error": "工单不存在"}
+    if user["role"] != "admin" and data["user_id"] != user["id"]:
+        return {"error": "无权限"}
+    return {"ticket": data, "message": _detail_message(data)}

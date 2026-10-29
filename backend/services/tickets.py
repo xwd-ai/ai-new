@@ -607,18 +607,31 @@ def build_troubleshooting(tried_steps: str | None, evidence: str | None) -> dict
     }
 
 
-def _status_timeline(db, ticket_id: str) -> list[dict]:
-    """查询工单的完整状态变更时间线，按发生时间升序返回。
+def _status_logs(db, ticket_id: str):
+    """查询工单的状态变更日志，按发生时间升序返回原始记录。
 
-    时间线记录建单落位与每次状态流转，详情页据此还原完整处理轨迹。
+    排序下推到数据库，避免详情页把全量日志取回后在内存里再排一遍；
+    这里只负责取数，转成响应结构由 build_status_timeline 完成。
     """
-    logs = (
+    return (
         db.query(TicketStatusLog)
         .filter(TicketStatusLog.ticket_id == ticket_id)
         .order_by(TicketStatusLog.changed_at.asc(), TicketStatusLog.id.asc())
         .all()
     )
-    return [log.to_dict() for log in logs]
+
+
+def build_status_timeline(logs) -> list[dict]:
+    """把状态日志转换为时间线条目，按变更时间升序、同刻按记录号升序。
+
+    纯转换不访问数据库：入参是已查出的日志记录，便于单独验证顺序与字段。
+    时间缺失的记录按最早处理并保持记录号次序，保证输出顺序稳定。
+    """
+    ordered = sorted(
+        logs or [],
+        key=lambda log: (getattr(log, "changed_at", None) or 0, getattr(log, "id", None) or 0),
+    )
+    return [log.to_dict() for log in ordered]
 
 
 def _first_value(raw: dict, keys: tuple[str, ...], default=None):
@@ -729,24 +742,66 @@ def build_reply_timeline(
     }
 
 
-def get_ticket(ticket_id: str) -> dict | None:
-    """查询工单详情，附带结构化排查信息、完整状态时间线与回复时间线。
+def build_detail_summary(
+    troubleshooting: dict,
+    status_timeline: list[dict],
+    reply_timeline: dict,
+) -> dict:
+    """汇总详情各分区的关键指标，供前端一屏概览。
 
-    返回的工单字典在原有字段基础上追加：
-    - troubleshooting：已尝试步骤与排查依据的结构化条目及计数
+    状态链路按流转顺序给出目标状态列表，last_changed_at 为最近一次变更时间，
+    没有状态记录时置空；回复相关指标直接取自回复时间线的统计结果，
+    避免调用方为了一个数字再遍历一遍原始数组。
+    """
+    return {
+        "tried_step_count": troubleshooting["tried_step_count"],
+        "evidence_count": troubleshooting["evidence_count"],
+        "status_change_count": len(status_timeline),
+        "status_chain": [item["to_status"] for item in status_timeline],
+        "last_changed_at": status_timeline[-1]["changed_at"] if status_timeline else None,
+        "reply_count": reply_timeline["total"],
+        "human_reply_count": reply_timeline["human_count"],
+        "system_reply_count": reply_timeline["system_count"],
+        "has_human_reply": reply_timeline["has_human_reply"],
+        "first_response_seconds": reply_timeline["first_response_seconds"],
+    }
+
+
+def build_ticket_detail(ticket, status_logs=None) -> dict:
+    """组装工单详情响应：基础字段 + 三个数据分区 + 指标汇总。
+
+    三个分区各自独立组装、互不依赖，新增分区只需在此追加一次：
+    - troubleshooting：已尝试步骤与排查依据的结构化条目
     - status_timeline：建单与每次流转的状态轨迹
-    - reply_timeline：人工回复与系统说明的时间线，含回复人、内容、时间与计数
+    - reply_timeline：回复人、内容、时间与人工/系统分类
+    基础字段沿用工单自身的序列化结果，原始文本字段照旧返回以兼容既有展示。
+    """
+    troubleshooting = build_troubleshooting(ticket.tried_steps, ticket.evidence)
+    status_timeline = build_status_timeline(status_logs)
+    reply_timeline = build_reply_timeline(ticket.replies, ticket.created_at)
+
+    data = ticket.to_dict()
+    data["troubleshooting"] = troubleshooting
+    data["status_timeline"] = status_timeline
+    data["reply_timeline"] = reply_timeline
+    data["detail_summary"] = build_detail_summary(
+        troubleshooting, status_timeline, reply_timeline
+    )
+    return data
+
+
+def get_ticket(ticket_id: str) -> dict | None:
+    """查询工单详情：只负责取数，结构组装交给 build_ticket_detail。
+
+    取数与组装分离后，组装逻辑可以脱离数据库单独验证；工单不存在时返回 None，
+    由接口层区分「不存在」与「无权限」。
     """
     db = SessionLocal()
     try:
         t = db.query(Ticket).filter(Ticket.id == ticket_id).first()
         if not t:
             return None
-        data = t.to_dict()
-        data["troubleshooting"] = build_troubleshooting(t.tried_steps, t.evidence)
-        data["status_timeline"] = _status_timeline(db, ticket_id)
-        data["reply_timeline"] = build_reply_timeline(t.replies, t.created_at)
-        return data
+        return build_ticket_detail(t, _status_logs(db, ticket_id))
     finally:
         db.close()
 
