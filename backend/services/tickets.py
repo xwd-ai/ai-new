@@ -119,6 +119,41 @@ def _next_id(db) -> str:
     return f"T-{seq + 1}"
 
 
+# ---------------------------------------------------------------------------
+# 会话与取数：读写路径共用的连接边界与单条取数
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def _ticket_session(write: bool = False):
+    """工单会话的统一边界：写入正常结束提交、异常回滚，只读直接关闭连接。
+
+    各业务函数不再各自维护 try/finally，避免漏提交、漏回滚或漏关闭；
+    只读路径不提交，取得的数据随会话关闭释放。
+    """
+    db = SessionLocal()
+    try:
+        yield db
+        if write:
+            db.commit()
+    except Exception:
+        if write:
+            db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def _load_ticket(db, ticket_id: str):
+    """按工单号取单条记录，不存在返回 None。"""
+    return db.query(Ticket).filter(Ticket.id == ticket_id).first()
+
+
+# ---------------------------------------------------------------------------
+# 状态机层：工单状态变更的唯一写入口
+# ---------------------------------------------------------------------------
+
+
 def _log_status_change(
     db,
     ticket_id: str,
@@ -140,6 +175,37 @@ def _log_status_change(
             changed_at=time.time(),
         )
     )
+
+
+def _apply_transition(
+    db,
+    ticket,
+    to_status: str,
+    operator: str = "system",
+    reply: dict | None = None,
+) -> str:
+    """状态机唯一入口：校验流转 → 追加说明 → 落时间线 → 改写状态。
+
+    写入层的业务函数只描述「做什么」（确认、取消、回复、转人工），
+    流转合法性、留痕与字段赋值统一收敛到这里，不再各写一遍。
+    校验在改写任何字段之前完成，非法流转抛 TicketTransitionError 时
+    工单保持原样；reply 非空时在同一事务内追加到回复列表。
+    返回变更前的状态，调用方据此组织响应里的流转说明。
+    """
+    from_status = ticket.status
+    validate_transition(from_status, to_status)
+    if reply:
+        replies = list(ticket.replies or [])
+        replies.append(reply)
+        ticket.replies = replies
+    _log_status_change(db, ticket.id, from_status, to_status, operator=operator)
+    ticket.status = to_status
+    return from_status
+
+
+# ---------------------------------------------------------------------------
+# 写入层：建单与两阶段确认
+# ---------------------------------------------------------------------------
 
 
 def create_ticket(
@@ -203,22 +269,15 @@ def confirm_ticket(ticket_id: str) -> dict | None:
     不抛错也不重复流转，直接原样返回当前工单，重复确认不会产生副作用。
     工单不存在时返回 None，由接口层区分「不存在」与「已确认」。
     """
-    db = SessionLocal()
-    try:
-        t = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    with _ticket_session(write=True) as db:
+        t = _load_ticket(db, ticket_id)
         if not t:
             return None
         # 已非待确认状态视为已确认/已终结，幂等返回，不重复流转
         if t.status != "pending_confirm":
             return t.to_dict()
-        validate_transition(t.status, "open")
-        _log_status_change(db, t.id, t.status, "open", operator="system")
-        t.status = "open"
-        db.commit()
-        db.refresh(t)
+        _apply_transition(db, t, "open", operator="system")
         return t.to_dict()
-    finally:
-        db.close()
 
 
 def cancel_ticket(ticket_id: str, reason: str = "") -> dict | None:
@@ -229,26 +288,20 @@ def cancel_ticket(ticket_id: str, reason: str = "") -> dict | None:
     幂等语义：若工单已不在待确认状态（已 open、已关闭、已被并发确认或取消），
     不抛错也不重复流转，原样返回当前工单；工单不存在时返回 None。
     """
-    db = SessionLocal()
-    try:
-        t = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    with _ticket_session(write=True) as db:
+        t = _load_ticket(db, ticket_id)
         if not t:
             return None
         # 已非待确认状态视为已终结，幂等返回，不重复流转
         if t.status != "pending_confirm":
             return t.to_dict()
-        validate_transition(t.status, "closed")
-        replies = list(t.replies or [])
-        entry = {"replier": "system", "content": f"取消工单：{reason}".strip(), "at": time.time()}
-        replies.append(entry)
-        t.replies = replies
-        _log_status_change(db, t.id, t.status, "closed", operator="system")
-        t.status = "closed"
-        db.commit()
-        db.refresh(t)
+        reply = {
+            "replier": _SYSTEM_REPLIER,
+            "content": f"取消工单：{reason}".strip(),
+            "at": time.time(),
+        }
+        _apply_transition(db, t, "closed", operator="system", reply=reply)
         return t.to_dict()
-    finally:
-        db.close()
 
 
 def expire_pending_tickets(
@@ -287,17 +340,12 @@ def expire_pending_tickets(
             # 锁内重查的状态为最终依据，已被确认或取消的工单不再处理
             if t.status != "pending_confirm":
                 continue
-            replies = list(t.replies or [])
-            replies.append(
-                {
-                    "replier": "system",
-                    "content": f"待确认超时（阈值 {timeout} 秒）自动关闭",
-                    "at": ts,
-                }
-            )
-            t.replies = replies
-            _log_status_change(db, t.id, t.status, "closed", operator="system")
-            t.status = "closed"
+            reply = {
+                "replier": _SYSTEM_REPLIER,
+                "content": f"待确认超时（阈值 {timeout} 秒）自动关闭",
+                "at": ts,
+            }
+            _apply_transition(db, t, "closed", operator="system", reply=reply)
             closed_ids.append(t.id)
 
         # 会话关闭了自动 flush，先显式落库再统计，避免把本批已关闭的工单算进剩余
@@ -316,6 +364,11 @@ def expire_pending_tickets(
             "closed_ids": closed_ids,
             "remaining": int(remaining or 0),
         }
+
+
+# ---------------------------------------------------------------------------
+# 查询层：待确认列表与工单列表（只读，不改任何状态）
+# ---------------------------------------------------------------------------
 
 
 def _pending_item(t: Ticket, timeout: int, now: float) -> dict:
@@ -526,6 +579,11 @@ def list_tickets(
         }
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# 组装层：详情结构转换（纯函数，不访问数据库）
+# ---------------------------------------------------------------------------
 
 
 def _split_numbered(text: str) -> list[str]:
@@ -838,66 +896,61 @@ def build_ticket_detail(ticket, status_logs=None) -> dict:
     return data
 
 
+# ---------------------------------------------------------------------------
+# 查询层：详情取数（组装交给组装层，状态流转交给状态机层）
+# ---------------------------------------------------------------------------
+
+
 def get_ticket(ticket_id: str) -> dict | None:
     """查询工单详情：只负责取数，结构组装交给 build_ticket_detail。
 
     取数与组装分离后，组装逻辑可以脱离数据库单独验证；工单不存在时返回 None，
     由接口层区分「不存在」与「无权限」。
     """
-    db = SessionLocal()
-    try:
-        t = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    with _ticket_session() as db:
+        t = _load_ticket(db, ticket_id)
         if not t:
             return None
         return build_ticket_detail(t, _status_logs(db, ticket_id))
-    finally:
-        db.close()
+
+
+# ---------------------------------------------------------------------------
+# 写入层：回复、状态变更与转人工
+# ---------------------------------------------------------------------------
 
 
 def add_reply(ticket_id: str, replier: str, content: str) -> dict | None:
     """追加人工回复，并将待处理工单推进到处理中。
 
-    状态变更统一走流转校验：仅 open 状态允许伴随回复自动流转到 in_progress，
-    其余状态回复时不改变状态（保持当前状态不变），非法流转由校验函数拒绝。
+    状态变更统一走状态机入口：仅 open 状态允许伴随回复自动流转到 in_progress，
+    其余非处理中状态由流转校验拒绝；已在处理中的工单只追加回复，不再产生流转。
     """
-    db = SessionLocal()
-    try:
-        t = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    with _ticket_session(write=True) as db:
+        t = _load_ticket(db, ticket_id)
         if not t:
             return None
-        replies = list(t.replies or [])
-        replies.append({"replier": replier, "content": content, "at": time.time()})
-        t.replies = replies
-        if t.status != "in_progress":
-            validate_transition(t.status, "in_progress")
-            _log_status_change(db, t.id, t.status, "in_progress", operator=replier)
-            t.status = "in_progress"
-        db.commit()
-        db.refresh(t)
+        reply = {"replier": replier, "content": content, "at": time.time()}
+        if t.status == "in_progress":
+            replies = list(t.replies or [])
+            replies.append(reply)
+            t.replies = replies
+        else:
+            _apply_transition(db, t, "in_progress", operator=replier, reply=reply)
         return t.to_dict()
-    finally:
-        db.close()
 
 
 def update_status(ticket_id: str, status: str) -> dict | None:
-    """更新工单状态，变更前统一经过合法流转校验。
+    """更新工单状态，变更统一交给状态机入口。
 
     未知状态值或非法流转会抛出 TicketTransitionError，由接口层捕获后
     返回明确错误信息，避免非法状态写入数据库。
     """
-    db = SessionLocal()
-    try:
-        t = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    with _ticket_session(write=True) as db:
+        t = _load_ticket(db, ticket_id)
         if not t:
             return None
-        validate_transition(t.status, status)
-        _log_status_change(db, t.id, t.status, status, operator="system")
-        t.status = status
-        db.commit()
-        db.refresh(t)
+        _apply_transition(db, t, status, operator="system")
         return t.to_dict()
-    finally:
-        db.close()
 
 
 def transfer_to_human(
@@ -913,15 +966,12 @@ def transfer_to_human(
     保证每次转人工都有可读的原因，不会出现无说明的状态变更。
     原因以及命中的规则码一并写入 replies（结构化字段），时间线里可以还原
     「谁、因为什么、把工单从哪个状态转成了人工」。
-    状态变更统一经过流转校验，非法来源状态（已关闭、待确认等）由校验函数拒绝。
+    状态变更统一经过状态机入口，非法来源状态（已关闭、待确认等）由流转校验拒绝。
     """
-    db = SessionLocal()
-    try:
-        t = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    with _ticket_session(write=True) as db:
+        t = _load_ticket(db, ticket_id)
         if not t:
             return None
-        from_status = t.status
-        validate_transition(from_status, "transferred_human")
 
         text = " ".join(str(reason or "").split())
         if not text and decision:
@@ -931,23 +981,18 @@ def transfer_to_human(
         reason_codes = [str(code) for code in ((decision or {}).get("reason_codes") or [])]
 
         at = time.time()
-        replies = list(t.replies or [])
-        replies.append(
-            {
-                "replier": _SYSTEM_REPLIER,
-                "content": f"转人工：{text}",
-                "at": at,
-                "kind": _TRANSFER_KIND,
-                "reason": text,
-                "reason_codes": reason_codes,
-                "operator": operator,
-            }
+        reply = {
+            "replier": _SYSTEM_REPLIER,
+            "content": f"转人工：{text}",
+            "at": at,
+            "kind": _TRANSFER_KIND,
+            "reason": text,
+            "reason_codes": reason_codes,
+            "operator": operator,
+        }
+        from_status = _apply_transition(
+            db, t, "transferred_human", operator=operator, reply=reply
         )
-        t.replies = replies
-        _log_status_change(db, t.id, from_status, "transferred_human", operator=operator)
-        t.status = "transferred_human"
-        db.commit()
-        db.refresh(t)
 
         data = t.to_dict()
         data["transfer"] = {
@@ -961,8 +1006,11 @@ def transfer_to_human(
             "by_rule": bool(decision and decision.get("should_transfer")),
         }
         return data
-    finally:
-        db.close()
+
+
+# ---------------------------------------------------------------------------
+# 判定层：转人工规则（只读判定，是否真的转人工由写入层决定）
+# ---------------------------------------------------------------------------
 
 
 def detect_transfer_request(text: str | None) -> str:
