@@ -79,6 +79,10 @@ SCOPE_REASON_TEXT = {
     "service_expired": "服务已到期或订单非有效状态",
     "feature_not_included": "不包含该功能",
 }
+# 转人工未给出原因、规则也未命中时的默认说明，保证每次转人工都可追溯
+DEFAULT_TRANSFER_REASON = "客服手动转人工"
+# 转人工说明的回复类型标记：时间线据此与普通回复区分，便于单独渲染
+_TRANSFER_KIND = "transfer"
 
 
 def _dedup_key(user_id: str, description: str) -> str:
@@ -693,13 +697,23 @@ def _normalize_reply(raw, index: int) -> dict | None:
     原始回复约定为 {replier, content, at}，同时兼容只存了纯文本的旧数据；
     内容为空的条目直接丢弃，避免详情里出现空白行。
     回复人非 system 时标记为人工回复，前端据此区分人工回复与系统说明。
+    转人工说明带 kind 标记，其附带的转人工原因与命中规则码一并透出，
+    详情页可直接展示判定依据，不必再回头解析说明文本。
     """
+    extras: dict = {}
     if isinstance(raw, str):
         replier, content, at = "", raw, None
     elif isinstance(raw, dict):
         replier = _first_value(raw, _REPLIER_KEYS, "")
         content = _first_value(raw, _CONTENT_KEYS, "")
         at = _first_value(raw, _TIME_KEYS)
+        kind = str(raw.get("kind") or "").strip()
+        if kind:
+            extras["kind"] = kind
+            extras["reason"] = str(raw.get("reason") or "").strip()
+            codes = raw.get("reason_codes") or []
+            extras["reason_codes"] = [str(code) for code in codes]
+            extras["operator"] = str(raw.get("operator") or "").strip()
     else:
         return None
 
@@ -709,7 +723,7 @@ def _normalize_reply(raw, index: int) -> dict | None:
     name = str(replier or "").strip() or _SYSTEM_REPLIER
     is_human = name != _SYSTEM_REPLIER
     ts, ts_text = _format_reply_time(at)
-    return {
+    entry = {
         "index": index,
         "replier": name,
         "content": text,
@@ -718,6 +732,8 @@ def _normalize_reply(raw, index: int) -> dict | None:
         "source": "human" if is_human else "system",
         "is_human": is_human,
     }
+    entry.update(extras)
+    return entry
 
 
 def build_reply_timeline(
@@ -748,6 +764,8 @@ def build_reply_timeline(
 
     human_items = [entry for entry in items if entry["is_human"]]
     system_items = [entry for entry in items if not entry["is_human"]]
+    # 转人工说明单列计数，便于详情页提示「本次处理已转人工」
+    transfer_items = [entry for entry in items if entry.get("kind") == _TRANSFER_KIND]
 
     # 首次人工响应耗时：从建单到第一条人工回复的间隔，无人工回复或时间缺失时为空
     first_response = None
@@ -765,6 +783,8 @@ def build_reply_timeline(
         "last_reply_at": items[-1]["at"] if items else None,
         "last_human_reply_at": human_items[-1]["at"] if human_items else None,
         "first_response_seconds": first_response,
+        "transfer_count": len(transfer_items),
+        "last_transfer_reason": transfer_items[-1].get("reason", "") if transfer_items else "",
         "truncated": truncated,
     }
 
@@ -791,6 +811,7 @@ def build_detail_summary(
         "system_reply_count": reply_timeline["system_count"],
         "has_human_reply": reply_timeline["has_human_reply"],
         "first_response_seconds": reply_timeline["first_response_seconds"],
+        "transfer_count": reply_timeline["transfer_count"],
     }
 
 
@@ -879,28 +900,67 @@ def update_status(ticket_id: str, status: str) -> dict | None:
         db.close()
 
 
-def transfer_to_human(ticket_id: str, reason: str = "") -> dict | None:
+def transfer_to_human(
+    ticket_id: str,
+    reason: str = "",
+    operator: str = "system",
+    decision: dict | None = None,
+) -> dict | None:
     """将工单转为人工处理，并把转人工原因写入回复时间线。
 
-    转人工作为独立业务动作：入参原因会以 system 来源记录到 replies，
-    随后工单状态流转到 transferred_human。状态变更统一经过流转校验，
-    非法来源状态（如已关闭、已转人工的工单）由校验函数拒绝。
+    转人工作为独立业务动作，需同时完成三件事：状态流转、原因留痕、责任人可追溯。
+    原因为空时回填判定规则给出的原因文本，两者都没有时用默认说明兜底，
+    保证每次转人工都有可读的原因，不会出现无说明的状态变更。
+    原因以及命中的规则码一并写入 replies（结构化字段），时间线里可以还原
+    「谁、因为什么、把工单从哪个状态转成了人工」。
+    状态变更统一经过流转校验，非法来源状态（已关闭、待确认等）由校验函数拒绝。
     """
     db = SessionLocal()
     try:
         t = db.query(Ticket).filter(Ticket.id == ticket_id).first()
         if not t:
             return None
-        validate_transition(t.status, "transferred_human")
+        from_status = t.status
+        validate_transition(from_status, "transferred_human")
+
+        text = " ".join(str(reason or "").split())
+        if not text and decision:
+            text = " ".join(str(decision.get("reason_text") or "").split())
+        if not text:
+            text = DEFAULT_TRANSFER_REASON
+        reason_codes = [str(code) for code in ((decision or {}).get("reason_codes") or [])]
+
+        at = time.time()
         replies = list(t.replies or [])
-        entry = {"replier": "system", "content": f"转人工：{reason}".strip(), "at": time.time()}
-        replies.append(entry)
+        replies.append(
+            {
+                "replier": _SYSTEM_REPLIER,
+                "content": f"转人工：{text}",
+                "at": at,
+                "kind": _TRANSFER_KIND,
+                "reason": text,
+                "reason_codes": reason_codes,
+                "operator": operator,
+            }
+        )
         t.replies = replies
-        _log_status_change(db, t.id, t.status, "transferred_human", operator="system")
+        _log_status_change(db, t.id, from_status, "transferred_human", operator=operator)
         t.status = "transferred_human"
         db.commit()
         db.refresh(t)
-        return t.to_dict()
+
+        data = t.to_dict()
+        data["transfer"] = {
+            "from_status": from_status,
+            "to_status": "transferred_human",
+            "reason": text,
+            "reason_codes": reason_codes,
+            "operator": operator,
+            "at": at,
+            "at_text": datetime.fromtimestamp(at).isoformat(timespec="seconds"),
+            "by_rule": bool(decision and decision.get("should_transfer")),
+        }
+        return data
     finally:
         db.close()
 

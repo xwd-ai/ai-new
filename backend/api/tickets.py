@@ -155,23 +155,51 @@ def update_status(body: dict, authorization: str = Header(default="")):
 
 @tickets_router.post("/tickets/transfer")
 def transfer_ticket(req: TransferRequest, authorization: str = Header(default="")):
-    """将工单转人工处理，记录转人工原因。
+    """将工单转人工处理，写入转人工原因与命中规则。
 
-    仅管理员可转人工；非法来源状态（如已关闭、已转人工的工单）会被
-    状态流转校验拒绝，返回明确错误信息。
+    转人工前先按规则判定一次：原因未填时用判定结果回填，保证每次转人工都有
+    可追溯的原因；auto=true 表示完全按规则执行，未命中转人工规则则拒绝，
+    不会把仍在服务范围内、排查轮次也足够的工单误转。auto=false 时管理员可
+    显式指定原因直接转人工，判定结果仅作为响应里的参考依据返回。
+    服务范围取自工单所属用户的订单，管理员处理他人工单时结论对应工单本人。
+    仅管理员可转人工；非法来源状态（如已关闭的工单）由状态流转校验拒绝。
     """
     user = _current_user(authorization)
     if not user:
         return {"error": "未登录"}
     if user["role"] != "admin":
         return {"error": "无权限"}
+
+    data = tickets.get_ticket(req.ticket_id)
+    if data is None:
+        return {"error": "工单不存在"}
+    decision = tickets.evaluate_transfer_rule(
+        data,
+        order=orders.query_order(data["user_id"]),
+        user_text=req.user_text,
+        feature=req.feature,
+    )
+    if req.auto and not decision["should_transfer"]:
+        return {"error": f"未命中转人工规则：{decision['message']}", "decision": decision}
+
     try:
-        t = tickets.transfer_to_human(req.ticket_id, req.reason)
+        t = tickets.transfer_to_human(
+            req.ticket_id,
+            req.reason,
+            operator=user["name"],
+            decision=decision,
+        )
     except TicketTransitionError as e:
         return {"error": str(e)}
     if t is None:
         return {"error": "工单不存在"}
-    return {"ticket": t}
+
+    transfer = t["transfer"]
+    if transfer["reason_codes"]:
+        message = f"工单 {t['id']} 已转人工（命中规则：{'/'.join(transfer['reason_codes'])}），原因：{transfer['reason']}"
+    else:
+        message = f"工单 {t['id']} 已转人工，原因：{transfer['reason']}"
+    return {"ticket": t, "decision": decision, "message": message}
 
 
 @tickets_router.post("/tickets/confirm")
