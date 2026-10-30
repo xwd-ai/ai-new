@@ -87,6 +87,16 @@ Copy-Item backend/.env.example backend/.env
 node --test frontend/tests/chat-recovery.test.cjs
 ```
 
+## 入库 journal 恢复
+
+新版文本入库在同一 SQLite 的 `knowledge_ingest_journal` 中保存 `parsed → chunked → stored` 阶段。`parsed` 保存可恢复输入及预留资料编号；`chunked` 保存已计算的分块数量，恢复时跳过该计算；`stored` 与知识资料在同一事务中提交，并清空 journal 中重复的正文输入。当前仍整篇保存资料，journal 不增加逐块存储或向量索引。
+
+管理员可调用 `GET /api/knowledge/ingest/pending` 查看最早的最多 100 条未完成记录（可能仍在执行），再通过 `POST /api/knowledge/ingest/recover/{fingerprint}` 同步恢复单条。接口不暴露待恢复正文。恢复复用现有租约与心跳；进程崩溃后需等待租约过期，占用时返回 409 和 `Retry-After: 1`。完成记录重复恢复返回 `created=false`，缺失记录返回 404，损坏输入或状态不匹配返回 422；底层数据库故障仍可能返回 500。
+
+同指纹重提优先使用首次持久化的标题、正文、类型和关键词，避免恢复中改变输入。若先前指定的资料编号被其他资料占用，普通重新提交可改用新编号；恢复接口不会替调用方自动改写冲突编号。存储故障在 `parsed` 提交前发生时没有可恢复输入，需重新提交原资料。旧 JSON 检查点不回填为 journal，也不作为恢复依据。
+
+未完成输入会留在数据库中供恢复，完成元数据也会保留，目前没有自动清理、后台扫描或启动自动续跑；不支持对话/工具副作用恢复、任意步骤编排或完整任务对象调度。输入暂存属于数据库备份与访问控制范围。本能力限于共享同一 SQLite 文件的新版入库流程；绕过服务写库、手工损坏记录或不同数据库副本不提供恢复一致性保证。调用示例见 [API 文档](docs/api.md#入库恢复)。
+
 ## 数据库迁移
 
 `backend/requirements.txt` 已包含 Alembic。迁移默认复用应用的数据库引擎，操作 `backend/app.db`，无需在 `alembic.ini` 中另配连接串。已有数据库升级前，先停止服务并备份数据库，再执行：
@@ -102,13 +112,13 @@ node --test frontend/tests/chat-recovery.test.cjs
 .\.venv\Scripts\python.exe -m alembic check
 ```
 
-当前目标版本为 `c94e1a7f5208`，在 `e5b7a91c2046` 冻结的 10 张表基础上新增 `knowledge_ingest_leases`，共 11 张表；`d1178ec7c657` 保留为历史接入点。空库、由应用 `create_all` 建立的旧库，以及已登记历史版本的库，都通过 `upgrade head` 接入，也兼容 `create_all` 已预建的租约表。迁移先检查已有表的列、类型、可空性、主键及重复唯一键，再创建缺失表或补齐约束；不兼容结构或重复键会中止升级，保留已有数据，不自动删除或合并记录。
+当前目标版本为 `a31d9f0276bc`，在 `e5b7a91c2046` 冻结的 10 张表基础上，`c94e1a7f5208` 增加 `knowledge_ingest_leases`，新版本再增加 `knowledge_ingest_journal`，共 12 张表；`d1178ec7c657` 保留为历史接入点。空库、由应用 `create_all` 建立的旧库，以及已登记历史版本的库，都通过 `upgrade head` 接入，也兼容 `create_all` 已预建的租约和 journal 表。迁移先检查已有表的列、类型、可空性、主键及重复唯一键，再创建缺失表或补齐约束；不兼容结构或重复键会中止升级，保留已有数据，不自动删除或合并记录。
 
 旧知识表缺少的 `fingerprint` 列及索引会补齐，补列不回填旧资料的指纹；已存在的指纹和正文保持原值。缺失的用户名、工单去重键唯一约束也会补齐。重复升级不会重复创建结构。不要通过 `stamp` 绕过检查。
 
 需要重建的表若含自定义触发器、CHECK 或外键约束，会在结构变更前拒绝自动升级；必需索引存在同名但定义冲突时也会拒绝。此类旧库需先人工核对。
 
-应用启动仍保留 `create_all` 和原有补列逻辑，不会自动运行 Alembic，升级需显式执行上述命令。基线及租约迁移不支持自动降级，也不支持 `--sql` 离线模式；需要回退时使用升级前的数据库备份恢复。
+应用启动仍保留 `create_all` 和原有补列逻辑，不会自动运行 Alembic，升级需显式执行上述命令。基线、租约及 journal 迁移不支持自动降级，也不支持 `--sql` 离线模式；需要回退时使用升级前的数据库备份恢复。
 
 ## 对话故障提示
 

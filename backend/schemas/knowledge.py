@@ -89,3 +89,15 @@ class KnowledgeDiagnosisResponse(BaseModel):
     config: dict = Field(description="本次检索配置")
     stages: list[dict] = Field(description="各检索阶段的数量、条目编号与诊断信息")
     final_ids: list[str]
+
+
+class PendingIngest(BaseModel):
+    fingerprint: str
+    knowledge_id: str
+    stage: str
+    chunk_count: int
+    updated_at: float
+
+
+class PendingIngestResponse(BaseModel):
+    items: list[PendingIngest]

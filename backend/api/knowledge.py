@@ -11,6 +11,7 @@ from backend.services import ingest as ingest_service
 from backend.services import knowledge
 from backend.services import retrieval_config
 from backend.schemas.retrieval import RetrievalSettings
+from backend.schemas.knowledge import PendingIngestResponse
 from backend.services.ingest_leases import IngestBusyError, IngestLeaseLostError
 
 knowledge_router = APIRouter()
@@ -102,3 +103,31 @@ def list_knowledge(authorization: str = Header(default="")) -> dict:
             for i in db_items
         ],
     }
+
+
+@knowledge_router.get(
+    '/knowledge/ingest/pending', response_model=PendingIngestResponse,
+    summary='查看待恢复的入库记录（最多 100 条）',
+    responses={403: {'model': ErrorResponse}},
+)
+def pending_ingests(authorization: str = Header(default='')) -> dict:
+    _require_admin(authorization)
+    return {'items': ingest_service.pending_ingests()}
+
+
+@knowledge_router.post(
+    '/knowledge/ingest/recover/{fingerprint}', response_model=IngestResponse,
+    summary='从已持久化阶段恢复一份资料入库',
+    responses={403: {'model': ErrorResponse}, 404: {'model': ErrorResponse},
+               409: {'model': ErrorResponse}, 422: {'model': ErrorResponse}},
+)
+def recover_ingest(fingerprint: str, authorization: str = Header(default='')) -> dict:
+    _require_admin(authorization)
+    try:
+        return ingest_service.recover_ingest(fingerprint).to_dict()
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail='未找到入库 journal') from exc
+    except (IngestBusyError, IngestLeaseLostError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc), headers={'Retry-After': '1'}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail='入库 journal 无法恢复，请人工核对持久化输入与阶段') from exc

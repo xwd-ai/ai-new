@@ -2,7 +2,7 @@
 # 各模型按阶段迁移，逐步从 JSON 文件存储切到数据库。
 
 from backend.models.conversation import Conversation, Message, TriedStep
-from backend.models.knowledge import KnowledgeDoc, KnowledgeIngestLease
+from backend.models.knowledge import KnowledgeDoc, KnowledgeIngestLease, KnowledgeIngestJournal
 from backend.models.order import Order, Product
 from backend.models.ticket import Ticket
 from backend.models.user import Session, User
@@ -11,6 +11,7 @@ __all__ = [
     "Conversation",
     "KnowledgeDoc",
     "KnowledgeIngestLease",
+    "KnowledgeIngestJournal",
     "Message",
     "Order",
     "Product",

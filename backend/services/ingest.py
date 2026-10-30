@@ -27,7 +27,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from backend.database import SessionLocal
-from backend.models import KnowledgeDoc
+from backend.models import KnowledgeDoc, KnowledgeIngestJournal
+from backend.schemas.knowledge import IngestRequest
 from backend.services import ingest_leases
 
 # 分块参数：单块目标长度与相邻块重叠，保证跨块语义不断裂
@@ -212,6 +213,13 @@ def ingest(
         # 必须在获取租约之后重查，避免先前的执行者刚完成入库。
         existing = _find_existing(fingerprint)
         if existing is not None:
+            with SessionLocal() as db:
+                lease.refresh(db)
+                journal = db.get(KnowledgeIngestJournal, fingerprint)
+                if journal is not None:
+                    journal.stage, journal.knowledge_id = STAGE_STORED, existing.id
+                    journal.payload, journal.updated_at = {}, time.time()
+                db.commit()
             record_checkpoint(fingerprint, STAGE_STORED, existing.id)
             return IngestResult(
                 knowledge_id=existing.id,
@@ -223,11 +231,18 @@ def ingest(
 
         record_checkpoint(fingerprint, STAGE_PARSED, "")
 
-        chunks = split_into_chunks(content)
+        payload, doc_id, chunk_count = _journal_start(
+            lease, dict(title=title, content=content, kind=kind, keywords=keywords or []),
+            knowledge_id or f"k-{uuid.uuid4().hex[:12]}",
+        )
+        # 同指纹重试使用首次持久化的输入，避免恢复时悄悄改变类型或关键词。
+        title, content, kind, keywords = (payload[k] for k in ('title', 'content', 'kind', 'keywords'))
+        if chunk_count is None:
+            chunk_count = len(split_into_chunks(content))
+            _journal_chunked(lease, chunk_count)
         checkpoint.mark(STAGE_CHUNKED)
-        checkpoint.chunk_count = len(chunks)
+        checkpoint.chunk_count = chunk_count
 
-        doc_id = knowledge_id or f"k-{uuid.uuid4().hex[:12]}"
         created = True
         db = SessionLocal()
         try:
@@ -248,6 +263,11 @@ def ingest(
                         fingerprint=fingerprint,
                     )
                 )
+            journal = db.get(KnowledgeIngestJournal, fingerprint)
+            journal.stage = STAGE_STORED
+            journal.knowledge_id = doc_id
+            journal.payload = {}  # 完成后无需重复保留整篇输入。
+            journal.updated_at = time.time()
             db.commit()
         except Exception:
             db.rollback()
@@ -260,14 +280,83 @@ def ingest(
         return IngestResult(
             knowledge_id=doc_id,
             created=created,
-            chunks=len(chunks) if created else 0,
+            chunks=chunk_count if created else 0,
             stage=STAGE_STORED,
             detail="" if created else "内容已存在，返回已有记录",
         )
 
 
+def _journal_start(lease, payload: dict, doc_id: str) -> tuple[dict, str, int | None]:
+    with SessionLocal() as db:
+        lease.refresh(db)
+        row = db.get(KnowledgeIngestJournal, lease.fingerprint)
+        if row is None:
+            row = KnowledgeIngestJournal(
+                fingerprint=lease.fingerprint, knowledge_id=doc_id, payload=payload,
+                stage=STAGE_PARSED, chunk_count=0, updated_at=time.time(),
+            )
+            db.add(row)
+        elif row.stage == STAGE_STORED:
+            existing = db.get(KnowledgeDoc, row.knowledge_id)
+            if existing is None or existing.fingerprint != lease.fingerprint:
+                raise ValueError('完成记录与知识资料不一致，请人工核对')
+            result = (payload, row.knowledge_id, row.chunk_count)
+            db.commit()
+            return result
+        elif db.get(KnowledgeDoc, row.knowledge_id) is not None:
+            # 先前指定的编号已被其他资料占用，允许普通重提使用新的编号。
+            row.knowledge_id = doc_id
+        if row.stage not in (STAGE_PARSED, STAGE_CHUNKED):
+            raise ValueError('入库 journal 状态不兼容，请人工核对')
+        validated = IngestRequest.model_validate(row.payload).model_dump()
+        if content_fingerprint(validated['title'], validated['content']) != lease.fingerprint:
+            raise ValueError('入库 journal 指纹不匹配，请人工核对')
+        result = (validated, row.knowledge_id, row.chunk_count if row.stage == STAGE_CHUNKED else None)
+        if result[2] is not None and result[2] < 1:
+            raise ValueError('入库 journal 分块计数无效，请人工核对')
+        db.commit()
+        return result
+
+
+def _journal_chunked(lease, chunk_count: int) -> None:
+    with SessionLocal() as db:
+        lease.refresh(db)
+        row = db.get(KnowledgeIngestJournal, lease.fingerprint)
+        row.stage, row.chunk_count, row.updated_at = STAGE_CHUNKED, chunk_count, time.time()
+        db.commit()
+
+
+def pending_ingests() -> list[dict]:
+    with SessionLocal() as db:
+        rows = db.query(KnowledgeIngestJournal).filter(
+            KnowledgeIngestJournal.stage != STAGE_STORED,
+        ).order_by(KnowledgeIngestJournal.updated_at, KnowledgeIngestJournal.fingerprint).limit(100).all()
+        return [dict(fingerprint=r.fingerprint, knowledge_id=r.knowledge_id,
+                     stage=r.stage, chunk_count=r.chunk_count, updated_at=r.updated_at) for r in rows]
+
+
+def recover_ingest(fingerprint: str) -> IngestResult:
+    with SessionLocal() as db:
+        row = db.get(KnowledgeIngestJournal, fingerprint)
+        if row is None:
+            raise LookupError('未找到入库 journal')
+        if row.stage == STAGE_STORED:
+            doc = db.get(KnowledgeDoc, row.knowledge_id)
+            if doc is None or doc.fingerprint != fingerprint:
+                raise ValueError('完成记录与知识资料不一致，请人工核对')
+            return IngestResult(doc.id, False, 0, STAGE_STORED, '内容已存在，返回已有记录')
+        occupied = db.get(KnowledgeDoc, row.knowledge_id)
+        if occupied is not None and occupied.fingerprint != fingerprint:
+            raise ValueError('预留资料编号已被其他资料占用，请人工核对或重新提交')
+        payload = IngestRequest.model_validate(row.payload).model_dump()
+        if content_fingerprint(payload['title'], payload['content']) != fingerprint:
+            raise ValueError('入库 journal 指纹不匹配，请人工核对')
+        doc_id = row.knowledge_id
+    return ingest(**payload, knowledge_id=doc_id)
+
+
 # ---------------------------------------------------------------------------
-# 断点续处理
+# 旧 JSON 检查点：仅旁路诊断，恢复以 SQLite journal 为准。
 # ---------------------------------------------------------------------------
 
 # 已处理指纹的记录：持久化到磁盘，进程重启后仍能判断「这份内容做过没有」。

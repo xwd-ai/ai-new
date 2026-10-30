@@ -14,7 +14,7 @@ from backend import database, models  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[2]
 OLD_REVISION = "d1178ec7c657"
-HEAD_REVISION = "c94e1a7f5208"
+HEAD_REVISION = "a31d9f0276bc"
 
 
 @pytest.fixture()
@@ -38,7 +38,7 @@ def _version(connection):
 def _legacy_schema(connection, *, fingerprint=True, check=False):
     metadata = sa.MetaData()
     for table in database.Base.metadata.sorted_tables:
-        if table.name == "knowledge_ingest_leases":
+        if table.name in ("knowledge_ingest_leases", "knowledge_ingest_journal"):
             continue
         if table.name == "knowledge_docs" and not fingerprint:
             sa.Table(
@@ -76,6 +76,28 @@ def test_empty_database_upgrade_matches_application_schema(migration_env):
         *database.Base.metadata.tables, "alembic_version",
     }
     assert compare_metadata(MigrationContext.configure(connection), database.Base.metadata) == []
+
+
+def test_journal_upgrade_from_previous_head_preserves_knowledge(migration_env):
+    config, connection = migration_env
+    command.upgrade(config, 'c94e1a7f5208')
+    assert not sa.inspect(connection).has_table('knowledge_ingest_journal')
+    connection.execute(sa.text("INSERT INTO knowledge_docs (id,kind,title,keywords,content) VALUES ('kept','faq','旧资料','[]','正文')"))
+    connection.commit()
+    command.upgrade(config, 'head')
+    connection.commit()
+    assert connection.scalar(sa.text("SELECT content FROM knowledge_docs WHERE id='kept'")) == '正文'
+    assert compare_metadata(MigrationContext.configure(connection), database.Base.metadata) == []
+
+
+def test_journal_upgrade_rejects_incompatible_precreated_table(migration_env):
+    config, connection = migration_env
+    command.upgrade(config, 'c94e1a7f5208')
+    connection.exec_driver_sql('CREATE TABLE knowledge_ingest_journal (fingerprint INTEGER PRIMARY KEY)')
+    connection.commit()
+    with pytest.raises(RuntimeError, match='表结构不兼容'):
+        command.upgrade(config, 'head')
+    assert _version(connection) == 'c94e1a7f5208'
 
 
 @pytest.mark.parametrize("stamped", [False, True])

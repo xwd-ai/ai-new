@@ -1,4 +1,4 @@
-from sqlalchemy import Float, JSON, String
+from sqlalchemy import Float, Integer, JSON, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base
@@ -31,3 +31,14 @@ class KnowledgeIngestLease(Base):
     fingerprint: Mapped[str] = mapped_column(String, primary_key=True)
     owner: Mapped[str] = mapped_column(String, nullable=False)
     expires_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class KnowledgeIngestJournal(Base):
+    __tablename__ = "knowledge_ingest_journal"
+
+    fingerprint: Mapped[str] = mapped_column(String, primary_key=True)
+    knowledge_id: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    stage: Mapped[str] = mapped_column(String, nullable=False)
+    chunk_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[float] = mapped_column(Float, nullable=False)

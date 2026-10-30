@@ -19,6 +19,8 @@
 | `GET /api/sources/{source_id}` | 无需登录 | `SourceDetail` |
 | `POST /api/knowledge/ingest` | 管理员 | `IngestResponse` |
 | `GET /api/knowledge/items` | 管理员 | `KnowledgeListResponse` |
+| `GET /api/knowledge/ingest/pending` | 管理员 | `PendingIngestResponse` |
+| `POST /api/knowledge/ingest/recover/{fingerprint}` | 管理员 | `IngestResponse` |
 | `GET /api/knowledge/diagnose` | 管理员 | `KnowledgeDiagnosisResponse` |
 | `GET /api/knowledge/settings` | 管理员 | `RetrievalSettings` |
 | `PUT /api/knowledge/settings` | 管理员 | `RetrievalSettings` |
@@ -122,6 +124,25 @@
 无效登录态在对话接口按匿名处理，不返回权限错误；匿名请求使用共享的 `anonymous` 用户标识，不提供独立访客会话保证。执行摘要也仍为进程共享状态，尚未保证并发请求的追踪隔离。本文示例与测试验证的是串行调用。
 
 对话页在首次载入、浏览器重新联网或手动同步时调用 `/api/me` 校验身份，再读取 `/api/conversation`。历史读取失败最多尝试 3 次，不自动重发 `/api/chat`。客户端等待对话响应超过 60 秒会停止等待并标记结果不确定，服务端可能继续处理；稍后读取历史只能反映当时已保存的消息，不能确认尚未落库的请求已取消。历史响应只有文字、角色与时间，没有来源、执行过程或建单元数据，因此页面不重建这些控件。客户端恢复行为不改变本接口契约。
+
+## 入库恢复
+
+`GET /api/knowledge/ingest/pending` 返回 `{"items":[...]}`，按更新时间、指纹升序取最多 100 条未完成记录。每项包含 `fingerprint`、预留 `knowledge_id`、`stage`、`chunk_count`、`updated_at`（Unix 秒），不包含正文。记录可能仍在执行，列表不是空闲任务队列。
+
+`POST /api/knowledge/ingest/recover/{fingerprint}` 无请求体，使用数据库 journal 内首次保存的输入同步恢复。`parsed` 会计算分块；`chunked` 复用计数；资料与 `stored` 完成状态同事务提交，完成后清空重复输入。重复恢复已完成项返回原资料、`created=false`、`chunks=0`。两接口仅管理员可用（403）；journal 不存在为 404；租约占用或失效为 409 并附 `Retry-After: 1`；输入指纹、格式或阶段不兼容为 422；底层数据库故障未统一分类，可能返回 500。
+
+进程崩溃可能留下最长约 30 秒租约，过期后才能接管；服务不会启动自动恢复，也不自动轮询或重试。旧 JSON 检查点不能恢复原文，不导入新 journal。同指纹重提保持首次暂存的类型与关键词；恢复接口保留原预留编号，发现该编号已被其他资料占用时返回 422，需人工核对或普通重新提交。存储故障在首次输入提交前发生时需重新提供原文。恢复范围与数据保留限制见 [README](../README.md#入库-journal-恢复)。
+
+使用登录示例取得 `$headers` 后可查看并恢复一项（会写入资料，正常完成后不再列在待恢复项中）：
+
+```powershell
+$baseUrl = 'http://127.0.0.1:8000'
+$pending = Invoke-RestMethod -Uri "$baseUrl/api/knowledge/ingest/pending" -Headers $headers
+if ($pending.items.Count -gt 0) {
+    $fingerprint = $pending.items[0].fingerprint
+    Invoke-RestMethod -Method Post -Uri "$baseUrl/api/knowledge/ingest/recover/$fingerprint" -Headers $headers
+}
+```
 
 ## 检索诊断
 
