@@ -365,7 +365,15 @@
         <span class="tag">工单 #T-1024</span>
       </div>
 
+      <div style="padding:8px 22px;display:flex;align-items:center;gap:12px;font-size:13px;color:var(--muted)">
+        <span id="connectionStatus" role="status" aria-live="polite">正在同步历史…</span>
+        <button id="syncHistory" type="button" style="margin-left:auto;white-space:nowrap">同步历史</button>
+      </div>
       <div class="chat-scroll">
+        <details id="uncertainQuestions" hidden style="max-width:760px;margin:0 auto 16px;color:var(--muted)">
+          <summary>发送结果待核对（本页保留原文，请勿重复提交）</summary>
+          <div id="uncertainTexts" style="white-space:pre-wrap;overflow-wrap:anywhere"></div>
+        </details>
         <div class="inner" id="chatLog">
           <div class="msg ai">
             <div class="avatar">AI</div>
@@ -404,6 +412,7 @@
     </aside>
   </div>
 
+  <script src="/assets/chat-recovery.js"></script>
   <script>
     // ---- 登录守卫 ----
     const token = localStorage.getItem('token');
@@ -593,9 +602,45 @@
     // 当前对话命中的知识来源（供建单时沉淀为「依据」）
     let currentSources = [];
 
+    const syncBtn = document.getElementById('syncHistory');
+    const recovery = new ChatRecovery({
+      fetchHistory: async () => {
+        const options = {headers: {'Authorization': 'Bearer ' + token}, signal: AbortSignal.timeout(10000)};
+        // 旧历史接口对失效会话返回空数组，先校验身份，避免误作空历史。
+        const identity = await fetch('/api/me', options);
+        if (!identity.ok) throw new Error('身份检查失败');
+        const account = await identity.json();
+        if (!account.user || account.user.id !== me.id) {
+          throw Object.assign(new Error('登录已失效或账号已改变，请重新登录。'), {retryable:false});
+        }
+        const response = await fetch('/api/conversation', options);
+        if (!response.ok) throw new Error('历史读取失败');
+        const data = await response.json();
+        if (!Array.isArray(data.messages)) throw new Error('历史格式错误');
+        return data.messages;
+      },
+      onMessages: messages => {
+        if (!messages.length) return; // 未落库时保留欢迎语或结果不确定的本地消息。
+        log.replaceChildren();
+        currentSources = [];
+        messages.forEach(message => {
+          if (message.role === 'user') addUserMsg(message.content);
+          else if (message.role === 'assistant') addBubble(addAiContainer(), message.content);
+        });
+        scrollBottom();
+      },
+      onStatus: text => { document.getElementById('connectionStatus').textContent = text; },
+      onBusy: busy => { sendBtn.disabled = busy; syncBtn.disabled = busy; },
+    });
+    syncBtn.addEventListener('click', () => recovery.sync());
+    window.addEventListener('online', () => recovery.sync());
+    window.addEventListener('offline', () => {
+      document.getElementById('connectionStatus').textContent = '网络已断开，联网后将同步历史；不会自动重发消息。';
+    });
+
     async function handleSend() {
       const text = input.value.trim();
-      if (!text) return;
+      if (!text || !recovery.beginSend()) return;
       addUserMsg(text);
       input.value = '';
       input.style.height = 'auto';
@@ -608,15 +653,23 @@
       let suggest = false;
       let sources = [];
       let trace = [];
+      let uncertain = false;
       try {
-        const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify({ message: text }) });
+        const res = await fetch('/api/chat', { method: 'POST', signal: AbortSignal.timeout(60000), headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify({ message: text }) });
+        if (!res.ok) throw new Error('对话请求失败');
         const data = await res.json();
+        if (typeof data.reply !== 'string') throw new Error('对话响应格式错误');
         reply = data.reply;
         suggest = data.suggest_ticket;
         sources = data.sources || [];
         trace = data.trace || [];
       } catch (e) {
-        reply = '抱歉，我暂时无法连接到服务，请稍后再试。';
+        uncertain = true;
+        const retained = document.createElement('p');
+        retained.textContent = text;
+        document.getElementById('uncertainTexts').appendChild(retained);
+        document.getElementById('uncertainQuestions').hidden = false;
+        reply = '发送结果不确定，服务可能仍在处理。请点击「同步历史」查看已保存的回答，避免重复发送。';
       }
 
       currentSources = sources;
@@ -633,7 +686,7 @@
         addConfirmTicket(body, text);
       }
 
-      sendBtn.disabled = false;
+      await recovery.finishSend(uncertain);
       scrollBottom();
     }
 
@@ -646,32 +699,12 @@
     sendBtn.addEventListener('click', handleSend);
 
     function fillAndSend(t) { input.value = t; handleSend(); }
-    function newChat() { log.innerHTML = ''; input.focus(); }
+    function newChat() { if (recovery.sending || recovery.syncing) return; log.innerHTML = ''; currentSources = []; input.focus(); }
     function switchConv(el) { document.querySelectorAll('.conv').forEach(c => c.classList.remove('active')); el.classList.add('active'); }
     function goTickets() { alert('工单管理页（后续实现）'); }
 
     // ---- 加载历史对话，让用户「记得」之前聊过什么 ----
-    async function loadHistory() {
-      try {
-        const res = await fetch('/api/conversation', { headers: { 'Authorization': 'Bearer ' + token } });
-        const data = await res.json();
-        const messages = data.messages || [];
-        if (!messages.length) return;  // 没有历史，保留默认欢迎语
-
-        // 清掉默认欢迎语，回显真实历史
-        log.innerHTML = '';
-        messages.forEach(m => {
-          if (m.role === 'user') {
-            addUserMsg(m.content);
-          } else if (m.role === 'assistant') {
-            const body = addAiContainer();
-            addBubble(body, m.content);
-          }
-        });
-        scrollBottom();
-      } catch (e) { /* 拉取失败不影响使用 */ }
-    }
-    loadHistory();
+    recovery.sync();
 
     // ---- 加载真实订单信息到右侧面板 ----
     async function loadOrder() {
