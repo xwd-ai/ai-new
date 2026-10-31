@@ -16,6 +16,7 @@ import math
 import re
 from copy import deepcopy
 from dataclasses import dataclass, field
+from numbers import Integral, Real
 
 from backend.database import SessionLocal
 from backend.logging_conf import log_event
@@ -212,14 +213,30 @@ def _prefetch_depth(top_k: int, config: RetrievalConfig | None = None) -> int:
 
 def _cosine(a: list[float], b: list[float]) -> float:
     """余弦相似度；任一向量为零向量时返回 0。"""
-    if not a or not b or len(a) != len(b):
+    left = _unit_vector(a)
+    right = _unit_vector(b, len(left)) if left else None
+    if left is None or right is None:
         return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(y * y for y in b))
-    if na == 0 or nb == 0:
-        return 0.0
-    return dot / (na * nb)
+    return max(-1.0, min(1.0, math.fsum(x*y for x,y in zip(left, right))))
+
+
+def _unit_vector(value, dimension: int | None = None) -> list[float] | None:
+    """校验协议内的实数向量，先缩放再归一化，避免大数平方溢出。"""
+    if not isinstance(value, (list, tuple)) or not value:
+        return None
+    if dimension is not None and len(value) != dimension:
+        return None
+    if any(isinstance(v, bool) or not isinstance(v, Real) for v in value):
+        return None
+    numbers = [float(v) for v in value]
+    if not all(math.isfinite(v) for v in numbers):
+        return None
+    scale = max(abs(v) for v in numbers)
+    if scale == 0:
+        return None
+    scaled = [v/scale for v in numbers]
+    length = math.hypot(*scaled)
+    return [v/length for v in scaled]
 
 
 def _doc_text(item: dict) -> str:
@@ -233,33 +250,50 @@ def search_knowledge_by_vector(
     *,
     top_k: int = 3,
     embedding_provider=None,
+    diagnostics: dict | None = None,
 ) -> list[dict]:
     """按向量相似度检索知识条目。
 
     embedding 不可用（未配置密钥、网络失败、返回异常）时返回空列表，
     由调用方降级到关键词检索，避免整个检索链路因模型不可用而失败。
     """
-    if embedding_provider is None:
+    if diagnostics is not None:
+        diagnostics.clear()
+
+    def empty(reason):
+        if diagnostics is not None:
+            diagnostics['skipped'] = reason
         return []
+
+    if embedding_provider is None:
+        return empty('no_provider')
 
     docs = _all_docs()
     if not docs:
-        return []
+        return empty('empty_corpus')
 
     try:
         query_vector = embedding_provider.embed(query)
         doc_vectors = embedding_provider.embed_many([_doc_text(d) for d in docs])
     except Exception:  # noqa: BLE001 - 模型不可用时统一降级
-        return []
+        return empty('model_error')
 
-    if not query_vector or len(doc_vectors) != len(docs):
-        return []
-
-    scored: list[tuple[dict, float]] = []
-    for item, vec in zip(docs, doc_vectors):
-        sim = _cosine(query_vector, vec)
-        if sim > 0:
-            scored.append((item, sim))
+    try:
+        query_unit = _unit_vector(query_vector)
+        if query_unit is None or not isinstance(doc_vectors, (list, tuple)) or len(doc_vectors) != len(docs):
+            raise ValueError('invalid embedding response')
+        vectors = [_unit_vector(v, len(query_unit)) for v in doc_vectors]
+        if any(vector is None for vector in vectors):
+            raise ValueError('invalid embedding vector')
+        scored: list[tuple[dict, float]] = []
+        for item, vec in zip(docs, vectors):
+            sim = max(-1.0, min(1.0, math.fsum(x*y for x,y in zip(query_unit, vec))))
+            if sim > 0:
+                scored.append((item, sim))
+    except Exception:  # provider 的返回对象也可能在访问或迭代时抛错。
+        return empty('invalid_response')
+    if not scored:
+        return empty('no_positive_similarity')
 
     scored.sort(key=lambda pair: pair[1], reverse=True)
 
@@ -521,30 +555,43 @@ def rerank_results(
         diag = {**base_diag, "skipped": "model_error"}
         return (sliced, diag) if with_diagnostics else sliced
 
-    if not ranked:
+    try:
+        if not isinstance(ranked, (list, tuple)):
+            raise ValueError('invalid rerank response')
+        validated = []
+        seen = set()
+        for hit in ranked:
+            index, score = hit.index, hit.relevance_score
+            if isinstance(index, bool) or not isinstance(index, Integral) or not 0 <= index < len(scorable):
+                raise ValueError('invalid rerank index')
+            if index in seen or isinstance(score, bool) or not isinstance(score, Real):
+                raise ValueError('invalid rerank score or duplicate index')
+            score = float(score)
+            if not math.isfinite(score):
+                raise ValueError('non-finite rerank score')
+            seen.add(index)
+            validated.append((int(index), min(1.0, max(0.0, score))))
+    except Exception:  # 返回形状异常时整批降级，避免部分错误排名混入结果。
+        sliced = results[:top_k] if top_k else results
+        diag = {**base_diag, "skipped": "invalid_response"}
+        return (sliced, diag) if with_diagnostics else sliced
+
+    if not validated:
         sliced = results[:top_k] if top_k else results
         diag = {**base_diag, "skipped": "empty"}
         return (sliced, diag) if with_diagnostics else sliced
 
     ordered: list[dict] = []
-    for hit in ranked:
+    for index, model_score in validated:
         # 重排返回的下标指向 scorable，需要映射回 candidates 的位置
-        if not (0 <= hit.index < len(scorable)):
-            continue
-        original_index = scorable[hit.index][0]
+        original_index = scorable[index][0]
         item = dict(candidates[original_index])
-        model_score = min(1.0, max(0.0, float(hit.relevance_score)))
         item["rerank_score"] = round(model_score, 4)
         # 保留召回分，便于对比重排前后的变化
         item.setdefault("recall_score", item.get("score", 0.0))
         item["score"] = round(composite_score(item, model_score, config=cfg), 4)
         item["match_type"] = "rerank"
         ordered.append(item)
-
-    if not ordered:
-        sliced = results[:top_k] if top_k else results
-        diag = {**base_diag, "skipped": "no_valid_index"}
-        return (sliced, diag) if with_diagnostics else sliced
 
     # 重排模型通常已按分数降序返回，这里再排一次以防供应商未排序
     ordered.sort(key=lambda r: -r["score"])
@@ -694,8 +741,9 @@ def diagnose(
     depth = cfg.prefetch_depth(top_k)
 
     keyword_hits = search_knowledge(query, top_k=depth)
+    vector_diag: dict = {}
     vector_hits = search_knowledge_by_vector(
-        query, top_k=depth, embedding_provider=embedding_provider
+        query, top_k=depth, embedding_provider=embedding_provider, diagnostics=vector_diag,
     )
 
     stages: list[dict] = [
@@ -709,6 +757,7 @@ def diagnose(
             "count": len(vector_hits),
             "ids": [h["id"] for h in vector_hits],
             "skipped": not vector_hits,
+            "detail": vector_diag,
         },
     ]
 

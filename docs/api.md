@@ -154,6 +154,8 @@ if ($pending.items.Count -gt 0) {
 
 当前 HTTP 路由没有装配向量和重排 provider，诊断通常报告向量跳过、融合退回关键词结果、重排跳过；服务层具备对应能力不代表此接口已经发起模型调用。实际对话目前也使用关键词检索，诊断不是对某次对话的追踪回放。
 
+向量阶段保留布尔值 `skipped`，新增 `detail` 原因对象。服务层可报告 `detail.skipped=no_provider/empty_corpus/model_error/invalid_response/no_positive_similarity`，分别表示未装配、空语料、调用失败、返回数量/维度/类型/有限性或非零性不合法、无正相似度结果；成功时 `detail` 可为空。向量返回不合法时整条分支弃用，关键词分支继续。重排阶段的 `detail.skipped=invalid_response` 表示返回形状、下标（含重复）或分数不合法，整批回退原候选，`model_error` 表示 provider 调用抛错，`empty` 表示合法空返回。有限越界分数仍截断到 0～1；合法部分返回不会被判为失败。原始 provider 异常不进入上述原因对象。完整校验范围见 [README](../README.md#检索设置与试查)。
+
 ## 检索设置
 
 `GET /api/knowledge/settings` 返回六项当前生效设置。`PUT /api/knowledge/settings` 必须完整提交下列六项，成功时返回所保存的对象：
