@@ -13,7 +13,13 @@ from backend.models.ticket import (
     TicketRuleError,
 )
 from backend.schemas import CreateTicketRequest, ReplyRequest
-from backend.schemas.ticket import CancelRequest, ConfirmRequest, TransferRequest
+from backend.schemas.ticket import (
+    BatchCloseRequest,
+    BatchTransferRequest,
+    CancelRequest,
+    ConfirmRequest,
+    TransferRequest,
+)
 
 
 class TicketErrorRoute(APIRoute):
@@ -68,6 +74,15 @@ def _require_ticket(ticket_id: str) -> dict:
     if data is None:
         raise TicketNotFoundError(ticket_id)
     return data
+
+
+def _batch_message(action: str, result: dict) -> str:
+    """按批量结果拼装一句话摘要，失败时附带首个失败原因。"""
+    message = f"批量{action}完成：成功 {result['succeeded']} 个，失败 {result['failed']} 个"
+    if result["failures"]:
+        first = result["failures"][0]
+        message += f"（{first['ticket_id']}：{first['reason']}）"
+    return message
 
 
 @tickets_router.post("/tickets")
@@ -233,6 +248,37 @@ def transfer_ticket(req: TransferRequest, authorization: str = Header(default=""
     else:
         message = f"工单 {t['id']} 已转人工，原因：{transfer['reason']}"
     return {"ticket": t, "decision": decision, "message": message}
+
+
+@tickets_router.post("/tickets/batch-close")
+def batch_close_tickets(req: BatchCloseRequest, authorization: str = Header(default="")):
+    """批量关闭工单，逐单落痕并返回成功与失败明细。
+
+    仅管理员可调用：一次提交多个工单号，每张工单在同一批次内独立结算，
+    个别工单不存在或当前状态不允许关闭时记入 failures 并给出错误码，
+    不影响同批其他工单；关闭原因写入每张工单的回复时间线。
+    单次最多 50 个工单，重复工单号只处理一次，空列表直接拒绝。
+    """
+    user = _require_user(authorization, admin_only=True)
+    result = tickets.batch_close_tickets(
+        req.ticket_ids, reason=req.reason, operator=user["name"]
+    )
+    return {"result": result, "message": _batch_message("关闭", result)}
+
+
+@tickets_router.post("/tickets/batch-transfer")
+def batch_transfer_tickets(req: BatchTransferRequest, authorization: str = Header(default="")):
+    """批量转人工，转人工原因按转人工说明写入每张工单的时间线。
+
+    仅管理员可调用：已终结或当前状态不允许转人工的工单进入 failures，
+    其余工单照常流转，调用方据 success_ids 与 failures 决定是否需要重试。
+    原因为空时以默认说明兜底，保证每条转人工记录都可追溯。
+    """
+    user = _require_user(authorization, admin_only=True)
+    result = tickets.batch_transfer_tickets(
+        req.ticket_ids, reason=req.reason, operator=user["name"]
+    )
+    return {"result": result, "message": _batch_message("转人工", result)}
 
 
 @tickets_router.post("/tickets/confirm")

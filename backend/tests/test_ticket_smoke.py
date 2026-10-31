@@ -44,8 +44,13 @@ ENDPOINTS = [
     ("post", "/api/tickets/expire", {}),
 ]
 
-# 订单查询接口对匿名是宽松的，只参与路由注册检查，不参与未登录拦截检查。
-ROUTES = ENDPOINTS + [("get", "/api/order", {})]
+# 订单查询接口对匿名是宽松的，只参与路由注册检查，不参与未登录拦截检查；
+# 批量接口会真实改变工单状态，也只校验路由注册，不进冒烟主流程。
+ROUTES = ENDPOINTS + [
+    ("get", "/api/order", {}),
+    ("post", "/api/tickets/batch-close", {}),
+    ("post", "/api/tickets/batch-transfer", {}),
+]
 
 
 @pytest.fixture()

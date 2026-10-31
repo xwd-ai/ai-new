@@ -11,6 +11,7 @@ from backend.models import Ticket
 from backend.models.ticket import (
     TicketErrorCode,
     TicketStatusLog,
+    TicketTransitionError,
     TicketValidationError,
     can_transition,
     is_valid_status,
@@ -40,6 +41,9 @@ MAX_PAGE_SIZE = 100
 MAX_KEYWORD_LENGTH = 50
 # LIKE 转义符：关键词里的 % 与 _ 按字面量匹配，不当通配符使用
 _LIKE_ESCAPE = "\\"
+
+# 批量操作的工单数上限：单次请求最多处理该数量，避免一个请求长时间占用写锁
+MAX_BATCH_SIZE = 50
 
 # 排查信息结构化的上限：条目总数与单条长度双重限制，避免详情响应被超长文本撑爆
 MAX_TROUBLESHOOT_ITEMS = 50
@@ -1021,6 +1025,156 @@ def transfer_to_human(
             "by_rule": bool(decision and decision.get("should_transfer")),
         }
         return data
+
+
+# ---------------------------------------------------------------------------
+# 写入层：批量关闭与批量转人工（逐单独立结算，不因个别失败回滚整批）
+# ---------------------------------------------------------------------------
+
+
+def normalize_batch_ids(ticket_ids: list[str] | str | None) -> list[str]:
+    """归一化批量操作的工单号列表：去空白、去重、限制单批数量。
+
+    重复的工单号只保留首次出现，避免同一工单在同一批次里被处理两次；
+    空列表与超过上限的批次直接拒绝，而不是静默截断，让调用方明确知道
+    本次请求没有按预期执行。
+    """
+    if not ticket_ids:
+        raise TicketValidationError(
+            "工单号列表不能为空", code=TicketErrorCode.INVALID_BATCH
+        )
+    if isinstance(ticket_ids, str):
+        ticket_ids = ticket_ids.split(",")
+
+    ids: list[str] = []
+    for raw in ticket_ids:
+        ticket_id = str(raw or "").strip()
+        if ticket_id and ticket_id not in ids:
+            ids.append(ticket_id)
+
+    if not ids:
+        raise TicketValidationError(
+            "工单号列表不能为空", code=TicketErrorCode.INVALID_BATCH
+        )
+    if len(ids) > MAX_BATCH_SIZE:
+        raise TicketValidationError(
+            f"单次批量操作不能超过 {MAX_BATCH_SIZE} 个工单，本次 {len(ids)} 个",
+            code=TicketErrorCode.INVALID_BATCH,
+            details={"max_batch_size": MAX_BATCH_SIZE, "requested": len(ids)},
+        )
+    return ids
+
+
+def _batch_result(action: str, ids: list[str], success: list[str], failures: list[dict]) -> dict:
+    """组装批量操作结果：请求数、成功数与失败明细。
+
+    失败逐单返回工单号、错误码与原因，调用方可以只重试失败的部分，
+    不必重新提交整批；action 标明本批执行的是关闭还是转人工。
+    """
+    return {
+        "action": action,
+        "requested": len(ids),
+        "succeeded": len(success),
+        "failed": len(failures),
+        "success_ids": success,
+        "failures": failures,
+        "all_succeeded": not failures,
+    }
+
+
+def _batch_transition(
+    ticket_ids: list[str] | str | None,
+    to_status: str,
+    action: str,
+    reason: str,
+    operator: str,
+) -> dict:
+    """批量把工单流转到目标状态，逐单结算成功与失败。
+
+    整批共享一个写会话：成功的工单在同一事务内提交，个别工单的失败
+    （不存在、当前状态不允许流转）只记入 failures，不影响同批其他工单。
+    流转合法性仍由状态机层判定，这里捕获其业务异常转为失败明细，
+    保证「非法流转」与「成功流转」在响应里都有明确归属。
+    """
+    ids = normalize_batch_ids(ticket_ids)
+    text = " ".join(str(reason or "").split())
+
+    success: list[str] = []
+    failures: list[dict] = []
+
+    with _ticket_session(write=True) as db:
+        for ticket_id in ids:
+            t = _load_ticket(db, ticket_id)
+            if not t:
+                failures.append(
+                    {
+                        "ticket_id": ticket_id,
+                        "error_code": TicketErrorCode.NOT_FOUND,
+                        "reason": "工单不存在",
+                        "from_status": "",
+                    }
+                )
+                continue
+
+            from_status = t.status
+            at = time.time()
+            if to_status == "transferred_human":
+                content = f"转人工：{text}" if text else "转人工"
+                reply = {
+                    "replier": _SYSTEM_REPLIER,
+                    "content": content,
+                    "at": at,
+                    "kind": _TRANSFER_KIND,
+                    "reason": text or DEFAULT_TRANSFER_REASON,
+                    "reason_codes": [],
+                    "operator": operator,
+                    "batch": True,
+                }
+            else:
+                content = f"批量关闭：{text}" if text else "批量关闭工单"
+                reply = {"replier": _SYSTEM_REPLIER, "content": content, "at": at, "batch": True}
+
+            try:
+                _apply_transition(db, t, to_status, operator=operator, reply=reply)
+            except TicketTransitionError as exc:
+                failures.append(
+                    {
+                        "ticket_id": ticket_id,
+                        "error_code": exc.code,
+                        "reason": exc.message,
+                        "from_status": from_status,
+                    }
+                )
+                continue
+            success.append(ticket_id)
+
+    return _batch_result(action, ids, success, failures)
+
+
+def batch_close_tickets(
+    ticket_ids: list[str] | str | None,
+    reason: str = "",
+    operator: str = "system",
+) -> dict:
+    """批量关闭工单，关闭原因写入每张工单的回复时间线。
+
+    适合运营清理长期无响应的工单：一次提交多张工单，逐单落痕并记录操作人，
+    已关闭或不可关闭的工单在 failures 里给出原因，不影响其他工单的关闭。
+    """
+    return _batch_transition(ticket_ids, "closed", "close", reason, operator)
+
+
+def batch_transfer_tickets(
+    ticket_ids: list[str] | str | None,
+    reason: str = "",
+    operator: str = "system",
+) -> dict:
+    """批量转人工，转人工原因按转人工说明写入每张工单的时间线。
+
+    原因为空时用默认说明兜底，保证每条转人工记录都可追溯；
+    已终结或不允许转人工的工单进入 failures，其余工单照常流转。
+    """
+    return _batch_transition(ticket_ids, "transferred_human", "transfer", reason, operator)
 
 
 # ---------------------------------------------------------------------------

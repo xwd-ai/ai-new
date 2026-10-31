@@ -71,3 +71,39 @@ class CancelRequest(BaseModel):
     @classmethod
     def _strip_reason(cls, v: str) -> str:
         return (v or "").strip()
+
+
+class BatchTicketRequest(BaseModel):
+    """批量操作请求：工单号列表必填，单次最多 50 个，重复工单只保留一次。
+
+    工单号按提交顺序去重后保留，空值与纯空白项被丢弃；全部无效时直接拒绝，
+    避免把一次空的批量请求当成成功返回。
+    """
+
+    ticket_ids: list[str] = Field(..., min_length=1, max_length=50, description="工单号列表")
+    reason: str = Field(default="", max_length=500, description="批量操作原因")
+
+    @field_validator("ticket_ids")
+    @classmethod
+    def _clean_ticket_ids(cls, v: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for raw in v:
+            ticket_id = str(raw or "").strip()
+            if ticket_id and ticket_id not in cleaned:
+                cleaned.append(ticket_id)
+        if not cleaned:
+            raise ValueError("工单号列表不能为空")
+        return cleaned
+
+    @field_validator("reason")
+    @classmethod
+    def _strip_batch_reason(cls, v: str) -> str:
+        return " ".join((v or "").split())
+
+
+class BatchCloseRequest(BatchTicketRequest):
+    """批量关闭请求：关闭原因可选，会写入每张工单的时间线。"""
+
+
+class BatchTransferRequest(BatchTicketRequest):
+    """批量转人工请求：转人工原因可选，为空时以默认说明兜底。"""
