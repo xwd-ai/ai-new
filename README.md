@@ -191,6 +191,12 @@ $httpTestTemp = Join-Path ([IO.Path]::GetTempPath()) ('ai-new-http-' + [Guid]::N
 
 租约测试使用临时 SQLite 文件，覆盖线程及独立进程竞争、心跳续租、过期接管、失去租约后禁止落库、异常释放及 HTTP 409 重试提示；迁移测试同时覆盖租约表创建与 `create_all` 预建表接入。这些测试不访问实际 `backend/app.db`。
 
+## 离线检索评测
+
+运行 `.\.venv\Scripts\python.exe -m backend.evaluation.retrieval --top-k 2` 可生成关键词基线及 RRF、重排、MMR 消融的 JSON 报告，包含 Precision、Recall、MRR、nDCG、方面覆盖、无答案误召回率及逐题排名。数据结构、消融定义、示例结果与保存命令见 [评测说明](docs/retrieval-evaluation.md)。
+
+默认数据为五篇资料、六道题的人工合成回放，向量排名及重排分数也为合成输入，不是供应商或业务质量验收。示例中 RRF 消融没有降低指标，完整链路对无答案题仍有误召回；不能据此宣称混合检索整体更优。工具不访问运行数据库、部署配置或外部模型，不改变当前对话的关键词检索路径。
+
 ## 演示账号
 
 | 账号 | 密码 | 角色 |

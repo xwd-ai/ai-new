@@ -1,0 +1,19 @@
+{
+  "data_mode": "synthetic_replay",
+  "description": "人工构造的五篇资料、六个问题及合成向量排名/重排分数。仅演示离线指标与组件消融，不代表真实供应商质量。",
+  "documents": [
+    {"id":"export", "kind":"faq", "title":"export csv", "keywords":["export"], "content":"export csv export format guide"},
+    {"id":"export-copy", "kind":"faq", "title":"export csv", "keywords":["export"], "content":"export csv export format guide copy"},
+    {"id":"permission", "kind":"rule", "title":"export permission", "keywords":["permission"], "content":"administrator access permission required"},
+    {"id":"refund", "kind":"faq", "title":"refund policy", "keywords":["refund"], "content":"request money back within seven days"},
+    {"id":"activation", "kind":"manual", "title":"activation key", "keywords":["activation"], "content":"enter license key to activate software"}
+  ],
+  "queries": [
+    {"id":"export", "query":"export", "relevance":{"export":3,"export-copy":2,"permission":2}, "groups":{"export":"format","export-copy":"format","permission":"access"}, "vector_ranking":["export","export-copy","permission"], "rerank_scores":{"export":0.98,"export-copy":0.96,"permission":0.88,"refund":0.01,"activation":0.01}},
+    {"id":"access", "query":"export permission", "relevance":{"permission":3,"export":1,"export-copy":1}, "groups":{"permission":"access","export":"format","export-copy":"format"}, "vector_ranking":["export-copy","permission","export"], "rerank_scores":{"export":0.45,"export-copy":0.44,"permission":0.99,"refund":0.01,"activation":0.01}},
+    {"id":"refund", "query":"refund", "relevance":{"refund":3}, "groups":{"refund":"policy"}, "vector_ranking":["refund","permission"], "rerank_scores":{"export":0.01,"export-copy":0.01,"permission":0.15,"refund":0.99,"activation":0.01}},
+    {"id":"paraphrase", "query":"chargeback", "relevance":{"refund":3}, "groups":{"refund":"policy"}, "vector_ranking":["refund"], "rerank_scores":{"export":0.01,"export-copy":0.01,"permission":0.01,"refund":0.99,"activation":0.01}},
+    {"id":"activation", "query":"activation", "relevance":{"activation":3}, "groups":{"activation":"license"}, "vector_ranking":["refund","activation"], "rerank_scores":{"export":0.01,"export-copy":0.01,"permission":0.01,"refund":0.1,"activation":0.99}},
+    {"id":"unanswerable", "query":"weather forecast", "relevance":{}, "groups":{}, "vector_ranking":["refund"], "rerank_scores":{"export":0.01,"export-copy":0.01,"permission":0.01,"refund":0.01,"activation":0.01}}
+  ]
+}
