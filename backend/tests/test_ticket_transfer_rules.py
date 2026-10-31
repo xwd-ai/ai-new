@@ -22,7 +22,7 @@ from sqlalchemy.orm import sessionmaker
 from backend.api import tickets as api_tickets
 from backend.database import Base
 from backend.models import Order, Product, Session, Ticket, User
-from backend.models.ticket import TicketTransitionError
+from backend.models.ticket import TicketErrorCode, TicketTransitionError
 from backend.services import auth as auth_service
 from backend.services import orders as orders_service
 from backend.services import tickets
@@ -494,10 +494,13 @@ def test_接口未登录不可转人工(api_client):
     """未携带登录态时，转人工与判定接口都返回未登录。"""
     client, _ = api_client
 
-    assert client.post("/api/tickets/transfer", json={"ticket_id": "T-2000"}).json() == {
-        "error": "未登录"
-    }
-    assert client.get("/api/tickets/T-2000/transfer-decision").json() == {"error": "未登录"}
+    transfer = client.post("/api/tickets/transfer", json={"ticket_id": "T-2000"}).json()
+    assert transfer["error"] == "未登录"
+    assert transfer["error_code"] == TicketErrorCode.UNAUTHORIZED
+
+    decision = client.get("/api/tickets/T-2000/transfer-decision").json()
+    assert decision["error"] == "未登录"
+    assert decision["error_code"] == TicketErrorCode.UNAUTHORIZED
 
 
 def test_接口普通用户不可转人工(api_client):
@@ -511,7 +514,8 @@ def test_接口普通用户不可转人工(api_client):
         headers=CUSTOMER,
     ).json()
 
-    assert resp == {"error": "无权限"}
+    assert resp["error"] == "无权限"
+    assert resp["error_code"] == TicketErrorCode.FORBIDDEN
 
 
 def test_接口转人工不存在的工单(api_client):
@@ -520,7 +524,8 @@ def test_接口转人工不存在的工单(api_client):
 
     resp = client.post("/api/tickets/transfer", json={"ticket_id": "T-2000"}, headers=ADMIN).json()
 
-    assert resp == {"error": "工单不存在"}
+    assert resp["error"] == "工单不存在"
+    assert resp["error_code"] == TicketErrorCode.NOT_FOUND
 
 
 def test_接口按规则自动转人工(api_client):
@@ -556,7 +561,8 @@ def test_接口规则未命中时拒绝自动转人工(api_client):
         headers=ADMIN,
     ).json()
 
-    assert resp["decision"]["should_transfer"] is False
+    assert resp["error_code"] == TicketErrorCode.TRANSFER_RULE_NOT_MATCHED
+    assert resp["error_detail"]["decision"]["should_transfer"] is False
     assert "未命中转人工规则" in resp["error"]
     # 拒绝时不产生任何副作用
     detail = client.get(f"/api/tickets/{ticket_id}", headers=ADMIN).json()["ticket"]
@@ -632,7 +638,8 @@ def test_判定接口普通用户越权被拒绝(api_client):
 
     resp = client.get(f"/api/tickets/{ticket_id}/transfer-decision", headers=CUSTOMER).json()
 
-    assert resp == {"error": "无权限"}
+    assert resp["error"] == "无权限"
+    assert resp["error_code"] == TicketErrorCode.FORBIDDEN
 
 
 def test_判定接口本人可判定(api_client):
@@ -653,4 +660,5 @@ def test_判定接口工单不存在(api_client):
 
     resp = client.get("/api/tickets/T-2000/transfer-decision", headers=ADMIN).json()
 
-    assert resp == {"error": "工单不存在"}
+    assert resp["error"] == "工单不存在"
+    assert resp["error_code"] == TicketErrorCode.NOT_FOUND

@@ -373,12 +373,16 @@ def test_接口未登录拒绝写操作(api_client):
     finally:
         db.close()
 
-    assert client.post("/api/tickets", json={"description": "无登录态"}).json() == {
-        "error": "未登录"
-    }
-    assert client.post("/api/tickets/confirm", json={"ticket_id": "T-9001"}).json() == {
-        "error": "未登录"
-    }
-    assert client.post(
+    create_resp = client.post("/api/tickets", json={"description": "无登录态"}).json()
+    assert create_resp["error"] == "未登录"
+    assert create_resp["error_code"] == "TICKET_UNAUTHORIZED"
+
+    confirm_resp = client.post("/api/tickets/confirm", json={"ticket_id": "T-9001"}).json()
+    assert confirm_resp["error"] == "未登录"
+    assert confirm_resp["error_code"] == "TICKET_UNAUTHORIZED"
+
+    cancel_resp = client.post(
         "/api/tickets/cancel", json={"ticket_id": "T-9001", "reason": ""}
-    ).json() == {"error": "未登录"}
+    ).json()
+    assert cancel_resp["error"] == "未登录"
+    assert cancel_resp["error_code"] == "TICKET_UNAUTHORIZED"

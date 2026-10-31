@@ -19,7 +19,7 @@ from sqlalchemy.orm import sessionmaker
 from backend.api import tickets as api_tickets
 from backend.database import Base
 from backend.models import Session, User
-from backend.models.ticket import Ticket, TicketStatusLog
+from backend.models.ticket import Ticket, TicketErrorCode, TicketStatusLog
 from backend.services import auth as auth_service
 from backend.services import tickets
 
@@ -340,13 +340,23 @@ def test_详情接口空分区给出暂无提示(api_client):
 
 
 def test_详情接口未登录与不存在(api_client):
-    """未登录返回未登录，工单不存在返回工单不存在。"""
+    """未登录返回未登录，工单不存在返回工单不存在，且都带稳定错误码。"""
     client, _ = api_client
 
-    assert client.get("/api/tickets/T-3001").json() == {"error": "未登录"}
-    assert client.get(
+    unauthenticated_resp = client.get("/api/tickets/T-3001")
+    assert unauthenticated_resp.status_code == 401
+    unauthenticated = unauthenticated_resp.json()
+    assert unauthenticated["error"] == "未登录"
+    assert unauthenticated["error_code"] == TicketErrorCode.UNAUTHORIZED
+
+    missing_resp = client.get(
         "/api/tickets/T-不存在", headers={"Authorization": "Bearer tk-api"}
-    ).json() == {"error": "工单不存在"}
+    )
+    assert missing_resp.status_code == 404
+    missing = missing_resp.json()
+    assert missing["error"] == "工单不存在"
+    assert missing["error_code"] == TicketErrorCode.NOT_FOUND
+    assert missing["error_detail"] == {"ticket_id": "T-不存在"}
 
 
 def test_详情接口越权拒绝与管理员放行(api_client):
@@ -355,7 +365,8 @@ def test_详情接口越权拒绝与管理员放行(api_client):
     _seed_ticket(test_session, ticket_id="T-3003", user_id="u-other")
 
     denied = client.get("/api/tickets/T-3003", headers={"Authorization": "Bearer tk-api"}).json()
-    assert denied == {"error": "无权限"}
+    assert denied["error"] == "无权限"
+    assert denied["error_code"] == TicketErrorCode.FORBIDDEN
 
     allowed = client.get(
         "/api/tickets/T-3003", headers={"Authorization": "Bearer tk-admin"}

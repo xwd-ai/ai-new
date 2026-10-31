@@ -17,6 +17,7 @@ from sqlalchemy.orm import sessionmaker
 
 from backend.database import Base
 from backend.models import Ticket
+from backend.models.ticket import TicketErrorCode, TicketValidationError
 from backend.services import tickets
 
 
@@ -104,15 +105,20 @@ def test_不同描述生成不同工单(db_env):
 
 
 def test_空描述被拒绝(db_env):
-    """空字符串描述直接抛 ValueError。"""
-    with pytest.raises(ValueError):
+    """空字符串描述直接抛入参校验异常，错误码指明是描述为空。"""
+    with pytest.raises(TicketValidationError) as exc:
         tickets.create_ticket("u-x", "用户X", "", "", "")
+
+    assert exc.value.message == "问题描述不能为空"
+    assert exc.value.code == TicketErrorCode.INVALID_DESCRIPTION
 
 
 def test_全空白描述被拒绝(db_env):
     """全空白描述（空格/换行）strip 后为空，同样被拒绝。"""
-    with pytest.raises(ValueError):
+    with pytest.raises(TicketValidationError) as exc:
         tickets.create_ticket("u-x", "用户X", "   \n\t  ", "", "")
+
+    assert exc.value.code == TicketErrorCode.INVALID_DESCRIPTION
 
 
 def test_描述前后空白被清理(db_env):

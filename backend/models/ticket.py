@@ -64,23 +64,147 @@ def is_valid_status(value: str) -> bool:
     return value in {s.value for s in TicketStatus}
 
 
-class TicketTransitionError(Exception):
+class TicketErrorCode:
+    """工单业务错误码。
+
+    错误码是接口契约的一部分：提示文案可以随产品调整，错误码保持不变，
+    调用方按错误码分支处理，不必解析中文文案。
+    命名规则为 TICKET_ 前缀 + 语义，可与 HTTP 状态码并列使用。
+    """
+
+    # 身份与权限
+    UNAUTHORIZED = "TICKET_UNAUTHORIZED"
+    FORBIDDEN = "TICKET_FORBIDDEN"
+    # 资源
+    NOT_FOUND = "TICKET_NOT_FOUND"
+    # 状态机
+    INVALID_TRANSITION = "TICKET_INVALID_TRANSITION"
+    UNKNOWN_STATUS = "TICKET_UNKNOWN_STATUS"
+    # 入参
+    INVALID_PAYLOAD = "TICKET_INVALID_PAYLOAD"
+    INVALID_DESCRIPTION = "TICKET_INVALID_DESCRIPTION"
+    INVALID_STATUS_FILTER = "TICKET_INVALID_STATUS_FILTER"
+    INVALID_PAGINATION = "TICKET_INVALID_PAGINATION"
+    INVALID_ORDER = "TICKET_INVALID_ORDER"
+    INVALID_KEYWORD = "TICKET_INVALID_KEYWORD"
+    # 业务规则
+    TRANSFER_RULE_NOT_MATCHED = "TICKET_TRANSFER_RULE_NOT_MATCHED"
+
+
+class TicketBusinessError(Exception):
+    """工单业务异常基类：统一携带错误码、提示文案、HTTP 状态与补充上下文。
+
+    工单模块内可预期的失败（未登录、无权限、工单不存在、入参非法、流转非法、
+    规则未命中）一律以本类派生的异常表达，接口层在同一个地方转成统一响应，
+    业务代码不再各自拼装 {"error": ...} 字典，避免同类错误在不同接口里
+    出现不同字段、不同文案。
+    """
+
+    code = TicketErrorCode.INVALID_PAYLOAD
+    http_status = 400
+    default_message = "工单操作失败"
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        code: str | None = None,
+        details: dict | None = None,
+        http_status: int | None = None,
+    ):
+        self.code = code or type(self).code
+        self.http_status = http_status or type(self).http_status
+        self.message = message or type(self).default_message
+        self.details = dict(details or {})
+        super().__init__(self.message)
+
+    def to_payload(self) -> dict:
+        """转为统一的错误响应体。
+
+        error 为可直接展示的中文文案（沿用既有字段名，前端无需改解析方式），
+        error_code 为机器可读标识；error_detail 只在有补充上下文时出现，
+        例如非法流转的原/目标状态、未命中规则时的判定结论。
+        """
+        payload = {"error": self.message, "error_code": self.code}
+        if self.details:
+            payload["error_detail"] = self.details
+        return payload
+
+
+class TicketAuthRequiredError(TicketBusinessError):
+    """登录态缺失或无效。"""
+
+    code = TicketErrorCode.UNAUTHORIZED
+    http_status = 401
+    default_message = "未登录"
+
+
+class TicketPermissionError(TicketBusinessError):
+    """权限不足：普通用户调用管理操作，或访问他人工单。"""
+
+    code = TicketErrorCode.FORBIDDEN
+    http_status = 403
+    default_message = "无权限"
+
+
+class TicketNotFoundError(TicketBusinessError):
+    """工单不存在。"""
+
+    code = TicketErrorCode.NOT_FOUND
+    http_status = 404
+    default_message = "工单不存在"
+
+    def __init__(self, ticket_id: str | None = None, message: str | None = None):
+        details = {"ticket_id": ticket_id} if ticket_id else None
+        super().__init__(message, details=details)
+
+
+class TicketValidationError(TicketBusinessError, ValueError):
+    """入参校验失败。
+
+    同时继承 ValueError，兼容按通用入参错误捕获的既有调用方与测试；
+    具体是哪种入参问题由错误码区分。
+    """
+
+    code = TicketErrorCode.INVALID_PAYLOAD
+    http_status = 422
+    default_message = "工单入参不合法"
+
+
+class TicketRuleError(TicketBusinessError):
+    """业务规则未满足，例如规则判定未命中转人工条件。"""
+
+    code = TicketErrorCode.TRANSFER_RULE_NOT_MATCHED
+    http_status = 409
+    default_message = "未命中转人工规则"
+
+
+class TicketTransitionError(TicketBusinessError):
     """工单状态非法流转业务异常。
 
     当请求的流转不在合法流转表中，或涉及未知状态值时抛出。
-    调用方据此向用户返回明确的错误信息，而非让底层异常直接上抛。
+    原状态与目标状态放在错误详情里，调用方既能展示文案，也能按错误码分支处理。
     """
+
+    code = TicketErrorCode.INVALID_TRANSITION
+    http_status = 409
+    default_message = "工单状态流转非法"
 
     def __init__(
         self,
         current: str,
         target: str,
         message: str | None = None,
+        code: str | None = None,
     ):
         self.current = current
         self.target = target
-        self.message = message or f"非法状态流转：{current} -> {target}"
-        super().__init__(self.message)
+        super().__init__(
+            message or f"非法状态流转：{current} -> {target}",
+            code=code,
+            details={"from_status": current, "to_status": target},
+            http_status=422 if code == TicketErrorCode.UNKNOWN_STATUS else None,
+        )
 
 
 def validate_transition(
@@ -94,12 +218,20 @@ def validate_transition(
     """
     if isinstance(current, str):
         if not is_valid_status(current):
-            raise TicketTransitionError(current, target, message=f"未知的当前状态：{current}")
+            raise TicketTransitionError(
+                current,
+                target,
+                message=f"未知的当前状态：{current}",
+                code=TicketErrorCode.UNKNOWN_STATUS,
+            )
         current = TicketStatus(current)
     if isinstance(target, str):
         if not is_valid_status(target):
             raise TicketTransitionError(
-                current.value, target, message=f"未知的目标状态：{target}"
+                current.value,
+                target,
+                message=f"未知的目标状态：{target}",
+                code=TicketErrorCode.UNKNOWN_STATUS,
             )
         target = TicketStatus(target)
 

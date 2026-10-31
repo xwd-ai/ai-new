@@ -9,7 +9,9 @@ from sqlalchemy import func, or_, text
 from backend.database import SessionLocal
 from backend.models import Ticket
 from backend.models.ticket import (
+    TicketErrorCode,
     TicketStatusLog,
+    TicketValidationError,
     can_transition,
     is_valid_status,
     validate_transition,
@@ -20,6 +22,8 @@ from backend.models.ticket import (
 # 工单状态机：pending_confirm(待确认) -> open(待处理) -> in_progress(处理中) -> resolved(已解决)
 # 建单前可挂起为 pending_confirm，等待用户确认后再进入 open
 # 预置工单逻辑收敛到 backend.seed 模块
+# 可预期的失败统一以 TicketBusinessError 派生异常抛出（错误码见 models/ticket），
+# 由接口层在同一处转成 {error, error_code, error_detail?} 结构，不再各自返回错误字典
 
 # 待确认草稿的超时阈值（秒）：超时未确认的草稿收敛为已关闭，避免僵尸工单堆积
 PENDING_CONFIRM_TIMEOUT_SECONDS = 30 * 60
@@ -225,7 +229,9 @@ def create_ticket(
     """
     description = (description or "").strip()
     if not description:
-        raise ValueError("问题描述不能为空")
+        raise TicketValidationError(
+            "问题描述不能为空", code=TicketErrorCode.INVALID_DESCRIPTION
+        )
 
     key = _dedup_key(user_id, description)
     # 两阶段建单：初始一律落待确认草稿，待确认接口流转为 open 后才成为正式工单
@@ -451,7 +457,9 @@ def normalize_status_filter(values: list[str] | str | None) -> list[str] | None:
             if not status or status == "all":
                 continue
             if not is_valid_status(status):
-                raise ValueError(f"未知的工单状态：{status}")
+                raise TicketValidationError(
+                    f"未知的工单状态：{status}", code=TicketErrorCode.INVALID_STATUS_FILTER
+                )
             if status not in selected:
                 selected.append(status)
     return selected or None
@@ -466,12 +474,16 @@ def normalize_pagination(page: int | None, page_size: int | None) -> tuple[int, 
     """
     current = 1 if page is None else int(page)
     if current < 1:
-        raise ValueError("页码必须大于等于 1")
+        raise TicketValidationError("页码必须大于等于 1", code=TicketErrorCode.INVALID_PAGINATION)
     size = DEFAULT_PAGE_SIZE if page_size is None else int(page_size)
     if size < 1:
-        raise ValueError("每页条数必须大于等于 1")
+        raise TicketValidationError(
+            "每页条数必须大于等于 1", code=TicketErrorCode.INVALID_PAGINATION
+        )
     if size > MAX_PAGE_SIZE:
-        raise ValueError(f"每页条数不能超过 {MAX_PAGE_SIZE}")
+        raise TicketValidationError(
+            f"每页条数不能超过 {MAX_PAGE_SIZE}", code=TicketErrorCode.INVALID_PAGINATION
+        )
     return current, size
 
 
@@ -484,7 +496,7 @@ def normalize_order(order: str | None) -> str:
         return "asc"
     if value in ("desc", "descending", "created_desc"):
         return "desc"
-    raise ValueError("排序方向只支持 asc 或 desc")
+    raise TicketValidationError("排序方向只支持 asc 或 desc", code=TicketErrorCode.INVALID_ORDER)
 
 
 def normalize_keyword(keyword: str | None) -> str | None:
@@ -500,7 +512,10 @@ def normalize_keyword(keyword: str | None) -> str | None:
     if not value:
         return None
     if len(value) > MAX_KEYWORD_LENGTH:
-        raise ValueError(f"关键词长度不能超过 {MAX_KEYWORD_LENGTH} 个字符")
+        raise TicketValidationError(
+            f"关键词长度不能超过 {MAX_KEYWORD_LENGTH} 个字符",
+            code=TicketErrorCode.INVALID_KEYWORD,
+        )
     return value
 
 

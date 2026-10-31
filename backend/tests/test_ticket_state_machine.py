@@ -16,6 +16,7 @@ import pytest
 
 from backend.models.ticket import (
     VALID_TRANSITIONS,
+    TicketErrorCode,
     TicketStatus,
     TicketTransitionError,
     can_transition,
@@ -132,3 +133,24 @@ def test_枚举组合穷举与流转表一致():
     for current, target in itertools.product(ALL_STATUSES, repeat=2):
         expected = (current, target) in declared_pairs
         assert can_transition(current, target) is expected
+
+
+def test_流转异常携带统一错误码与响应体():
+    """非法流转异常可直接转成统一错误体：错误码 + 文案 + 原/目标状态。"""
+    with pytest.raises(TicketTransitionError) as exc:
+        validate_transition("closed", "open")
+
+    assert exc.value.code == TicketErrorCode.INVALID_TRANSITION
+    assert exc.value.to_payload() == {
+        "error": "非法状态流转：closed -> open",
+        "error_code": TicketErrorCode.INVALID_TRANSITION,
+        "error_detail": {"from_status": "closed", "to_status": "open"},
+    }
+
+
+def test_未知状态使用独立错误码():
+    """未知状态值不是流转非法，用独立错误码区分，便于调用方给出不同提示。"""
+    with pytest.raises(TicketTransitionError) as exc:
+        validate_transition("ghost_status", "open")
+
+    assert exc.value.code == TicketErrorCode.UNKNOWN_STATUS

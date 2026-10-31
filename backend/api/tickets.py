@@ -1,13 +1,43 @@
-from fastapi import APIRouter, Header, Query
+from fastapi import APIRouter, Header, Query, Request
+from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 
 from backend.database import SessionLocal
 from backend.services import auth, orders, tickets
 from backend.models import TriedStep
-from backend.models.ticket import TicketTransitionError
+from backend.models.ticket import (
+    TicketAuthRequiredError,
+    TicketBusinessError,
+    TicketNotFoundError,
+    TicketPermissionError,
+    TicketRuleError,
+)
 from backend.schemas import CreateTicketRequest, ReplyRequest
 from backend.schemas.ticket import CancelRequest, ConfirmRequest, TransferRequest
 
-tickets_router = APIRouter()
+
+class TicketErrorRoute(APIRoute):
+    """把工单业务异常统一转换为错误响应。
+
+    业务代码只负责抛出 TicketBusinessError 派生异常，本路由类在一个地方拼装响应：
+    HTTP 状态取自异常的 http_status，响应体固定为
+    {"error": 文案, "error_code": 错误码, "error_detail": 补充上下文（可选）}。
+    新增接口不必再各写一遍 try/except，错误结构也不会随接口各自漂移。
+    """
+
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def dispatch(request: Request):
+            try:
+                return await handler(request)
+            except TicketBusinessError as exc:
+                return JSONResponse(status_code=exc.http_status, content=exc.to_payload())
+
+        return dispatch
+
+
+tickets_router = APIRouter(route_class=TicketErrorRoute)
 
 
 def _current_user(authorization: str):
@@ -18,11 +48,31 @@ def _current_user(authorization: str):
     return auth.find_by_username(session["username"])
 
 
-@tickets_router.post("/tickets")
-def create_ticket(req: CreateTicketRequest, authorization: str = Header(default="")):
+def _require_user(authorization: str, admin_only: bool = False) -> dict:
+    """取当前登录用户；未登录或权限不足时抛业务异常。
+
+    统一出口后，各接口开头不再重复「取用户 → 判空 → 返回错误字典」三段式，
+    只需声明自己需要什么样的身份，错误文案与错误码由异常类型决定。
+    """
     user = _current_user(authorization)
     if not user:
-        return {"error": "未登录"}
+        raise TicketAuthRequiredError()
+    if admin_only and user["role"] != "admin":
+        raise TicketPermissionError()
+    return user
+
+
+def _require_ticket(ticket_id: str) -> dict:
+    """取工单详情，不存在时抛业务异常。"""
+    data = tickets.get_ticket(ticket_id)
+    if data is None:
+        raise TicketNotFoundError(ticket_id)
+    return data
+
+
+@tickets_router.post("/tickets")
+def create_ticket(req: CreateTicketRequest, authorization: str = Header(default="")):
+    user = _require_user(authorization)
 
     # 若前端未显式传已尝试步骤，则从会话已记录的步骤自动沉淀
     tried_steps = req.tried_steps
@@ -76,23 +126,18 @@ def list_tickets(
     分页参数或关键词非法时返回明确错误。
     管理员看全部工单，普通用户只看本人工单；响应回显生效的筛选、分页与排序条件。
     """
-    user = _current_user(authorization)
-    if not user:
-        return {"error": "未登录"}
+    user = _require_user(authorization)
     # keyword 优先，未传时回退到别名 q，便于前端沿用搜索框参数名
     raw_keyword = keyword if keyword is not None else q
-    try:
-        statuses = tickets.normalize_status_filter(status)
-        result = tickets.list_tickets(
-            statuses=statuses,
-            user_id=None if user["role"] == "admin" else user["id"],
-            page=page,
-            page_size=page_size,
-            order=order,
-            keyword=raw_keyword,
-        )
-    except ValueError as e:
-        return {"error": str(e)}
+    statuses = tickets.normalize_status_filter(status)
+    result = tickets.list_tickets(
+        statuses=statuses,
+        user_id=None if user["role"] == "admin" else user["id"],
+        page=page,
+        page_size=page_size,
+        order=order,
+        keyword=raw_keyword,
+    )
 
     items = result["items"]
     conditions = []
@@ -130,26 +175,20 @@ def my_order(authorization: str = Header(default="")):
 
 @tickets_router.post("/tickets/reply")
 def reply_ticket(req: ReplyRequest, authorization: str = Header(default="")):
-    user = _current_user(authorization)
-    if not user:
-        return {"error": "未登录"}
-    if user["role"] != "admin":
-        return {"error": "无权限"}
+    user = _require_user(authorization, admin_only=True)
     t = tickets.add_reply(req.ticket_id, user["name"], req.content)
+    if t is None:
+        raise TicketNotFoundError(req.ticket_id)
     return {"ticket": t}
 
 
 @tickets_router.post("/tickets/status")
 def update_status(body: dict, authorization: str = Header(default="")):
-    user = _current_user(authorization)
-    if not user:
-        return {"error": "未登录"}
-    if user["role"] != "admin":
-        return {"error": "无权限"}
-    try:
-        t = tickets.update_status(body.get("ticket_id"), body.get("status"))
-    except TicketTransitionError as e:
-        return {"error": str(e)}
+    _require_user(authorization, admin_only=True)
+    ticket_id = body.get("ticket_id")
+    t = tickets.update_status(ticket_id, body.get("status"))
+    if t is None:
+        raise TicketNotFoundError(ticket_id)
     return {"ticket": t}
 
 
@@ -164,15 +203,9 @@ def transfer_ticket(req: TransferRequest, authorization: str = Header(default=""
     服务范围取自工单所属用户的订单，管理员处理他人工单时结论对应工单本人。
     仅管理员可转人工；非法来源状态（如已关闭的工单）由状态流转校验拒绝。
     """
-    user = _current_user(authorization)
-    if not user:
-        return {"error": "未登录"}
-    if user["role"] != "admin":
-        return {"error": "无权限"}
+    user = _require_user(authorization, admin_only=True)
 
-    data = tickets.get_ticket(req.ticket_id)
-    if data is None:
-        return {"error": "工单不存在"}
+    data = _require_ticket(req.ticket_id)
     decision = tickets.evaluate_transfer_rule(
         data,
         order=orders.query_order(data["user_id"]),
@@ -180,19 +213,19 @@ def transfer_ticket(req: TransferRequest, authorization: str = Header(default=""
         feature=req.feature,
     )
     if req.auto and not decision["should_transfer"]:
-        return {"error": f"未命中转人工规则：{decision['message']}", "decision": decision}
-
-    try:
-        t = tickets.transfer_to_human(
-            req.ticket_id,
-            req.reason,
-            operator=user["name"],
-            decision=decision,
+        raise TicketRuleError(
+            f"未命中转人工规则：{decision['message']}",
+            details={"decision": decision},
         )
-    except TicketTransitionError as e:
-        return {"error": str(e)}
+
+    t = tickets.transfer_to_human(
+        req.ticket_id,
+        req.reason,
+        operator=user["name"],
+        decision=decision,
+    )
     if t is None:
-        return {"error": "工单不存在"}
+        raise TicketNotFoundError(req.ticket_id)
 
     transfer = t["transfer"]
     if transfer["reason_codes"]:
@@ -209,15 +242,10 @@ def confirm_ticket(req: ConfirmRequest, authorization: str = Header(default=""))
     幂等：重复确认或确认已终结工单时原样返回，不产生副作用；
     工单不存在返回「工单不存在」，非法来源状态由流转校验拒绝。
     """
-    user = _current_user(authorization)
-    if not user:
-        return {"error": "未登录"}
-    try:
-        t = tickets.confirm_ticket(req.ticket_id)
-    except TicketTransitionError as e:
-        return {"error": str(e)}
+    _require_user(authorization)
+    t = tickets.confirm_ticket(req.ticket_id)
     if t is None:
-        return {"error": "工单不存在"}
+        raise TicketNotFoundError(req.ticket_id)
     return {"ticket": t}
 
 
@@ -228,15 +256,10 @@ def cancel_ticket(req: CancelRequest, authorization: str = Header(default="")):
     幂等：重复取消或取消已终结工单时原样返回，不产生副作用；
     工单不存在返回「工单不存在」，非法来源状态由流转校验拒绝。
     """
-    user = _current_user(authorization)
-    if not user:
-        return {"error": "未登录"}
-    try:
-        t = tickets.cancel_ticket(req.ticket_id, req.reason)
-    except TicketTransitionError as e:
-        return {"error": str(e)}
+    _require_user(authorization)
+    t = tickets.cancel_ticket(req.ticket_id, req.reason)
     if t is None:
-        return {"error": "工单不存在"}
+        raise TicketNotFoundError(req.ticket_id)
     return {"ticket": t}
 
 
@@ -252,11 +275,7 @@ def expire_pending_tickets(
     统一关闭，并写入取消说明与状态时间线。timeout_seconds / limit 可覆盖默认
     阈值与单批上限，返回的 remaining 大于 0 表示仍有超时草稿待下一批处理。
     """
-    user = _current_user(authorization)
-    if not user:
-        return {"error": "未登录"}
-    if user["role"] != "admin":
-        return {"error": "无权限"}
+    _require_user(authorization, admin_only=True)
     result = tickets.expire_pending_tickets(timeout_seconds=timeout_seconds, limit=limit)
     if result["closed"]:
         message = f"已关闭 {result['closed']} 个超时待确认工单"
@@ -279,9 +298,7 @@ def pending_tickets(
     展示确认倒计时。普通用户只能看到自己的草稿，管理员需要全量视图时传
     all_users=true。timeout_seconds 可覆盖默认超时阈值，用于联调验证。
     """
-    user = _current_user(authorization)
-    if not user:
-        return {"error": "未登录"}
+    user = _require_user(authorization)
     # 普通用户强制按本人隔离；管理员默认也只看自己的，显式要求时才看全量
     scope_user = None if (user["role"] == "admin" and all_users) else user["id"]
     result = tickets.list_pending_tickets(
@@ -320,14 +337,10 @@ def transfer_decision(
     服务范围取自工单所属用户的订单而非当前登录账号，管理员查看他人工单时结论
     仍对应工单本人的服务范围。普通用户仅可判定本人工单，越权返回「无权限」。
     """
-    user = _current_user(authorization)
-    if not user:
-        return {"error": "未登录"}
-    data = tickets.get_ticket(ticket_id)
-    if data is None:
-        return {"error": "工单不存在"}
+    user = _require_user(authorization)
+    data = _require_ticket(ticket_id)
     if user["role"] != "admin" and data["user_id"] != user["id"]:
-        return {"error": "无权限"}
+        raise TicketPermissionError()
 
     decision = tickets.evaluate_transfer_rule(
         data,
@@ -378,12 +391,8 @@ def ticket_detail(ticket_id: str, authorization: str = Header(default="")):
     管理员可查看任意工单；普通用户仅可查看本人创建的工单，
     越权访问返回「无权限」，工单不存在返回「工单不存在」。
     """
-    user = _current_user(authorization)
-    if not user:
-        return {"error": "未登录"}
-    data = tickets.get_ticket(ticket_id)
-    if data is None:
-        return {"error": "工单不存在"}
+    user = _require_user(authorization)
+    data = _require_ticket(ticket_id)
     if user["role"] != "admin" and data["user_id"] != user["id"]:
-        return {"error": "无权限"}
+        raise TicketPermissionError()
     return {"ticket": data, "message": _detail_message(data)}
