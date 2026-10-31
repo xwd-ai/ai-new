@@ -127,13 +127,13 @@ def evaluate(dataset: Dataset, *, top_k: int = 3) -> dict:
                   for i, key in enumerate(query.vector_ranking[:depth])]
         hybrid = knowledge.fuse_rrf(vector_results=vector, keyword_results=keyword, top_k=depth, config=cfg) if vector else keyword
         reranker = ReplayReranker(docs, query.rerank_scores)
-        reranked = knowledge.rerank_results(query.query, hybrid, rerank_provider=reranker, top_k=depth, threshold=0.0)
+        reranked = knowledge.rerank_results(query.query, hybrid, rerank_provider=reranker, top_k=depth, threshold=0.0, config=cfg)
         # 保留同一候选集合：无 RRF 时按向量优先的首次出现顺序排列，
         # 统一召回分，避免把删掉向量候选误当作取消融合的影响。
         union = {item['id']: item for item in reversed(vector + keyword)}
         selected_ids = {item['id'] for item in hybrid}
         no_rrf_pool = [{**union[key], 'score':1.0} for key in dict.fromkeys(item['id'] for item in vector + keyword) if key in selected_ids]
-        no_rrf = knowledge.rerank_results(query.query, no_rrf_pool, rerank_provider=reranker, top_k=depth, threshold=0.0)
+        no_rrf = knowledge.rerank_results(query.query, no_rrf_pool, rerank_provider=reranker, top_k=depth, threshold=0.0, config=cfg)
         candidates = {
             'keyword': keyword[:top_k],
             'full': knowledge.select_mmr(reranked, top_k, lambda_=cfg.mmr_lambda),

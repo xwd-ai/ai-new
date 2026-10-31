@@ -71,7 +71,22 @@ Copy-Item backend/.env.example backend/.env
 
 设置保存在 `backend/retrieval_settings.json`，不进入 Git，也不修改 `.env`。优先级为：**管理页保存值 > 对应 `RETRIEVAL_*` 环境变量 > 默认值**。保存完整替换六项参数，通过同目录临时文件原子换名；最后成功写入者生效，不提供多管理员编辑冲突检测。后续调用重新读取配置，无需重启；共享同一配置文件的进程可读取相同设置，不同部署副本需分别配置。重启保留设置，部署时需保留该文件并保证目录可写。文件损坏、不可读或校验失败时整体退回环境变量与默认值，并记录 `retrieval.settings_read` 日志；环境变量中的两路权重同时为零时退回默认的 0.7/0.3。
 
-当前 HTTP 试查实际使用候选预取和 MMR 参数；没有向量或重排 provider 时会标示跳过，RRF 参数仅影响服务层已提供向量结果的混合检索调用。**这些设置不会改变当前对话使用的关键词检索路径**，也不会启用模型。页面未开放尚未接入配置的重排参数。试查是独立调用，不代表某次对话的实际来源；其他管理员可能同时保存，本次结果以服务读取值为准。
+当前 HTTP 试查实际使用候选预取和 MMR 参数；没有向量或重排 provider 时会标示跳过，RRF 参数仅影响服务层已提供向量结果的混合检索调用。**这些设置不会改变当前对话使用的关键词检索路径**，也不会启用模型。页面仍只调整原有六项，其余重排参数通过环境变量或服务层配置传入。试查是独立调用，不代表某次对话的实际来源；其他管理员可能同时保存，本次结果以服务读取值为准。
+
+服务层 `rerank_results`、`rerank_with_mmr` 与 `diagnose` 在调用入口复制配置快照；一次调用内的候选上限、复合分、阈值与 MMR 使用一致参数。显式 `config=RetrievalConfig(...)` 优先于部署配置；省略 `threshold` 或传 `None` 时使用配置阈值，显式 `threshold=0` 可关闭本次阈值过滤，不修改调用方配置。包装函数还可显式覆盖 `lambda_`。以下已有环境变量现已接入实际重排：
+
+| 环境变量 | 默认值 | 范围与作用 |
+|---|---:|---|
+| `RETRIEVAL_MAX_RERANK_CANDIDATES` | 200 | 1～2000，送给重排 provider 的候选上限 |
+| `RETRIEVAL_THRESHOLD` | 0.0 | 0～1，按模型重排分过滤，0 关闭 |
+| `RETRIEVAL_DEGRADE_FLOOR` | 0.3 | 0～1，全不过阈值时的单次放宽下限 |
+| `RETRIEVAL_DEGRADE_FACTOR` | 0.7 | 0.1～1，单次放宽的阈值乘数 |
+| `RETRIEVAL_FALLBACK_MIN_SCORE` | 0.15 | 0～1，仍无结果时保留复合排序首条所需的模型分 |
+| `RETRIEVAL_COMPOSITE_RERANK` | 0.6 | 0～1，复合分中的重排分权重 |
+| `RETRIEVAL_COMPOSITE_RECALL` | 0.3 | 0～1，复合分中的召回分权重 |
+| `RETRIEVAL_COMPOSITE_SOURCE` | 0.1 | 0～1，复合分中的来源权重 |
+
+非法或越界环境变量回退默认值。复合分为三项加权和再截断到 0～1，权重不自动归一化；`source_weights` 可通过服务层 `RetrievalConfig` 单独传入，默认 rule=1.0、faq=0.8、manual=0.6，未知类型为 0.5，没有新增来源权重环境变量。无 provider、空输入或 provider 失败时沿用原有跳过/降级行为，不执行模型阈值过滤，送审上限也不限制降级返回的原候选。诊断的 `config` 与重排阶段 `detail.config` 反映同一有效快照，需结合 `skipped` 判断阶段是否执行；HTTP 当前仍未装配向量和重排 provider。
 
 ## 断线恢复与历史回放
 

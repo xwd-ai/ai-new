@@ -100,11 +100,16 @@ class RetrievalConfig:
             "rrf_k": self.rrf_k,
             "vector_weight": self.vector_weight,
             "keyword_weight": self.keyword_weight,
+            "max_rerank_candidates": self.max_rerank_candidates,
             "threshold": self.threshold,
             "degrade_floor": self.degrade_floor,
             "degrade_factor": self.degrade_factor,
             "fallback_min_score": self.fallback_min_score,
             "mmr_lambda": self.mmr_lambda,
+            "composite_rerank": self.composite_rerank,
+            "composite_recall": self.composite_recall,
+            "composite_source": self.composite_source,
+            "source_weights": dict(self.source_weights),
         }
 
 

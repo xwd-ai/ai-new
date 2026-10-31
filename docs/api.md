@@ -150,6 +150,8 @@ if ($pending.items.Count -gt 0) {
 
 响应包含 `query`、实际 `top_k`、`prefetch_depth`、本次 `config`、各阶段 `stages` 和最终 `final_ids`。阶段名包括 `keyword_recall`、`vector_recall`、`rrf_fusion`、`rerank`、`mmr`；各阶段记录数量与条目编号，并可能包含 `skipped`、`note`、`detail`、`dropped`。
 
+`config` 保留 `prefetch_depth_floor` 等既有字段，并包含 `max_rerank_candidates`、`composite_rerank`、`composite_recall`、`composite_source` 与 `source_weights`。重排阶段的 `detail.config` 为同次调用有效快照，与顶层一致；`detail.threshold` 是本次请求阈值，`effective_threshold` 在发生单次放宽时反映实际门槛。未装配 provider 时 `skipped=no_provider`，这些配置字段不代表已经执行重排或过滤。空候选也会直接跳过。服务层支持显式 `threshold` 覆盖，HTTP 未新增阈值查询参数，仍按部署配置读取；参数范围与环境变量见 [README](../README.md#检索设置与试查)。
+
 当前 HTTP 路由没有装配向量和重排 provider，诊断通常报告向量跳过、融合退回关键词结果、重排跳过；服务层具备对应能力不代表此接口已经发起模型调用。实际对话目前也使用关键词检索，诊断不是对某次对话的追踪回放。
 
 ## 检索设置
