@@ -10,6 +10,7 @@ from backend.database import SessionLocal
 from backend.models import Ticket
 from backend.models.ticket import (
     TicketErrorCode,
+    TicketStatus,
     TicketStatusLog,
     TicketTransitionError,
     TicketValidationError,
@@ -44,6 +45,27 @@ _LIKE_ESCAPE = "\\"
 
 # 批量操作的工单数上限：单次请求最多处理该数量，避免一个请求长时间占用写锁
 MAX_BATCH_SIZE = 50
+
+# 统计区间的回溯上限（天）：超过一年的统计请求直接拒绝，避免一次扫过全量历史
+MAX_STATS_DAYS = 365
+# 视为处理已结束的终态：时间线进入这些状态的时刻即该工单的处理结束时间
+SETTLED_STATUSES = (TicketStatus.RESOLVED.value, TicketStatus.CLOSED.value)
+# 仍需推进的未闭环状态：待处理、处理中、待确认、已转人工
+ACTIVE_STATUSES = (
+    TicketStatus.OPEN.value,
+    TicketStatus.IN_PROGRESS.value,
+    TicketStatus.PENDING_CONFIRM.value,
+    TicketStatus.TRANSFERRED_HUMAN.value,
+)
+# 状态的中文名：统计响应与摘要文案共用，避免同一状态在不同接口出现不同叫法
+STATUS_LABELS = {
+    TicketStatus.OPEN.value: "待处理",
+    TicketStatus.IN_PROGRESS.value: "处理中",
+    TicketStatus.RESOLVED.value: "已解决",
+    TicketStatus.PENDING_CONFIRM.value: "待确认",
+    TicketStatus.TRANSFERRED_HUMAN.value: "已转人工",
+    TicketStatus.CLOSED.value: "已关闭",
+}
 
 # 排查信息结构化的上限：条目总数与单条长度双重限制，避免详情响应被超长文本撑爆
 MAX_TROUBLESHOOT_ITEMS = 50
@@ -598,6 +620,191 @@ def list_tickets(
         }
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# 统计层：按状态计数与处理时长汇总
+# ---------------------------------------------------------------------------
+
+
+def normalize_stats_days(days: int | None) -> int | None:
+    """校验统计区间：只统计最近 N 天创建的工单，未传表示不限制时间范围。
+
+    只接受 1 到 MAX_STATS_DAYS 之间的整数；越界直接拒绝而不是静默截断，
+    避免调用方以为拿到的是最近 N 天的统计、实际却是另一个区间。
+    """
+    if days is None:
+        return None
+    try:
+        value = int(days)
+    except (TypeError, ValueError):
+        raise TicketValidationError(
+            "统计天数必须是整数", code=TicketErrorCode.INVALID_STATS_RANGE
+        )
+    if value < 1 or value > MAX_STATS_DAYS:
+        raise TicketValidationError(
+            f"统计天数需在 1 到 {MAX_STATS_DAYS} 之间",
+            code=TicketErrorCode.INVALID_STATS_RANGE,
+            details={"min_days": 1, "max_days": MAX_STATS_DAYS, "requested_days": value},
+        )
+    return value
+
+
+def format_duration(seconds: float | None) -> str:
+    """把秒数格式化成便于阅读的时长，如「3 小时 20 分」「2 天 5 小时」。
+
+    按天/时/分/秒逐级降档，只保留两个量级，避免出现「2 天 3 小时 15 分 8 秒」
+    这类过细的读数；数值缺失时返回占位符，由调用方决定是否展示。
+    """
+    if seconds is None:
+        return "—"
+    total = int(round(max(float(seconds), 0)))
+    if total < 60:
+        return f"{total} 秒"
+    minutes, _ = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes} 分钟"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours} 小时 {minutes} 分" if minutes else f"{hours} 小时"
+    days, hours = divmod(hours, 24)
+    return f"{days} 天 {hours} 小时" if hours else f"{days} 天"
+
+
+def _duration_summary(durations: list[float]) -> dict:
+    """汇总一组处理时长样本：样本数、平均、最短、最长与中位数。
+
+    空样本时各指标为 None，而不是填 0：0 会被误读成「平均处理时长 0 秒」，
+    调用方据 sample_size 判断能否展示平均时长。
+    """
+    if not durations:
+        return {
+            "sample_size": 0,
+            "total_seconds": None,
+            "avg_seconds": None,
+            "min_seconds": None,
+            "max_seconds": None,
+            "median_seconds": None,
+            "avg_text": "—",
+        }
+    ordered = sorted(durations)
+    total = sum(ordered)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        median = ordered[middle]
+    else:
+        median = (ordered[middle - 1] + ordered[middle]) / 2
+    average = total / len(ordered)
+    return {
+        "sample_size": len(ordered),
+        "total_seconds": round(total, 3),
+        "avg_seconds": round(average, 3),
+        "min_seconds": round(ordered[0], 3),
+        "max_seconds": round(ordered[-1], 3),
+        "median_seconds": round(median, 3),
+        "avg_text": format_duration(average),
+    }
+
+
+def _handling_durations(db, settled_tickets: list) -> dict[str, list[float]]:
+    """按状态收集已结案工单的处理时长。
+
+    处理时长 = 时间线中最后一次进入终态的时刻 - 建单时间。只统计已解决 / 已关闭
+    的工单：仍在流转的工单没有结束时间，算进来会把平均值拉低。缺时间线记录或
+    结束时间早于建单时间的脏数据直接跳过，不用建单时间自身凑出 0 秒样本。
+    一次聚合查询取回全部结束时间，避免逐单回查数据库。
+    """
+    collected: dict[str, list[float]] = {status: [] for status in SETTLED_STATUSES}
+    if not settled_tickets:
+        return collected
+
+    finished_at = dict(
+        db.query(TicketStatusLog.ticket_id, func.max(TicketStatusLog.changed_at))
+        .filter(
+            TicketStatusLog.ticket_id.in_([t.id for t in settled_tickets]),
+            TicketStatusLog.to_status.in_(SETTLED_STATUSES),
+        )
+        .group_by(TicketStatusLog.ticket_id)
+        .all()
+    )
+    for ticket in settled_tickets:
+        end = finished_at.get(ticket.id)
+        if end is None or end < ticket.created_at:
+            continue
+        collected[ticket.status].append(end - ticket.created_at)
+    return collected
+
+
+def build_ticket_statistics(user_id: str | None = None, days: int | None = None) -> dict:
+    """统计工单数量分布与平均处理时长。
+
+    status_counts 固定包含全部状态（计数为 0 也出现），前端不必自己补零；
+    status_breakdown 在计数之外给出占比与中文名，顺序与状态枚举一致。
+    active / settled 把状态分成「仍需推进」与「已结束」两类，并给出闭环率，
+    便于一眼看出积压量与结案进度。
+
+    处理时长只统计已进入终态（已解决 / 已关闭）的工单，按状态分别汇总后再合并，
+    响应里同时给出平均、最短、最长与中位数，样本数为 0 时各指标为 None。
+    user_id 非空时只统计该用户的工单，days 非空时只统计最近 N 天创建的工单。
+    """
+    scope_days = normalize_stats_days(days)
+    now = time.time()
+    since = now - scope_days * 86400 if scope_days else None
+
+    with _ticket_session() as db:
+        query = db.query(Ticket)
+        if user_id:
+            query = query.filter(Ticket.user_id == user_id)
+        if since is not None:
+            query = query.filter(Ticket.created_at >= since)
+        rows = query.all()
+
+        status_counts = {status.value: 0 for status in TicketStatus}
+        for ticket in rows:
+            if ticket.status in status_counts:
+                status_counts[ticket.status] += 1
+
+        total = len(rows)
+        breakdown = [
+            {
+                "status": status.value,
+                "label": STATUS_LABELS[status.value],
+                "count": status_counts[status.value],
+                "percent": round(status_counts[status.value] * 100 / total, 1) if total else 0.0,
+            }
+            for status in TicketStatus
+        ]
+
+        settled_rows = [t for t in rows if t.status in SETTLED_STATUSES]
+        by_status = _handling_durations(db, settled_rows)
+
+    all_durations = [d for values in by_status.values() for d in values]
+    active_total = sum(status_counts[status] for status in ACTIVE_STATUSES)
+    settled_total = sum(status_counts[status] for status in SETTLED_STATUSES)
+
+    return {
+        "total": total,
+        "status_counts": status_counts,
+        "status_breakdown": breakdown,
+        "active": {
+            "count": active_total,
+            "statuses": list(ACTIVE_STATUSES),
+            "percent": round(active_total * 100 / total, 1) if total else 0.0,
+        },
+        "settled": {
+            "count": settled_total,
+            "statuses": list(SETTLED_STATUSES),
+            "percent": round(settled_total * 100 / total, 1) if total else 0.0,
+            "completion_rate": round(settled_total * 100 / total, 1) if total else 0.0,
+        },
+        "handling_duration": {
+            **_duration_summary(all_durations),
+            "by_status": {status: _duration_summary(by_status[status]) for status in SETTLED_STATUSES},
+        },
+        "range": {"days": scope_days, "since": since, "until": now},
+        "user_id": user_id,
+        "generated_at": now,
+    }
 
 
 # ---------------------------------------------------------------------------

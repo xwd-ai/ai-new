@@ -34,6 +34,7 @@ ENDPOINTS = [
     ("get", "/api/tickets", {}),
     ("post", "/api/tickets", {"json": {"description": "导出失败"}}),
     ("get", "/api/tickets/pending", {}),
+    ("get", "/api/tickets/stats", {}),
     ("get", "/api/tickets/T-0001", {}),
     ("get", "/api/tickets/T-0001/transfer-decision", {}),
     ("post", "/api/tickets/confirm", {"json": {"ticket_id": "T-0001"}}),

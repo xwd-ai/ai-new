@@ -368,6 +368,60 @@ def pending_tickets(
     }
 
 
+def _stats_message(stats: dict) -> str:
+    """按统计结果拼装一句话摘要：总数、各状态分布与平均处理时长。
+
+    只列出计数不为 0 的状态，空状态不占篇幅；没有结案工单时明确说明
+    「暂无处理时长样本」，而不是给出一个 0 秒的平均值。
+    """
+    parts = [
+        f"{item['label']} {item['count']} 个"
+        for item in stats["status_breakdown"]
+        if item["count"]
+    ]
+    message = f"共 {stats['total']} 个工单"
+    if parts:
+        message += "：" + "、".join(parts)
+    duration = stats["handling_duration"]
+    if duration["sample_size"]:
+        message += (
+            f"；平均处理时长 {duration['avg_text']}"
+            f"（样本 {duration['sample_size']} 个，闭环率 {stats['settled']['completion_rate']}%）"
+        )
+    else:
+        message += "；暂无已结案工单可统计处理时长"
+    if stats["range"]["days"]:
+        message += f"（统计最近 {stats['range']['days']} 天创建）"
+    return message
+
+
+@tickets_router.get("/tickets/stats")
+def ticket_statistics(
+    days: int | None = Query(default=None, description="只统计最近 N 天创建的工单，取值 1–365"),
+    user_id: str | None = Query(default=None, description="按客户过滤，仅管理员可用"),
+    authorization: str = Header(default=""),
+):
+    """工单统计：按状态计数与平均处理时长。
+
+    返回各状态的计数与占比，并把状态分成「仍需推进」与「已结案」两组给出闭环率；
+    处理时长按「建单 → 最后一次进入终态」计算，只统计已解决 / 已关闭的工单，
+    同时给出平均、最短、最长、中位数与按状态拆分的结果，样本为空时指标为 null。
+    days 只统计最近 N 天创建的工单，用于看近期趋势；越界或非整数直接拒绝。
+    普通用户只能统计本人工单，传他人工号返回「无权限」；管理员不传 user_id
+    统计全量，传了就只看该客户。
+    """
+    user = _require_user(authorization)
+    if user["role"] == "admin":
+        scope_user = user_id
+    elif user_id and user_id != user["id"]:
+        raise TicketPermissionError("普通用户只能查看本人工单统计")
+    else:
+        scope_user = user["id"]
+
+    stats = tickets.build_ticket_statistics(user_id=scope_user, days=days)
+    return {"stats": stats, "message": _stats_message(stats)}
+
+
 @tickets_router.get("/tickets/{ticket_id}/transfer-decision")
 def transfer_decision(
     ticket_id: str,
