@@ -63,16 +63,21 @@ def _require_user(authorization: str, admin_only: bool = False) -> dict:
     user = _current_user(authorization)
     if not user:
         raise TicketAuthRequiredError()
-    if admin_only and user["role"] != "admin":
+    if admin_only and not tickets.is_admin(user):
         raise TicketPermissionError()
     return user
 
 
-def _require_ticket(ticket_id: str) -> dict:
-    """取工单详情，不存在时抛业务异常。"""
+def _require_ticket(user: dict, ticket_id: str, action: str = "查看") -> dict:
+    """取工单并校验数据权限：不存在报 404，非本人且非管理员报 403。
+
+    取数与鉴权合成一步，各接口不必先查详情再自己比对 user_id；
+    动作名只用于错误详情，便于提示「查看/确认/取消/判定」是哪一步被拦。
+    """
     data = tickets.get_ticket(ticket_id)
     if data is None:
         raise TicketNotFoundError(ticket_id)
+    tickets.ensure_ticket_access(user, data, action)
     return data
 
 
@@ -147,7 +152,7 @@ def list_tickets(
     statuses = tickets.normalize_status_filter(status)
     result = tickets.list_tickets(
         statuses=statuses,
-        user_id=None if user["role"] == "admin" else user["id"],
+        user_id=tickets.user_scope(user),
         page=page,
         page_size=page_size,
         order=order,
@@ -220,7 +225,7 @@ def transfer_ticket(req: TransferRequest, authorization: str = Header(default=""
     """
     user = _require_user(authorization, admin_only=True)
 
-    data = _require_ticket(req.ticket_id)
+    data = _require_ticket(user, req.ticket_id, "转人工")
     decision = tickets.evaluate_transfer_rule(
         data,
         order=orders.query_order(data["user_id"]),
@@ -287,8 +292,10 @@ def confirm_ticket(req: ConfirmRequest, authorization: str = Header(default=""))
 
     幂等：重复确认或确认已终结工单时原样返回，不产生副作用；
     工单不存在返回「工单不存在」，非法来源状态由流转校验拒绝。
+    仅工单本人或管理员可确认，他人工单返回「无权限」。
     """
-    _require_user(authorization)
+    user = _require_user(authorization)
+    _require_ticket(user, req.ticket_id, "确认")
     t = tickets.confirm_ticket(req.ticket_id)
     if t is None:
         raise TicketNotFoundError(req.ticket_id)
@@ -301,8 +308,10 @@ def cancel_ticket(req: CancelRequest, authorization: str = Header(default="")):
 
     幂等：重复取消或取消已终结工单时原样返回，不产生副作用；
     工单不存在返回「工单不存在」，非法来源状态由流转校验拒绝。
+    仅工单本人或管理员可取消，他人工单返回「无权限」。
     """
-    _require_user(authorization)
+    user = _require_user(authorization)
+    _require_ticket(user, req.ticket_id, "取消")
     t = tickets.cancel_ticket(req.ticket_id, req.reason)
     if t is None:
         raise TicketNotFoundError(req.ticket_id)
@@ -346,7 +355,7 @@ def pending_tickets(
     """
     user = _require_user(authorization)
     # 普通用户强制按本人隔离；管理员默认也只看自己的，显式要求时才看全量
-    scope_user = None if (user["role"] == "admin" and all_users) else user["id"]
+    scope_user = tickets.user_scope(user, include_admin_all=all_users)
     result = tickets.list_pending_tickets(
         user_id=scope_user,
         include_expired=include_expired,
@@ -411,7 +420,7 @@ def ticket_statistics(
     统计全量，传了就只看该客户。
     """
     user = _require_user(authorization)
-    if user["role"] == "admin":
+    if tickets.is_admin(user):
         scope_user = user_id
     elif user_id and user_id != user["id"]:
         raise TicketPermissionError("普通用户只能查看本人工单统计")
@@ -438,9 +447,7 @@ def transfer_decision(
     仍对应工单本人的服务范围。普通用户仅可判定本人工单，越权返回「无权限」。
     """
     user = _require_user(authorization)
-    data = _require_ticket(ticket_id)
-    if user["role"] != "admin" and data["user_id"] != user["id"]:
-        raise TicketPermissionError()
+    data = _require_ticket(user, ticket_id, "判定")
 
     decision = tickets.evaluate_transfer_rule(
         data,
@@ -492,7 +499,5 @@ def ticket_detail(ticket_id: str, authorization: str = Header(default="")):
     越权访问返回「无权限」，工单不存在返回「工单不存在」。
     """
     user = _require_user(authorization)
-    data = _require_ticket(ticket_id)
-    if user["role"] != "admin" and data["user_id"] != user["id"]:
-        raise TicketPermissionError()
+    data = _require_ticket(user, ticket_id, "查看")
     return {"ticket": data, "message": _detail_message(data)}

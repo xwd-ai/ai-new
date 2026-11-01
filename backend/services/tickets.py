@@ -10,6 +10,7 @@ from backend.database import SessionLocal
 from backend.models import Ticket
 from backend.models.ticket import (
     TicketErrorCode,
+    TicketPermissionError,
     TicketStatus,
     TicketStatusLog,
     TicketTransitionError,
@@ -177,6 +178,54 @@ def _ticket_session(write: bool = False):
 def _load_ticket(db, ticket_id: str):
     """按工单号取单条记录，不存在返回 None。"""
     return db.query(Ticket).filter(Ticket.id == ticket_id).first()
+
+
+# ---------------------------------------------------------------------------
+# 权限层：数据可见范围（普通用户仅限本人，管理员可全量）
+# ---------------------------------------------------------------------------
+
+ADMIN_ROLE = "admin"
+
+
+def is_admin(user: dict | None) -> bool:
+    """判断当前登录用户是否为管理员。"""
+    return bool(user) and user.get("role") == ADMIN_ROLE
+
+
+def user_scope(user: dict | None, include_admin_all: bool = True) -> str | None:
+    """解析列表类查询的数据范围：None 表示全量，否则限定为该用户号。
+
+    管理员在 include_admin_all 为真时看全量，为假时与普通用户一样只看本人；
+    普通用户无论参数如何都只看本人。分页列表、待确认列表、统计共用这一口径，
+    避免每个查询接口各写一遍角色判断，也不会出现某个接口漏掉隔离的情况。
+    """
+    if is_admin(user) and include_admin_all:
+        return None
+    return (user or {}).get("id")
+
+
+def ensure_ticket_access(
+    user: dict | None,
+    ticket: dict | None,
+    action: str = "查看",
+) -> None:
+    """校验当前用户能否对该工单执行指定动作，越权时抛 TicketPermissionError。
+
+    规则单一：管理员可操作任意工单，普通用户只能操作本人工单。校验失败时把
+    动作、工单号与所属人放进错误详情，接口层既能提示用户，也能在日志里看清
+    是谁访问了哪张单。工单为空时直接放行，由调用方区分「不存在」与「无权限」，
+    保证 404 与 403 的语义不互相顶替。
+    """
+    if is_admin(user) or not ticket:
+        return
+    if ticket.get("user_id") != (user or {}).get("id"):
+        raise TicketPermissionError(
+            details={
+                "action": action,
+                "ticket_id": ticket.get("id"),
+                "owner_id": ticket.get("user_id"),
+            }
+        )
 
 
 # ---------------------------------------------------------------------------
