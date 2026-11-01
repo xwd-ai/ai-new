@@ -152,6 +152,8 @@ if ($pending.items.Count -gt 0) {
 
 `config` 保留 `prefetch_depth_floor` 等既有字段，并包含 `max_rerank_candidates`、`composite_rerank`、`composite_recall`、`composite_source` 与 `source_weights`。重排阶段的 `detail.config` 为同次调用有效快照，与顶层一致；`detail.threshold` 是本次请求阈值，`effective_threshold` 在发生单次放宽时反映实际门槛。未装配 provider 时 `skipped=no_provider`，这些配置字段不代表已经执行重排或过滤。空候选也会直接跳过。服务层支持显式 `threshold` 覆盖，HTTP 未新增阈值查询参数，仍按部署配置读取；参数范围与环境变量见 [README](../README.md#检索设置与试查)。
 
+服务层装配重排 provider 且正常/放宽阈值均无通过项时，`detail` 增加 `fallback_candidate_id`、`fallback_candidate_score`、`fallback_min_score`。候选按模型 `rerank_score` 最高选取，同分沿用复合排序；分数达到保底门槛则仅保留该项并置 `fallback=true`，否则返回空且 `fallback=false`。上述候选字段在拒绝保留时也存在，可据此解释空结果；`effective_threshold` 不会被改写为保底分。未进入保底检查时不附这些字段。HTTP 当前未装配重排 provider，通常不会走该分支；不因此启用模型或新增查询参数。
+
 当前 HTTP 路由没有装配向量和重排 provider，诊断通常报告向量跳过、融合退回关键词结果、重排跳过；服务层具备对应能力不代表此接口已经发起模型调用。实际对话目前也使用关键词检索，诊断不是对某次对话的追踪回放。
 
 向量阶段保留布尔值 `skipped`，新增 `detail` 原因对象。服务层可报告 `detail.skipped=no_provider/empty_corpus/model_error/invalid_response/no_positive_similarity`，分别表示未装配、空语料、调用失败、返回数量/维度/类型/有限性或非零性不合法、无正相似度结果；成功时 `detail` 可为空。向量返回不合法时整条分支弃用，关键词分支继续。重排阶段的 `detail.skipped=invalid_response` 表示返回形状、下标（含重复）或分数不合法，整批回退原候选，`model_error` 表示 provider 调用抛错，`empty` 表示合法空返回。有限越界分数仍截断到 0～1；合法部分返回不会被判为失败。原始 provider 异常不进入上述原因对象。完整校验范围见 [README](../README.md#检索设置与试查)。

@@ -494,8 +494,13 @@ def _apply_threshold(ordered: list[dict], threshold: float, *, config: Retrieval
         if passing:
             return passing, diagnostics
 
-    # 仍无结果：最佳候选的相关性达到保底分才保留，否则宁可为空
-    best = ordered[0]
+    # 保底按模型相关性选优；相同相关性时保持原有复合分顺序。
+    best = max(ordered, key=relevance)
+    diagnostics.update(
+        fallback_candidate_id=best.get('id'),
+        fallback_candidate_score=relevance(best),
+        fallback_min_score=cfg.fallback_min_score,
+    )
     if relevance(best) >= cfg.fallback_min_score:
         diagnostics["fallback"] = True
         return [best], diagnostics

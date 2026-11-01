@@ -81,12 +81,14 @@ Copy-Item backend/.env.example backend/.env
 | `RETRIEVAL_THRESHOLD` | 0.0 | 0～1，按模型重排分过滤，0 关闭 |
 | `RETRIEVAL_DEGRADE_FLOOR` | 0.3 | 0～1，全不过阈值时的单次放宽下限 |
 | `RETRIEVAL_DEGRADE_FACTOR` | 0.7 | 0.1～1，单次放宽的阈值乘数 |
-| `RETRIEVAL_FALLBACK_MIN_SCORE` | 0.15 | 0～1，仍无结果时保留复合排序首条所需的模型分 |
+| `RETRIEVAL_FALLBACK_MIN_SCORE` | 0.15 | 0～1，仍无结果时保留最高模型相关性候选所需的模型分 |
 | `RETRIEVAL_COMPOSITE_RERANK` | 0.6 | 0～1，复合分中的重排分权重 |
 | `RETRIEVAL_COMPOSITE_RECALL` | 0.3 | 0～1，复合分中的召回分权重 |
 | `RETRIEVAL_COMPOSITE_SOURCE` | 0.1 | 0～1，复合分中的来源权重 |
 
 非法或越界环境变量回退默认值。复合分为三项加权和再截断到 0～1，权重不自动归一化；`source_weights` 可通过服务层 `RetrievalConfig` 单独传入，默认 rule=1.0、faq=0.8、manual=0.6，未知类型为 0.5，没有新增来源权重环境变量。无 provider、空输入或 provider 失败时沿用原有跳过/降级行为，不执行模型阈值过滤，送审上限也不限制降级返回的原候选。诊断的 `config` 与重排阶段 `detail.config` 反映同一有效快照，需结合 `skipped` 判断阶段是否执行；HTTP 当前仍未装配向量和重排 provider。
+
+只有正常阈值与单次放宽阈值都没有通过项时，才尝试保底。此时比较候选的模型 `rerank_score`，选择最高者；相同分数沿用已有复合排序。最高分达到 `fallback_min_score`（含等号）则保留一条，否则返回空。正常或放宽后通过的多条候选仍保持复合排序，不改成纯模型分排序。进入保底检查时，重排诊断会附 `fallback_candidate_id`、`fallback_candidate_score`、`fallback_min_score`；即使拒绝保留也会附这些字段，`fallback=true` 仅表示实际保留成功，`effective_threshold` 仍表示正常/放宽门槛。模型分沿用结果中的四位小数 `rerank_score`。未进入保底检查的跳过、正常通过或阈值关闭路径不附这些候选字段。
 
 服务层还会校验 provider 的返回值。向量必须为非空 list/tuple，元素是有限实数（不接受布尔值或数字字符串），查询与文档维度一致、文档向量数量与输入资料数量一致，且每个向量均非零；任一项不合法会弃用整条向量分支，混合检索沿用关键词结果，不保留部分有效向量。计算余弦相似度前先缩放并归一化，避免大数平方溢出。只有正相似度资料进入向量结果；这些校验不能验证返回顺序与文本的语义对应关系或模型质量。
 
