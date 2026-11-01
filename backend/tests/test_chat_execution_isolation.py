@@ -14,7 +14,7 @@ def isolated_chat(monkeypatch):
     # 保留真实 Agent 循环与回复编排，只隔离模型、查询和持久化。
     monkeypatch.setattr(chat, 'get_or_create_conversation', lambda user: user)
     monkeypatch.setattr(chat, 'history', lambda _: [])
-    monkeypatch.setattr(chat, 'append_message', lambda *args: None)
+    monkeypatch.setattr(chat, 'append_turn', lambda *args: None)
     monkeypatch.setattr(chat, 'append_tried_step', lambda *args: None)
     monkeypatch.setattr(chat.orders, 'query_order', lambda user: None)
     monkeypatch.setattr(chat.knowledge, 'search_knowledge', lambda query: [])
@@ -166,6 +166,6 @@ def test_reused_thread_has_no_previous_request_state(isolated_chat):
 def test_persistence_failure_after_agent_completion_publishes_no_old_result(isolated_chat, monkeypatch):
     chat.build_reply('user', 'first')
     def fail(*args): raise RuntimeError('store unavailable')
-    monkeypatch.setattr(chat, 'append_message', fail)
+    monkeypatch.setattr(chat, 'append_turn', fail)
     with pytest.raises(RuntimeError): chat.build_reply('user', 'second')
     assert chat.last_summary() is None and chat.last_escalation() is None

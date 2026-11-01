@@ -111,7 +111,7 @@ def chat_client(monkeypatch):
     # 隔离存储与检索，仅保留真实的 API → 编排 → Agent → provider 调用链。
     monkeypatch.setattr(chat, "get_or_create_conversation", lambda _: "test-conversation")
     monkeypatch.setattr(chat, "history", lambda _: [])
-    monkeypatch.setattr(chat, "append_message", lambda *args: None)
+    monkeypatch.setattr(chat, "append_turn", lambda *args: None)
     monkeypatch.setattr(chat, "append_tried_step", lambda *args: None)
     monkeypatch.setattr(chat, "current_user", lambda _: None)
     monkeypatch.setattr(chat.knowledge, "search_knowledge", lambda _: [])

@@ -1,4 +1,5 @@
 ﻿import time
+import math
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -48,6 +49,25 @@ def append_message(conversation_id: str, role: str, content: str) -> None:
         db.commit()
     finally:
         db.close()
+
+
+def append_turn(conversation_id: str, message: str, reply: str) -> None:
+    """同事务保存一轮消息与更新时间，异常时整轮回滚。"""
+    user_at = time.time()
+    assistant_at = max(time.time(), math.nextafter(user_at, math.inf))
+    with SessionLocal() as db, db.begin():
+        db.add_all([
+            Message(
+                id=uuid.uuid4().hex, conversation_id=conversation_id,
+                role=role, content=content, at=at,
+            )
+            for role, content, at in (
+                ("user", message, user_at), ("assistant", reply, assistant_at),
+            )
+        ])
+        conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+        if conv:
+            conv.updated_at = assistant_at
 
 
 def append_tried_step(user_id: str, step: str) -> None:
@@ -221,8 +241,7 @@ def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
     # 编造或未注册的编号会被丢弃，避免出现无出处的引用
     reply = citations.decode_refs(reply, registry)
 
-    append_message(conversation_id, "user", message)
-    append_message(conversation_id, "assistant", reply)
+    append_turn(conversation_id, message, reply)
 
     if first_items:
         append_tried_step(user_id, f"按《{first_items[0]['title']}》排查")
