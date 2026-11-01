@@ -1,5 +1,7 @@
 ﻿import time
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from backend.database import SessionLocal
 from backend.services import agent, citations, context, escalation, knowledge, llm, orders, tools
@@ -158,6 +160,8 @@ def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
     返回 (reply, sources, suggest_ticket)。sources 里带有的 ``handle``
     就是回答中引用用的编号，前端可据此回查原文。
     """
+    # 失败或尚未完成的调用不应继续暴露上一次的摘要。
+    _last_execution.set(None)
     conversation_id = get_or_create_conversation(user_id)
     # 历史里的引用标记会被剥离：上轮引用过的来源不构成本轮回答的证据
     # 再按预算压缩，保留最近若干轮完整对话，避免长历史稀释当前问题
@@ -237,24 +241,35 @@ def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
     )
     suggest = decision.suggest
     sources = citations.public_sources(registry)
-    global _last_summary, _last_escalation
-    _last_summary = summary
-    _last_escalation = decision
+    _last_execution.set((summary, decision))
     return reply, sources, suggest
 
 
-# 最近一次对话的执行摘要。
+# 当前执行上下文最近一次完整对话的摘要与判定，作为一组发布。
 # 单独暴露而不是塞进三元组返回值，是为了不破坏既有调用方的解包写法；
 # 需要执行过程的调用方（如接口层）在这里取。
-_last_summary: agent.ExecutionSummary | None = None
-_last_escalation: escalation.EscalationDecision | None = None
+_last_execution: ContextVar[tuple[agent.ExecutionSummary, escalation.EscalationDecision] | None] = ContextVar(
+    'chat_last_execution', default=None,
+)
+
+
+@contextmanager
+def execution_scope():
+    """为一次 HTTP 请求建立空作用域，退出或异常时恢复调用方上下文。"""
+    token = _last_execution.set(None)
+    try:
+        yield
+    finally:
+        _last_execution.reset(token)
 
 
 def last_summary() -> agent.ExecutionSummary | None:
-    """返回最近一次对话的执行摘要（含事件列表）。"""
-    return _last_summary
+    """返回当前执行上下文最近一次完整对话的摘要。"""
+    result = _last_execution.get()
+    return result[0] if result else None
 
 
 def last_escalation() -> escalation.EscalationDecision | None:
-    """返回最近一次对话的转人工判定结果（含原因）。"""
-    return _last_escalation
+    """返回当前执行上下文最近一次完整对话的转人工判定。"""
+    result = _last_execution.get()
+    return result[1] if result else None

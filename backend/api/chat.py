@@ -18,19 +18,20 @@ chat_router = APIRouter()
     description="允许匿名请求；无效登录态按匿名处理。模型调用失败仍返回 200，故障提示见 reply 与 trace。",
 )
 def chat(req: ChatRequest, authorization: str = Header(default="")) -> ChatResponse:
-    user = chat_service.current_user(authorization)
-    user_id = user["id"] if user else "anonymous"
+    with chat_service.execution_scope():
+        user = chat_service.current_user(authorization)
+        user_id = user["id"] if user else "anonymous"
 
-    reply, sources, suggest = chat_service.build_reply(user_id, req.message)
+        reply, sources, suggest = chat_service.build_reply(user_id, req.message)
 
-    summary = chat_service.last_summary()
-    trace = summary.to_dict()["events"] if summary else []
-    return ChatResponse(
-        reply=reply,
-        suggest_ticket=suggest,
-        sources=sources,
-        trace=trace,
-    )
+        summary = chat_service.last_summary()
+        trace = summary.to_dict()["events"] if summary else []
+        return ChatResponse(
+            reply=reply,
+            suggest_ticket=suggest,
+            sources=sources,
+            trace=trace,
+        )
 
 
 @chat_router.get(

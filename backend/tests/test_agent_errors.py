@@ -115,11 +115,9 @@ def chat_client(monkeypatch):
     monkeypatch.setattr(chat, "append_tried_step", lambda *args: None)
     monkeypatch.setattr(chat, "current_user", lambda _: None)
     monkeypatch.setattr(chat.knowledge, "search_knowledge", lambda _: [])
-    monkeypatch.setattr(chat, "_last_summary", None)
-    monkeypatch.setattr(chat, "_last_escalation", None)
     app = FastAPI()
     app.include_router(chat_router, prefix="/api")
-    with TestClient(app) as client:
+    with chat.execution_scope(), TestClient(app) as client:
         yield client
 
 

@@ -25,8 +25,6 @@ def api_client(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "init_db", lambda: None)
     monkeypatch.setattr(seed, "seed_all", lambda: None)
     monkeypatch.setattr(ingest, "_checkpoint_path", lambda: tmp_path / "checkpoints.json")
-    monkeypatch.setattr(chat, "_last_summary", None)
-    monkeypatch.setattr(chat, "_last_escalation", None)
 
     class CitingProvider:
         def chat(self, *args, **kwargs):
@@ -41,7 +39,7 @@ def api_client(tmp_path, monkeypatch):
             ))
         db.commit()
     main = importlib.import_module("backend.main")
-    with TestClient(main.app) as client:
+    with chat.execution_scope(), TestClient(main.app) as client:
         yield client
     engine.dispose()
 
