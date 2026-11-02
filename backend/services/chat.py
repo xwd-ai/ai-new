@@ -4,6 +4,8 @@ import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
 
+from sqlalchemy import text
+
 from backend.database import SessionLocal
 from backend.services import agent, citations, context, escalation, knowledge, llm, orders, tools
 from backend.models import Conversation, Message, TriedStep
@@ -105,12 +107,19 @@ def get_or_create_conversation(user_id: str) -> str:
     """取该用户最近一次会话；没有则新建一个。"""
     db = SessionLocal()
     try:
-        conv = (
+        query = (
             db.query(Conversation)
             .filter(Conversation.user_id == user_id)
             .order_by(Conversation.updated_at.desc())
-            .first()
         )
+        conv = query.first()
+        if conv:
+            return conv.id
+        # 空结果不能作为创建依据：释放读事务后取得 SQLite 写锁，再查一次。
+        # 锁仅覆盖首次创建，不覆盖模型回答或后续消息写入。
+        db.rollback()
+        db.execute(text("BEGIN IMMEDIATE"))
+        conv = query.first()
         if conv:
             return conv.id
         now = time.time()
