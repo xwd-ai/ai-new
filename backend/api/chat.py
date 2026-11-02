@@ -91,7 +91,9 @@ def conversation(authorization: str = Header(default="")):
         conv = (
             db.query(Conversation)
             .filter(Conversation.user_id == user["id"])
-            .order_by(Conversation.updated_at.desc())
+            .order_by(
+                Conversation.updated_at.desc(), Conversation.created_at.desc(), Conversation.id.desc(),
+            )
             .first()
         )
         if not conv:

@@ -110,7 +110,9 @@ def get_or_create_conversation(user_id: str) -> str:
         query = (
             db.query(Conversation)
             .filter(Conversation.user_id == user_id)
-            .order_by(Conversation.updated_at.desc())
+            .order_by(
+                Conversation.updated_at.desc(), Conversation.created_at.desc(), Conversation.id.desc(),
+            )
         )
         conv = query.first()
         if conv:
