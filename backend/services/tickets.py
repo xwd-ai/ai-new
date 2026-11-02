@@ -1,3 +1,18 @@
+"""工单服务层：建单、状态流转、列表查询、批量操作与转人工判定。
+
+分层约定（文件内按此顺序分段）：
+- 会话与取数：统一的连接边界与单条取数；
+- 权限层：数据可见范围（普通用户仅本人，管理员可全量）；
+- 状态机层：状态变更的唯一写入口，负责校验、留痕与字段赋值；
+- 入参归一化层：状态、分页、排序、关键词等外部入参收敛为内部口径；
+- 写入层、查询层、统计层、组装层、判定层：各自只负责一件事。
+
+两条贯穿全文件的规则：
+- 状态值统一取自 TicketStatus 常量，业务代码里不出现裸状态字符串；
+- 可预期失败以 TicketBusinessError 派生异常抛出（错误码见 models/ticket），
+  由接口层在同一处转成 {error, error_code, error_detail?} 结构。
+"""
+
 import hashlib
 import re
 import time
@@ -20,13 +35,19 @@ from backend.models.ticket import (
     validate_transition,
 )
 
-# 工单持久化到 SQLite 数据库
-# 一个工单对应一次「问题 → 排查 → 建单」的闭环
-# 工单状态机：pending_confirm(待确认) -> open(待处理) -> in_progress(处理中) -> resolved(已解决)
-# 建单前可挂起为 pending_confirm，等待用户确认后再进入 open
-# 预置工单逻辑收敛到 backend.seed 模块
-# 可预期的失败统一以 TicketBusinessError 派生异常抛出（错误码见 models/ticket），
-# 由接口层在同一处转成 {error, error_code, error_detail?} 结构，不再各自返回错误字典
+# 状态取值别名：业务代码统一引用这些常量，避免裸字符串分散在各处函数里
+STATUS_PENDING_CONFIRM = TicketStatus.PENDING_CONFIRM.value
+STATUS_OPEN = TicketStatus.OPEN.value
+STATUS_IN_PROGRESS = TicketStatus.IN_PROGRESS.value
+STATUS_RESOLVED = TicketStatus.RESOLVED.value
+STATUS_TRANSFERRED_HUMAN = TicketStatus.TRANSFERRED_HUMAN.value
+STATUS_CLOSED = TicketStatus.CLOSED.value
+
+# 建单落地的初始状态：两阶段建单先挂起为待确认草稿，确认后才进入待处理
+INITIAL_STATUS = STATUS_PENDING_CONFIRM
+
+# 管理员角色名：数据可见范围按此角色区分全量与本人
+ADMIN_ROLE = "admin"
 
 # 待确认草稿的超时阈值（秒）：超时未确认的草稿收敛为已关闭，避免僵尸工单堆积
 PENDING_CONFIRM_TIMEOUT_SECONDS = 30 * 60
@@ -50,22 +71,22 @@ MAX_BATCH_SIZE = 50
 # 统计区间的回溯上限（天）：超过一年的统计请求直接拒绝，避免一次扫过全量历史
 MAX_STATS_DAYS = 365
 # 视为处理已结束的终态：时间线进入这些状态的时刻即该工单的处理结束时间
-SETTLED_STATUSES = (TicketStatus.RESOLVED.value, TicketStatus.CLOSED.value)
+SETTLED_STATUSES = (STATUS_RESOLVED, STATUS_CLOSED)
 # 仍需推进的未闭环状态：待处理、处理中、待确认、已转人工
 ACTIVE_STATUSES = (
-    TicketStatus.OPEN.value,
-    TicketStatus.IN_PROGRESS.value,
-    TicketStatus.PENDING_CONFIRM.value,
-    TicketStatus.TRANSFERRED_HUMAN.value,
+    STATUS_OPEN,
+    STATUS_IN_PROGRESS,
+    STATUS_PENDING_CONFIRM,
+    STATUS_TRANSFERRED_HUMAN,
 )
 # 状态的中文名：统计响应与摘要文案共用，避免同一状态在不同接口出现不同叫法
 STATUS_LABELS = {
-    TicketStatus.OPEN.value: "待处理",
-    TicketStatus.IN_PROGRESS.value: "处理中",
-    TicketStatus.RESOLVED.value: "已解决",
-    TicketStatus.PENDING_CONFIRM.value: "待确认",
-    TicketStatus.TRANSFERRED_HUMAN.value: "已转人工",
-    TicketStatus.CLOSED.value: "已关闭",
+    STATUS_OPEN: "待处理",
+    STATUS_IN_PROGRESS: "处理中",
+    STATUS_RESOLVED: "已解决",
+    STATUS_PENDING_CONFIRM: "待确认",
+    STATUS_TRANSFERRED_HUMAN: "已转人工",
+    STATUS_CLOSED: "已关闭",
 }
 
 # 排查信息结构化的上限：条目总数与单条长度双重限制，避免详情响应被超长文本撑爆
@@ -183,8 +204,6 @@ def _load_ticket(db, ticket_id: str):
 # ---------------------------------------------------------------------------
 # 权限层：数据可见范围（普通用户仅限本人，管理员可全量）
 # ---------------------------------------------------------------------------
-
-ADMIN_ROLE = "admin"
 
 
 def is_admin(user: dict | None) -> bool:
@@ -309,14 +328,12 @@ def create_ticket(
         )
 
     key = _dedup_key(user_id, description)
-    # 两阶段建单：初始一律落待确认草稿，待确认接口流转为 open 后才成为正式工单
-    initial_status = "pending_confirm"
     # 建单临界区接入 advisory lock：同一意图（dedup_key）的并发建单在此串行执行，
     # 先到者建单并提交，后到者重查即可命中已有工单，避免并发下重复建单。
     with advisory_lock(key) as db:
         existing = (
             db.query(Ticket)
-            .filter(Ticket.dedup_key == key, Ticket.status != "resolved")
+            .filter(Ticket.dedup_key == key, Ticket.status != STATUS_RESOLVED)
             .first()
         )
         if existing:
@@ -330,7 +347,7 @@ def create_ticket(
             description=description,
             tried_steps=tried_steps,
             evidence=evidence,
-            status=initial_status,
+            status=INITIAL_STATUS,
             created_at=time.time(),
             replies=[],
         )
@@ -338,7 +355,7 @@ def create_ticket(
         db.flush()
         db.refresh(ticket)
         # 建单即首次状态落位，写入首条时间线记录（from_status 为空表示初始创建）
-        _log_status_change(db, ticket.id, "", initial_status, operator="system")
+        _log_status_change(db, ticket.id, "", INITIAL_STATUS, operator="system")
         return ticket.to_dict(), True
 
 
@@ -355,9 +372,9 @@ def confirm_ticket(ticket_id: str) -> dict | None:
         if not t:
             return None
         # 已非待确认状态视为已确认/已终结，幂等返回，不重复流转
-        if t.status != "pending_confirm":
+        if t.status != STATUS_PENDING_CONFIRM:
             return t.to_dict()
-        _apply_transition(db, t, "open", operator="system")
+        _apply_transition(db, t, STATUS_OPEN, operator="system")
         return t.to_dict()
 
 
@@ -374,14 +391,14 @@ def cancel_ticket(ticket_id: str, reason: str = "") -> dict | None:
         if not t:
             return None
         # 已非待确认状态视为已终结，幂等返回，不重复流转
-        if t.status != "pending_confirm":
+        if t.status != STATUS_PENDING_CONFIRM:
             return t.to_dict()
         reply = {
             "replier": _SYSTEM_REPLIER,
             "content": f"取消工单：{reason}".strip(),
             "at": time.time(),
         }
-        _apply_transition(db, t, "closed", operator="system", reply=reply)
+        _apply_transition(db, t, STATUS_CLOSED, operator="system", reply=reply)
         return t.to_dict()
 
 
@@ -403,7 +420,11 @@ def expire_pending_tickets(
 
     返回扫描与收敛统计，closed_ids 为本次被关闭的工单号。
     """
-    timeout = PENDING_CONFIRM_TIMEOUT_SECONDS if timeout_seconds is None else max(0, int(timeout_seconds))
+    timeout = (
+        PENDING_CONFIRM_TIMEOUT_SECONDS
+        if timeout_seconds is None
+        else max(0, int(timeout_seconds))
+    )
     batch = EXPIRE_BATCH_LIMIT if limit is None else max(1, int(limit))
     ts = time.time() if now is None else now
     deadline = ts - timeout
@@ -411,7 +432,7 @@ def expire_pending_tickets(
     with advisory_lock(_EXPIRE_LOCK_KEY) as db:
         candidates = (
             db.query(Ticket)
-            .filter(Ticket.status == "pending_confirm", Ticket.created_at <= deadline)
+            .filter(Ticket.status == STATUS_PENDING_CONFIRM, Ticket.created_at <= deadline)
             .order_by(Ticket.created_at.asc())
             .limit(batch)
             .all()
@@ -419,14 +440,14 @@ def expire_pending_tickets(
         closed_ids = []
         for t in candidates:
             # 锁内重查的状态为最终依据，已被确认或取消的工单不再处理
-            if t.status != "pending_confirm":
+            if t.status != STATUS_PENDING_CONFIRM:
                 continue
             reply = {
                 "replier": _SYSTEM_REPLIER,
                 "content": f"待确认超时（阈值 {timeout} 秒）自动关闭",
                 "at": ts,
             }
-            _apply_transition(db, t, "closed", operator="system", reply=reply)
+            _apply_transition(db, t, STATUS_CLOSED, operator="system", reply=reply)
             closed_ids.append(t.id)
 
         # 会话关闭了自动 flush，先显式落库再统计，避免把本批已关闭的工单算进剩余
@@ -434,7 +455,7 @@ def expire_pending_tickets(
         # 本次批量之外的超时草稿数量，供调用方判断是否需要继续下一批
         remaining = (
             db.query(func.count(Ticket.id))
-            .filter(Ticket.status == "pending_confirm", Ticket.created_at <= deadline)
+            .filter(Ticket.status == STATUS_PENDING_CONFIRM, Ticket.created_at <= deadline)
             .scalar()
         )
         return {
@@ -448,7 +469,7 @@ def expire_pending_tickets(
 
 
 # ---------------------------------------------------------------------------
-# 查询层：待确认列表与工单列表（只读，不改任何状态）
+# 查询层：待确认草稿列表（只读，不改任何状态）
 # ---------------------------------------------------------------------------
 
 
@@ -492,7 +513,7 @@ def list_pending_tickets(
 
     db = SessionLocal()
     try:
-        query = db.query(Ticket).filter(Ticket.status == "pending_confirm")
+        query = db.query(Ticket).filter(Ticket.status == STATUS_PENDING_CONFIRM)
         if user_id:
             query = query.filter(Ticket.user_id == user_id)
         if not include_expired:
@@ -509,6 +530,12 @@ def list_pending_tickets(
         }
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# 入参归一化层：状态、分页、排序、关键词等外部入参收敛为内部口径（纯函数）
+# 每个归一化函数只做校验与转换，不访问数据库；非法入参统一抛 TicketValidationError
+# ---------------------------------------------------------------------------
 
 
 def normalize_status_filter(values: list[str] | str | None) -> list[str] | None:
@@ -594,6 +621,11 @@ def normalize_keyword(keyword: str | None) -> str | None:
     return value
 
 
+# ---------------------------------------------------------------------------
+# 查询层：条件拼装与分页列表（只读，不改任何状态）
+# ---------------------------------------------------------------------------
+
+
 def _escape_like(value: str) -> str:
     """转义 LIKE 通配符，让关键词中的 % _ \\ 按普通字符匹配。"""
     return (
@@ -655,7 +687,12 @@ def list_tickets(
 
         total = query.count()
         order_column = Ticket.created_at.asc() if direction == "asc" else Ticket.created_at.desc()
-        rows = query.order_by(order_column, Ticket.id.asc()).offset((current - 1) * size).limit(size).all()
+        rows = (
+            query.order_by(order_column, Ticket.id.asc())
+            .offset((current - 1) * size)
+            .limit(size)
+            .all()
+        )
         pages = (total + size - 1) // size
         return {
             "items": [t.to_dict() for t in rows],
@@ -1205,12 +1242,12 @@ def add_reply(ticket_id: str, replier: str, content: str) -> dict | None:
         if not t:
             return None
         reply = {"replier": replier, "content": content, "at": time.time()}
-        if t.status == "in_progress":
+        if t.status == STATUS_IN_PROGRESS:
             replies = list(t.replies or [])
             replies.append(reply)
             t.replies = replies
         else:
-            _apply_transition(db, t, "in_progress", operator=replier, reply=reply)
+            _apply_transition(db, t, STATUS_IN_PROGRESS, operator=replier, reply=reply)
         return t.to_dict()
 
 
@@ -1266,13 +1303,13 @@ def transfer_to_human(
             "operator": operator,
         }
         from_status = _apply_transition(
-            db, t, "transferred_human", operator=operator, reply=reply
+            db, t, STATUS_TRANSFERRED_HUMAN, operator=operator, reply=reply
         )
 
         data = t.to_dict()
         data["transfer"] = {
             "from_status": from_status,
-            "to_status": "transferred_human",
+            "to_status": STATUS_TRANSFERRED_HUMAN,
             "reason": text,
             "reason_codes": reason_codes,
             "operator": operator,
@@ -1374,7 +1411,7 @@ def _batch_transition(
 
             from_status = t.status
             at = time.time()
-            if to_status == "transferred_human":
+            if to_status == STATUS_TRANSFERRED_HUMAN:
                 content = f"转人工：{text}" if text else "转人工"
                 reply = {
                     "replier": _SYSTEM_REPLIER,
@@ -1417,7 +1454,7 @@ def batch_close_tickets(
     适合运营清理长期无响应的工单：一次提交多张工单，逐单落痕并记录操作人，
     已关闭或不可关闭的工单在 failures 里给出原因，不影响其他工单的关闭。
     """
-    return _batch_transition(ticket_ids, "closed", "close", reason, operator)
+    return _batch_transition(ticket_ids, STATUS_CLOSED, "close", reason, operator)
 
 
 def batch_transfer_tickets(
@@ -1430,7 +1467,9 @@ def batch_transfer_tickets(
     原因为空时用默认说明兜底，保证每条转人工记录都可追溯；
     已终结或不允许转人工的工单进入 failures，其余工单照常流转。
     """
-    return _batch_transition(ticket_ids, "transferred_human", "transfer", reason, operator)
+    return _batch_transition(
+        ticket_ids, STATUS_TRANSFERRED_HUMAN, "transfer", reason, operator
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1503,7 +1542,7 @@ def evaluate_transfer_rule(
     直接给出「无需判定」，避免对已关闭、待确认的工单给出误导性建议。
     """
     status = ticket.get("status", "")
-    applicable = can_transition(status, "transferred_human")
+    applicable = can_transition(status, STATUS_TRANSFERRED_HUMAN)
 
     tried = (
         len(parse_tried_steps(ticket.get("tried_steps")))
@@ -1572,7 +1611,7 @@ def evaluate_transfer_rule(
         "status": status,
         "applicable": applicable,
         "should_transfer": bool(applicable and reasons),
-        "suggested_status": "transferred_human" if (applicable and reasons) else "",
+        "suggested_status": STATUS_TRANSFERRED_HUMAN if (applicable and reasons) else "",
         "reason_codes": [item["code"] for item in reasons],
         "reasons": reasons,
         "reason_text": reason_text,

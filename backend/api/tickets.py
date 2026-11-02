@@ -1,9 +1,19 @@
+"""工单接口层：建单、列表、详情、状态流转、批量操作与统计。
+
+约定：
+- 身份与权限统一经 _require_user / _require_ticket 解析，接口开头不重复判空；
+- 业务失败一律抛 TicketBusinessError 派生异常，由 TicketErrorRoute 统一转成
+  {error, error_code, error_detail?} 响应，接口内不拼装错误字典；
+- 纯拼接提示文案的辅助函数集中在文件顶部，路由按功能分组排列；
+- 固定路径（/tickets/pending、/tickets/stats 等）必须定义在 /tickets/{ticket_id}
+  之前，否则会被路径参数匹配吞掉。
+"""
+
 from fastapi import APIRouter, Header, Query, Request
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 
 from backend.database import SessionLocal
-from backend.services import auth, orders, tickets
 from backend.models import TriedStep
 from backend.models.ticket import (
     TicketAuthRequiredError,
@@ -20,6 +30,7 @@ from backend.schemas.ticket import (
     ConfirmRequest,
     TransferRequest,
 )
+from backend.services import auth, orders, tickets
 
 
 class TicketErrorRoute(APIRoute):
@@ -46,7 +57,13 @@ class TicketErrorRoute(APIRoute):
 tickets_router = APIRouter(route_class=TicketErrorRoute)
 
 
+# ---------------------------------------------------------------------------
+# 辅助函数：身份解析、取单鉴权与响应摘要（纯函数，不直接读写数据库）
+# ---------------------------------------------------------------------------
+
+
 def _current_user(authorization: str):
+    """按 Authorization 头解析当前登录用户，令牌无效或会话过期时返回 None。"""
     token = authorization.replace("Bearer ", "").strip()
     session = auth.get_session(token)
     if not session:
@@ -90,6 +107,64 @@ def _batch_message(action: str, result: dict) -> str:
     return message
 
 
+def _stats_message(stats: dict) -> str:
+    """按统计结果拼装一句话摘要：总数、各状态分布与平均处理时长。
+
+    只列出计数不为 0 的状态，空状态不占篇幅；没有结案工单时明确说明
+    「暂无处理时长样本」，而不是给出一个 0 秒的平均值。
+    """
+    parts = [
+        f"{item['label']} {item['count']} 个"
+        for item in stats["status_breakdown"]
+        if item["count"]
+    ]
+    message = f"共 {stats['total']} 个工单"
+    if parts:
+        message += "：" + "、".join(parts)
+    duration = stats["handling_duration"]
+    if duration["sample_size"]:
+        message += (
+            f"；平均处理时长 {duration['avg_text']}"
+            f"（样本 {duration['sample_size']} 个，闭环率 {stats['settled']['completion_rate']}%）"
+        )
+    else:
+        message += "；暂无已结案工单可统计处理时长"
+    if stats["range"]["days"]:
+        message += f"（统计最近 {stats['range']['days']} 天创建）"
+    return message
+
+
+def _detail_message(data: dict) -> str:
+    """按详情各分区内容拼装一句话摘要，空分区给出「暂无」提示。
+
+    摘要只依赖组装好的详情结构，不再单独回查数据：排查信息看是否有条目，
+    回复看总数与人工/系统分布，前端与接口响应共用同一份统计结果。
+    """
+    troubleshooting = data["troubleshooting"]
+    reply_timeline = data["reply_timeline"]
+    parts = [f"工单 {data['id']}"]
+    if troubleshooting["has_tried_steps"] or troubleshooting["has_evidence"]:
+        parts.append(
+            f"留存 {troubleshooting['tried_step_count']} 条已尝试步骤、"
+            f"{troubleshooting['evidence_count']} 条排查依据"
+        )
+    else:
+        parts.append("暂无已尝试步骤与排查依据")
+    if reply_timeline["has_replies"]:
+        parts.append(
+            f"共 {reply_timeline['total']} 条回复（人工 {reply_timeline['human_count']} 条、"
+            f"系统 {reply_timeline['system_count']} 条）"
+        )
+    else:
+        parts.append("暂无回复记录")
+    return "，".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# 建单
+# ---------------------------------------------------------------------------
+
+
 @tickets_router.post("/tickets")
 def create_ticket(req: CreateTicketRequest, authorization: str = Header(default="")):
     user = _require_user(authorization)
@@ -125,6 +200,11 @@ def create_ticket(req: CreateTicketRequest, authorization: str = Header(default=
         "created": created,
         "message": message,
     }
+
+
+# ---------------------------------------------------------------------------
+# 列表与订单
+# ---------------------------------------------------------------------------
 
 
 @tickets_router.get("/tickets")
@@ -193,8 +273,14 @@ def my_order(authorization: str = Header(default="")):
     return {"order": orders.query_order(user["id"])}
 
 
+# ---------------------------------------------------------------------------
+# 写操作：回复、改状态、转人工（均需管理员身份）
+# ---------------------------------------------------------------------------
+
+
 @tickets_router.post("/tickets/reply")
 def reply_ticket(req: ReplyRequest, authorization: str = Header(default="")):
+    """追加一条人工回复，待处理工单随回复推进到处理中。"""
     user = _require_user(authorization, admin_only=True)
     t = tickets.add_reply(req.ticket_id, user["name"], req.content)
     if t is None:
@@ -204,6 +290,7 @@ def reply_ticket(req: ReplyRequest, authorization: str = Header(default="")):
 
 @tickets_router.post("/tickets/status")
 def update_status(body: dict, authorization: str = Header(default="")):
+    """按目标状态更新工单，非法流转由状态校验拒绝。"""
     _require_user(authorization, admin_only=True)
     ticket_id = body.get("ticket_id")
     t = tickets.update_status(ticket_id, body.get("status"))
@@ -249,10 +336,16 @@ def transfer_ticket(req: TransferRequest, authorization: str = Header(default=""
 
     transfer = t["transfer"]
     if transfer["reason_codes"]:
-        message = f"工单 {t['id']} 已转人工（命中规则：{'/'.join(transfer['reason_codes'])}），原因：{transfer['reason']}"
+        codes = "/".join(transfer["reason_codes"])
+        message = f"工单 {t['id']} 已转人工（命中规则：{codes}），原因：{transfer['reason']}"
     else:
         message = f"工单 {t['id']} 已转人工，原因：{transfer['reason']}"
     return {"ticket": t, "decision": decision, "message": message}
+
+
+# ---------------------------------------------------------------------------
+# 批量操作：批量关闭与批量转人工（均需管理员身份）
+# ---------------------------------------------------------------------------
 
 
 @tickets_router.post("/tickets/batch-close")
@@ -284,6 +377,11 @@ def batch_transfer_tickets(req: BatchTransferRequest, authorization: str = Heade
         req.ticket_ids, reason=req.reason, operator=user["name"]
     )
     return {"result": result, "message": _batch_message("转人工", result)}
+
+
+# ---------------------------------------------------------------------------
+# 两阶段建单：确认、取消与超时收敛
+# ---------------------------------------------------------------------------
 
 
 @tickets_router.post("/tickets/confirm")
@@ -339,6 +437,11 @@ def expire_pending_tickets(
     return {"result": result, "message": message}
 
 
+# ---------------------------------------------------------------------------
+# 待确认列表与统计：固定路径，必须定义在 /tickets/{ticket_id} 之前
+# ---------------------------------------------------------------------------
+
+
 @tickets_router.get("/tickets/pending")
 def pending_tickets(
     include_expired: bool = False,
@@ -377,33 +480,6 @@ def pending_tickets(
     }
 
 
-def _stats_message(stats: dict) -> str:
-    """按统计结果拼装一句话摘要：总数、各状态分布与平均处理时长。
-
-    只列出计数不为 0 的状态，空状态不占篇幅；没有结案工单时明确说明
-    「暂无处理时长样本」，而不是给出一个 0 秒的平均值。
-    """
-    parts = [
-        f"{item['label']} {item['count']} 个"
-        for item in stats["status_breakdown"]
-        if item["count"]
-    ]
-    message = f"共 {stats['total']} 个工单"
-    if parts:
-        message += "：" + "、".join(parts)
-    duration = stats["handling_duration"]
-    if duration["sample_size"]:
-        message += (
-            f"；平均处理时长 {duration['avg_text']}"
-            f"（样本 {duration['sample_size']} 个，闭环率 {stats['settled']['completion_rate']}%）"
-        )
-    else:
-        message += "；暂无已结案工单可统计处理时长"
-    if stats["range"]["days"]:
-        message += f"（统计最近 {stats['range']['days']} 天创建）"
-    return message
-
-
 @tickets_router.get("/tickets/stats")
 def ticket_statistics(
     days: int | None = Query(default=None, description="只统计最近 N 天创建的工单，取值 1–365"),
@@ -431,6 +507,11 @@ def ticket_statistics(
     return {"stats": stats, "message": _stats_message(stats)}
 
 
+# ---------------------------------------------------------------------------
+# 转人工判定与工单详情
+# ---------------------------------------------------------------------------
+
+
 @tickets_router.get("/tickets/{ticket_id}/transfer-decision")
 def transfer_decision(
     ticket_id: str,
@@ -456,32 +537,6 @@ def transfer_decision(
         feature=feature,
     )
     return {"decision": decision, "message": decision["message"]}
-
-
-def _detail_message(data: dict) -> str:
-    """按详情各分区内容拼装一句话摘要，空分区给出「暂无」提示。
-
-    摘要只依赖组装好的详情结构，不再单独回查数据：排查信息看是否有条目，
-    回复看总数与人工/系统分布，前端与接口响应共用同一份统计结果。
-    """
-    troubleshooting = data["troubleshooting"]
-    reply_timeline = data["reply_timeline"]
-    parts = [f"工单 {data['id']}"]
-    if troubleshooting["has_tried_steps"] or troubleshooting["has_evidence"]:
-        parts.append(
-            f"留存 {troubleshooting['tried_step_count']} 条已尝试步骤、"
-            f"{troubleshooting['evidence_count']} 条排查依据"
-        )
-    else:
-        parts.append("暂无已尝试步骤与排查依据")
-    if reply_timeline["has_replies"]:
-        parts.append(
-            f"共 {reply_timeline['total']} 条回复（人工 {reply_timeline['human_count']} 条、"
-            f"系统 {reply_timeline['system_count']} 条）"
-        )
-    else:
-        parts.append("暂无回复记录")
-    return "，".join(parts)
 
 
 @tickets_router.get("/tickets/{ticket_id}")

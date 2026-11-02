@@ -54,6 +54,10 @@ VALID_TRANSITIONS: dict[TicketStatus, set[TicketStatus]] = {
 }
 
 
+# 合法状态值集合：入参校验只需判断成员关系，避免每次调用重新构造集合
+VALID_STATUS_VALUES: frozenset[str] = frozenset(status.value for status in TicketStatus)
+
+
 def can_transition(current: TicketStatus, target: TicketStatus) -> bool:
     """判断工单能否从 current 状态流转到 target 状态。"""
     return target in VALID_TRANSITIONS.get(current, set())
@@ -61,7 +65,7 @@ def can_transition(current: TicketStatus, target: TicketStatus) -> bool:
 
 def is_valid_status(value: str) -> bool:
     """判断字符串是否为合法工单状态值。"""
-    return value in {s.value for s in TicketStatus}
+    return value in VALID_STATUS_VALUES
 
 
 class TicketErrorCode:
@@ -209,36 +213,50 @@ class TicketTransitionError(TicketBusinessError):
         )
 
 
+def _as_status(value) -> TicketStatus | None:
+    """把入参解析为状态枚举：已是枚举直接返回，合法字符串转枚举，其余返回 None。"""
+    if isinstance(value, TicketStatus):
+        return value
+    if isinstance(value, str) and is_valid_status(value):
+        return TicketStatus(value)
+    return None
+
+
+def _status_text(value) -> str:
+    """把无法识别的状态入参转成可放进提示与错误详情的文本（None 记空串）。"""
+    return "" if value is None else str(value)
+
+
 def validate_transition(
     current: TicketStatus | str,
     target: TicketStatus | str,
 ) -> None:
     """校验工单状态流转是否合法，非法时抛出 TicketTransitionError。
 
-    入参同时接受枚举或字符串：字符串会先校验是否为已知状态值，
-    再解析为枚举后走合法流转表校验，保证「未知状态」与「非法流转」都能被明确拒绝。
+    入参同时接受枚举或字符串：非法值先统一按「未知状态」拒绝，再走合法流转表，
+    保证「未知状态」「空值」与「非法流转」三类输入都能得到明确错误，
+    而不是在取枚举成员时抛出与业务无关的属性异常。
     """
-    if isinstance(current, str):
-        if not is_valid_status(current):
-            raise TicketTransitionError(
-                current,
-                target,
-                message=f"未知的当前状态：{current}",
-                code=TicketErrorCode.UNKNOWN_STATUS,
-            )
-        current = TicketStatus(current)
-    if isinstance(target, str):
-        if not is_valid_status(target):
-            raise TicketTransitionError(
-                current.value,
-                target,
-                message=f"未知的目标状态：{target}",
-                code=TicketErrorCode.UNKNOWN_STATUS,
-            )
-        target = TicketStatus(target)
+    resolved_current = _as_status(current)
+    if resolved_current is None:
+        raise TicketTransitionError(
+            _status_text(current),
+            _status_text(target),
+            message=f"未知的当前状态：{_status_text(current) or '空值'}",
+            code=TicketErrorCode.UNKNOWN_STATUS,
+        )
 
-    if not can_transition(current, target):
-        raise TicketTransitionError(current.value, target.value)
+    resolved_target = _as_status(target)
+    if resolved_target is None:
+        raise TicketTransitionError(
+            resolved_current.value,
+            _status_text(target),
+            message=f"未知的目标状态：{_status_text(target) or '空值'}",
+            code=TicketErrorCode.UNKNOWN_STATUS,
+        )
+
+    if not can_transition(resolved_current, resolved_target):
+        raise TicketTransitionError(resolved_current.value, resolved_target.value)
 
 
 class Ticket(Base):
@@ -251,7 +269,7 @@ class Ticket(Base):
     description: Mapped[str] = mapped_column(String, nullable=False)
     tried_steps: Mapped[str] = mapped_column(String, default="")
     evidence: Mapped[str] = mapped_column(String, default="")
-    status: Mapped[str] = mapped_column(String, default="open")  # open/in_progress/resolved
+    status: Mapped[str] = mapped_column(String, default="open")  # 取值见 TicketStatus
     created_at: Mapped[float] = mapped_column(Float, nullable=False)
     replies: Mapped[list] = mapped_column(JSON, default=list)
 
