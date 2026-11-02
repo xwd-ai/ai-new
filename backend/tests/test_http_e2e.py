@@ -9,6 +9,8 @@ import time
 import httpx
 import pytest
 
+from backend.tests.http_startup import failure_detail
+
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKER = Path(__file__).with_name('http_e2e_worker.py')
@@ -60,7 +62,8 @@ def server(tmp_path):
         entry = {'process': process, 'output': output, 'url': None}
         processes.append(entry)
         client = None
-        deadline = time.monotonic() + 25
+        started = time.monotonic()
+        deadline = started + 25
         while time.monotonic() < deadline and process.poll() is None:
             ready = run / 'port.txt'
             if ready.exists():
@@ -69,7 +72,10 @@ def server(tmp_path):
                                           timeout=5, trust_env=False)
                     entry['url'] = str(client.base_url)
                 try:
-                    if client.get('/health').status_code == 200:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    if client.get('/health', timeout=min(1, remaining)).status_code == 200:
                         base_url = str(client.base_url)
                         client.close()
                         return process, httpx.Client(base_url=base_url, timeout=5, trust_env=False)
@@ -78,7 +84,7 @@ def server(tmp_path):
             time.sleep(0.05)
         if client is not None:
             client.close()
-        pytest.fail('HTTP 服务启动失败：' + (run / 'server.log').read_text('utf-8'))
+        pytest.fail(failure_detail(process, run, started))
 
     yield start
     errors = []

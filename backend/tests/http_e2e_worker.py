@@ -1,9 +1,12 @@
 """仅供 HTTP 集成测试启动的隔离服务，不是部署入口。"""
 
 from pathlib import Path
+import faulthandler
 import re
 import socket
 import sys
+
+from backend.tests.http_startup import stage
 
 
 def main():
@@ -12,23 +15,27 @@ def main():
     if root == repository or repository in root.parents or root not in run.parents:
         raise ValueError('测试数据库和服务日志必须放在仓库外的临时目录')
 
-    import sqlalchemy as sa
-    from sqlalchemy.orm import sessionmaker
-    from backend import database, models
-    from alembic import command
-    from alembic.config import Config
+    # 原超时日志只有 Alembic 的通用提示；慢启动时同时保留具体线程栈。
+    faulthandler.dump_traceback_later(10, repeat=True)
+    with stage('imports'):
+        import sqlalchemy as sa
+        from sqlalchemy.orm import sessionmaker
+        from backend import database, models
+        from alembic import command
+        from alembic.config import Config
 
     engine = sa.create_engine(f"sqlite:///{root / 'http.db'}", connect_args={'check_same_thread':False})
     # 在导入业务模块及 main 之前切换全部数据库入口；真实启动与 seed 仍运行。
     database.engine = database._engine = engine
     database.SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-    with engine.connect() as connection:
+    with stage('migration'), engine.connect() as connection:
         config = Config(str(repository / 'alembic.ini'))
         config.attributes['connection'] = connection
         command.upgrade(config, 'head')
         connection.commit()
 
-    from backend.services import chat, ingest, llm, retrieval_config
+    with stage('services'):
+        from backend.services import chat, ingest, llm, retrieval_config
     ingest._checkpoint_path = lambda: root / 'checkpoints.json'
     retrieval_config._settings_path = lambda: root / 'retrieval_settings.json'
 
@@ -57,13 +64,16 @@ def main():
             raise RuntimeError('测试注入：分块 journal 提交后中断')
         ingest._journal_chunked = interrupted
 
-    from backend.main import app
-    import uvicorn
+    with stage('app_init'):
+        from backend.main import app
+        import uvicorn
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.bind(('127.0.0.1', 0))
-        listener.listen(128)
-        (run / 'port.txt').write_text(str(listener.getsockname()[1]), encoding='ascii')
-        server = uvicorn.Server(uvicorn.Config(app, log_level='warning', access_log=False))
+        with stage('listener'):
+            listener.bind(('127.0.0.1', 0))
+            listener.listen(128)
+            (run / 'port.txt').write_text(str(listener.getsockname()[1]), encoding='ascii')
+            server = uvicorn.Server(uvicorn.Config(app, log_level='warning', access_log=False))
+        faulthandler.cancel_dump_traceback_later()
         # 仅隔离测试 worker 装配此路由，生产 app 不包含该入口。
         @app.post('/__e2e_shutdown')
         def shutdown():
