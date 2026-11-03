@@ -9,7 +9,7 @@ import time
 import httpx
 import pytest
 
-from backend.tests.http_startup import failure_detail
+from backend.tests.http_startup import failure_detail, read_port
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -62,29 +62,32 @@ def server(tmp_path):
         entry = {'process': process, 'output': output, 'url': None}
         processes.append(entry)
         client = None
+        last_probe = 'port_not_published'
         started = time.monotonic()
         deadline = started + 25
         while time.monotonic() < deadline and process.poll() is None:
-            ready = run / 'port.txt'
-            if ready.exists():
+            port = read_port(run)
+            if port is not None:
                 if client is None:
-                    client = httpx.Client(base_url='http://127.0.0.1:' + ready.read_text().strip(),
+                    client = httpx.Client(base_url=f'http://127.0.0.1:{port}',
                                           timeout=5, trust_env=False)
                     entry['url'] = str(client.base_url)
                 try:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         break
-                    if client.get('/health', timeout=min(1, remaining)).status_code == 200:
+                    response = client.get('/health', timeout=min(1, remaining))
+                    last_probe = f'HTTP {response.status_code}'
+                    if response.status_code == 200:
                         base_url = str(client.base_url)
                         client.close()
                         return process, httpx.Client(base_url=base_url, timeout=5, trust_env=False)
-                except httpx.TransportError:
-                    pass
+                except httpx.TransportError as error:
+                    last_probe = type(error).__name__
             time.sleep(0.05)
         if client is not None:
             client.close()
-        pytest.fail(failure_detail(process, run, started))
+        pytest.fail(failure_detail(process, run, started, entry['url'], last_probe))
 
     yield start
     errors = []

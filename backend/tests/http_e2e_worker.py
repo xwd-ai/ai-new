@@ -2,11 +2,13 @@
 
 from pathlib import Path
 import faulthandler
+import json
 import re
 import socket
 import sys
+import time
 
-from backend.tests.http_startup import stage
+from backend.tests.http_startup import publish_port, stage
 
 
 def main():
@@ -71,15 +73,30 @@ def main():
         with stage('listener'):
             listener.bind(('127.0.0.1', 0))
             listener.listen(128)
-            (run / 'port.txt').write_text(str(listener.getsockname()[1]), encoding='ascii')
+            publish_port(run, listener.getsockname()[1])
             server = uvicorn.Server(uvicorn.Config(app, log_level='warning', access_log=False))
-        faulthandler.cancel_dump_traceback_later()
+        health_started = time.monotonic()
+        healthy = False
+        print(json.dumps({'startup_stage': 'health', 'state': 'started'}), flush=True)
+        @app.middleware('http')
+        async def observe_health(request, call_next):
+            nonlocal healthy
+            response = await call_next(request)
+            if request.url.path == '/health' and response.status_code == 200 and not healthy:
+                healthy = True
+                faulthandler.cancel_dump_traceback_later()
+                print(json.dumps({'startup_stage': 'health', 'state': 'completed',
+                                  'elapsed_s': round(time.monotonic() - health_started, 3)}), flush=True)
+            return response
         # 仅隔离测试 worker 装配此路由，生产 app 不包含该入口。
         @app.post('/__e2e_shutdown')
         def shutdown():
             server.should_exit = True
             return {'stopping': True}
-        server.run(sockets=[listener])
+        try:
+            server.run(sockets=[listener])
+        finally:
+            faulthandler.cancel_dump_traceback_later()
 
 
 if __name__ == '__main__':

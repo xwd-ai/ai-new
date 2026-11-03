@@ -20,9 +20,27 @@ def stage(name):
                           'elapsed_s': round(time.monotonic() - started, 3)}), flush=True)
 
 
-def failure_detail(process, run, started):
+def publish_port(run, port):
+    pending = run / 'port.pending'
+    pending.write_text(str(port), encoding='ascii')
+    pending.replace(run / 'port.txt')
+
+
+def read_port(run):
+    try:
+        raw = (run / 'port.txt').read_text('ascii').strip()
+    except (OSError, UnicodeError):
+        return None
+    if not (raw.isascii() and raw.isdigit() and len(raw) <= 5):
+        return None
+    port = int(raw)
+    return port if 1 <= port <= 65535 else None
+
+
+def failure_detail(process, run, started, base_url=None, last_probe=None):
     code = process.poll()
     reason = 'startup_timeout' if code is None else 'process_exited'
     return (f'HTTP 服务启动失败：reason={reason}, exit_code={code}, '
-            f'elapsed_s={time.monotonic() - started:.3f}, log={run / "server.log"}\n'
+            f'elapsed_s={time.monotonic() - started:.3f}, url={base_url}, '
+            f'last_probe={last_probe}, log={run / "server.log"}\n'
             + (run / 'server.log').read_text('utf-8'))
