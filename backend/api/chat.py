@@ -101,7 +101,7 @@ def conversation(authorization: str = Header(default="")):
         messages = (
             db.query(Message)
             .filter(Message.conversation_id == conv.id)
-            .order_by(Message.at.asc())
+            .order_by(Message.at.asc(), Message.id.asc())
             .all()
         )
         return {

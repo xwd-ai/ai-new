@@ -147,7 +147,7 @@ def history(conversation_id: str, limit: int = 8) -> list[dict]:
         messages = (
             db.query(Message)
             .filter(Message.conversation_id == conversation_id)
-            .order_by(Message.at.desc())
+            .order_by(Message.at.desc(), Message.id.desc())
             .limit(limit)
             .all()
         )

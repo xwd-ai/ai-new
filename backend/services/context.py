@@ -56,7 +56,7 @@ def _align_to_user_turn(messages: list[dict], start: int) -> int:
     避免留下「没有提问的回答」。一直前移到用户消息或数组开头。
     """
     index = start
-    while 0 < index < len(messages) and messages[index].get("role") != "user":
+    while 0 <= index < len(messages) and messages[index].get("role") != "user":
         index += 1
     # 走到末尾说明后面全是助手消息，全丢；否则让窗口从这条用户消息开始
     return index
