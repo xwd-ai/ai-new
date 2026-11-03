@@ -1,6 +1,7 @@
 """真实本机 HTTP、独立进程与临时 SQLite；不调用外部模型。"""
 
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import subprocess
 import sys
@@ -46,11 +47,11 @@ def stop_server(process, base_url):
     process._e2e_stopped = True
 
 
-@pytest.fixture()
-def server(tmp_path):
+@contextmanager
+def server_pool(tmp_path):
     processes = []
 
-    def start(mode='normal'):
+    def start(mode='normal', *, timeout=25):
         run = tmp_path / str(len(processes))
         run.mkdir()
         output = (run / 'server.log').open('w', encoding='utf-8')
@@ -64,7 +65,7 @@ def server(tmp_path):
         client = None
         last_probe = 'port_not_published'
         started = time.monotonic()
-        deadline = started + 25
+        deadline = started + timeout
         while time.monotonic() < deadline and process.poll() is None:
             port = read_port(run)
             if port is not None:
@@ -89,17 +90,25 @@ def server(tmp_path):
             client.close()
         pytest.fail(failure_detail(process, run, started, entry['url'], last_probe))
 
-    yield start
-    errors = []
-    for entry in processes:
-        try:
-            stop_server(entry['process'], entry['url'])
-        except Exception as error:
-            errors.append(str(error))
-        finally:
-            entry['output'].close()
-    if errors:
-        pytest.fail('测试服务清理失败：' + '; '.join(errors))
+    try:
+        yield start, processes
+    finally:
+        errors = []
+        for entry in processes:
+            try:
+                stop_server(entry['process'], entry['url'])
+            except Exception as error:
+                errors.append(str(error))
+            finally:
+                entry['output'].close()
+        if errors:
+            pytest.fail('测试服务清理失败：' + '; '.join(errors))
+
+
+@pytest.fixture()
+def server(tmp_path):
+    with server_pool(tmp_path) as (start, _):
+        yield start
 
 
 def login(client, role):

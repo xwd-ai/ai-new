@@ -16,6 +16,8 @@ def main():
     repository = Path(__file__).resolve().parents[2]
     if root == repository or repository in root.parents or root not in run.parents:
         raise ValueError('测试数据库和服务日志必须放在仓库外的临时目录')
+    if mode == 'exit_before_port':
+        raise RuntimeError('injected failure before port publication')
 
     # 原超时日志只有 Alembic 的通用提示；慢启动时同时保留具体线程栈。
     faulthandler.dump_traceback_later(10, repeat=True)
@@ -81,6 +83,9 @@ def main():
         @app.middleware('http')
         async def observe_health(request, call_next):
             nonlocal healthy
+            if mode == 'unhealthy' and request.url.path == '/health':
+                from starlette.responses import JSONResponse
+                return JSONResponse({'status': 'injected unhealthy'}, status_code=503)
             response = await call_next(request)
             if request.url.path == '/health' and response.status_code == 200 and not healthy:
                 healthy = True
@@ -94,6 +99,8 @@ def main():
             server.should_exit = True
             return {'stopping': True}
         try:
+            if mode == 'blocked_listener':
+                time.sleep(60)  # 注入监听完成但尚不处理请求的故障，只在测试 worker 中存在。
             server.run(sockets=[listener])
         finally:
             faulthandler.cancel_dump_traceback_later()
