@@ -65,3 +65,8 @@ def admin_page() -> FileResponse:
 @app.get("/settings")
 def settings_page() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "settings.html")
+
+
+@app.get("/knowledge")
+def knowledge_page() -> FileResponse:
+    return FileResponse(FRONTEND_DIR / "knowledge.html")

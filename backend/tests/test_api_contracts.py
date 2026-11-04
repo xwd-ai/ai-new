@@ -50,6 +50,17 @@ def _headers(client, role="admin"):
     return {"Authorization": f"Bearer {response.json()['token']}"}
 
 
+def test_knowledge_page_assets_and_management_navigation(api_client):
+    page = api_client.get('/knowledge')
+    assert page.status_code == 200
+    assert '<title>知识资料' in page.text
+    assert '/assets/knowledge-browser.js' in page.text
+    script = api_client.get('/assets/knowledge-browser.js')
+    assert script.status_code == 200 and 'class KnowledgeBrowser' in script.text
+    for path in ('/admin', '/settings'):
+        assert 'href="/knowledge"' in api_client.get(path).text
+
+
 def test_openapi_describes_typed_responses_and_error_statuses(api_client):
     spec = api_client.get("/openapi.json").json()
     for path, method, model in (

@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>知识资料 · AI 客服与工单助手</title>
+  <style>
+    :root { --bg:#f3f5f9; --surface:#fff; --text:#1a1d27; --muted:#657086; --primary:#4f6ef7; --border:#dce2ed; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:15px/1.6 -apple-system,BlinkMacSystemFont,"Microsoft YaHei",sans-serif; }
+    header { padding:18px 24px; background:var(--surface); border-bottom:1px solid var(--border); display:flex; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+    nav { display:flex; gap:20px; } a { color:var(--primary); text-underline-offset:4px; }
+    main { max-width:1240px; margin:auto; padding:28px 24px 48px; }
+    h1 { font-size:28px; margin:0 0 8px; } h2 { font-size:20px; margin:0; overflow-wrap:anywhere; }
+    p { margin:8px 0 16px; } .muted { color:var(--muted); }
+    fieldset { border:0; padding:0; margin:24px 0 16px; display:flex; align-items:end; gap:16px; flex-wrap:wrap; }
+    label { display:grid; gap:6px; font-weight:600; } .title-field { flex:1; min-width:180px; }
+    input,select,button { font:inherit; padding:10px 12px; border:1px solid var(--border); border-radius:8px; background:white; color:var(--text); }
+    button { cursor:pointer; } button.primary { background:var(--primary); border-color:var(--primary); color:#fff; }
+    button:disabled,fieldset:disabled { opacity:.55; cursor:not-allowed; }
+    :focus-visible { outline:3px solid #a7b5ff; outline-offset:3px; }
+    .workspace { display:grid; grid-template-columns:minmax(0,1.4fr) minmax(0,1fr); gap:24px; align-items:start; }
+    .panel { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:20px; min-width:0; }
+    .table-wrap { overflow-x:auto; } table { border-collapse:collapse; width:100%; text-align:left; }
+    th,td { border-bottom:1px solid var(--border); padding:12px 8px; vertical-align:top; overflow-wrap:anywhere; }
+    th { color:var(--muted); font-size:13px; font-weight:500; } td:nth-child(3) { font:12px/1.6 Consolas,monospace; max-width:130px; }
+    th:nth-child(2),td:nth-child(2),td:last-child { white-space:nowrap; } .paging,.detail-head { display:flex; justify-content:space-between; gap:12px; align-items:center; margin-top:16px; }
+    .detail-head { margin-top:0; } pre { white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; border-top:1px solid var(--border); padding-top:20px; }
+    [hidden] { display:none !important; }
+    @media(max-width:800px) { .workspace { grid-template-columns:1fr; } main { padding:24px 16px; } }
+  </style>
+</head>
+<body>
+  <header><strong>AI 客服与工单助手</strong><nav aria-label="管理导航"><a href="/admin">工单管理</a><a href="/settings">检索设置</a></nav></header>
+  <main>
+    <h1>知识资料</h1>
+    <p class="muted">按标题与类型查找资料，查看回答所依据的原文。</p>
+    <p id="access" role="status">正在核对管理员身份…</p>
+    <p id="loginLink" hidden><a href="/login">前往登录</a></p>
+    <form id="searchForm"><fieldset id="filters" disabled>
+      <label class="title-field">标题包含<input id="title" maxlength="200" placeholder="例如：导出 FAQ" /></label>
+      <label>资料类型<select id="kind"><option value="">全部类型</option value="manual">手册</option><option value="faq">FAQ</option><option value="rule">规则</option></select></label>
+      <button class="primary">筛选 / 刷新</button>
+    </fieldset></form>
+    <div class="workspace">
+      <section class="panel" aria-label="资料列表">
+        <p id="status" class="muted" role="status" aria-live="polite">登录管理员账号后加载资料。</p>
+        <div class="table-wrap"><table><thead><tr><th scope="col">标题</th><th scope="col">类型</th><th scope="col">编号</th><th scope="col">原文</th></tr></thead><tbody id="rows"></tbody></table></div>
+        <div class="paging"><button id="previous" disabled>上一页</button><span class="muted">每页 20 条</span><button id="next" disabled>下一页</button></div>
+        <p class="muted">新增资料可能改变后续页面的位置，可点击筛选 / 刷新回到首页。</p>
+      </section>
+      <section id="detail" class="panel" aria-label="资料原文" hidden>
+        <div class="detail-head"><h2 id="detailTitle"></h2><button id="closeDetail">关闭</button></div>
+        <p id="keywords" class="muted"></p><pre id="content"></pre>
+      </section>
+    </div>
+  </main>
+  <script src="/assets/knowledge-browser.js" defer></script>
+</body>
+</html>
