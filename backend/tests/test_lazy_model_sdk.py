@@ -1,6 +1,7 @@
 """启动与本地故障分类应可在未加载模型 SDK 时执行。"""
 
 from pathlib import Path
+import os
 import subprocess
 import sys
 
@@ -44,7 +45,8 @@ for factory in [providers.OpenAICompatChatProvider, providers.OpenAICompatEmbedd
     factory(api_key='test-key', base_url='https://example.invalid')
 assert len(calls) == 3
 assert all(call == {'api_key': 'test-key', 'base_url': 'https://example.invalid'} for call in calls)
-print('lazy-sdk-ok')
-'''], cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=25)
+print('lazy-sdk-ok 启动与模型构造验证通过')
+'''], cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True,
+        encoding='utf-8', env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}, timeout=25)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert 'lazy-sdk-ok' in result.stdout
+    assert 'lazy-sdk-ok 启动与模型构造验证通过' in result.stdout

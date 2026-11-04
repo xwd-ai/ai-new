@@ -84,3 +84,78 @@ def test_count_and_page_share_snapshot_during_ingest(listing):
     assert response.json() == {'total': 2, 'items': [{'id': 'b', 'title': 'b', 'kind': 'faq'}]}
     next_response = client.get('/api/knowledge/items?limit=1', headers={'Authorization': 'admin'})
     assert next_response.json() == {'total': 3, 'items': [{'id': 'a', 'title': 'a', 'kind': 'faq'}]}
+
+
+def insert_filter_docs(engine):
+    with engine.begin() as conn:
+        conn.execute(sa.insert(KnowledgeDoc), [
+            {'id': key, 'title': title, 'kind': kind, 'content': '导出仅在正文中', 'keywords': ['secret']}
+            for key, title, kind in [
+                ('d', '导出规则', 'rule'), ('b', '导出 FAQ', 'faq'),
+                ('a', '导出手册', 'manual'), ('c', '其他 FAQ', 'faq'),
+                ('e', '100%_完成/路径', 'manual'), ('f', '100XX完成X路径', 'manual'),
+            ]
+        ])
+
+
+@pytest.mark.parametrize('params, total, expected', [
+    ({'title': '导出'}, 3, ['a', 'b', 'd']),
+    ({'kind': 'faq'}, 2, ['b', 'c']),
+    ({'title': '导出', 'kind': 'faq'}, 1, ['b']),
+    ({'title': '导出', 'offset': 1, 'limit': 1}, 3, ['b']),
+    ({'title': '导出', 'offset': 1}, 3, ['b', 'd']),
+    ({'kind': 'faq', 'offset': 2}, 2, []),
+    ({'title': '导出', 'offset': 2**63, 'limit': 1}, 3, []),
+    ({'title': '%_'}, 1, ['e']),
+    ({'title': '/路径'}, 1, ['e']),
+    ({'title': "' OR 1=1 --"}, 0, []),
+    ({'title': '  导出  ', 'kind': 'rule'}, 1, ['d']),
+    ({'title': '   ', 'kind': 'faq'}, 2, ['b', 'c']),
+    ({'title': '', 'kind': 'faq'}, 2, ['b', 'c']),
+    ({'title': 'faq', 'kind': 'faq', 'limit': 1}, 2, ['b']),
+    ({'title': 'x' * 200}, 0, []),
+])
+def test_filters_apply_before_pagination_without_loading_bodies(listing, params, total, expected):
+    client, engine = listing
+    insert_filter_docs(engine)
+    statements = []
+    @sa.event.listens_for(engine, 'before_cursor_execute')
+    def capture(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().lower().startswith('select'):
+            statements.append(statement.lower())
+    response = client.get('/api/knowledge/items', params=params, headers={'Authorization': 'admin'})
+    assert response.status_code == 200
+    assert response.json()['total'] == total
+    assert [item['id'] for item in response.json()['items']] == expected
+    assert statements and all('content' not in sql and 'keywords' not in sql for sql in statements)
+    for token in ('', 'customer'):
+        assert client.get('/api/knowledge/items', params=params, headers={'Authorization': token}).status_code == 403
+
+
+@pytest.mark.parametrize('params', [
+    {'kind': 'unknown'}, {'kind': ''}, {'kind': 'FAQ'}, {'title': 'x' * 201},
+])
+def test_invalid_filters_return_422(listing, params):
+    client, _ = listing
+    assert client.get('/api/knowledge/items', params=params, headers={'Authorization': 'admin'}).status_code == 422
+
+
+def test_filtered_count_and_page_share_snapshot(listing):
+    client, engine = listing
+    insert_filter_docs(engine)
+    inserted = False
+    @sa.event.listens_for(engine, 'after_cursor_execute')
+    def concurrent_insert(conn, cursor, statement, parameters, context, executemany):
+        nonlocal inserted
+        if not inserted and 'count(' in statement.lower():
+            inserted = True
+            with engine.begin() as writer:
+                writer.execute(sa.insert(KnowledgeDoc), {
+                    'id': '0', 'title': '导出新增 FAQ', 'kind': 'faq', 'content': '新正文', 'keywords': [],
+                })
+    params = {'title': '导出', 'kind': 'faq', 'limit': 1}
+    response = client.get('/api/knowledge/items', params=params, headers={'Authorization': 'admin'})
+    assert inserted and response.status_code == 200
+    assert response.json() == {'total': 1, 'items': [{'id': 'b', 'title': '导出 FAQ', 'kind': 'faq'}]}
+    next_response = client.get('/api/knowledge/items', params=params, headers={'Authorization': 'admin'})
+    assert next_response.json() == {'total': 2, 'items': [{'id': '0', 'title': '导出新增 FAQ', 'kind': 'faq'}]}

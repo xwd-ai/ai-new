@@ -3,7 +3,7 @@
 入库属于内容管理操作，只对管理员开放：普通用户能查资料，但不能改资料。
 """
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Header, HTTPException, Query
 
@@ -92,17 +92,22 @@ def ingest_knowledge(
 
 @knowledge_router.get(
     "/knowledge/items", response_model=KnowledgeListResponse, summary="列出知识条目摘要",
-    description="按资料编号升序列出摘要。可选分页，total 始终为资料总数。",
-    responses={403: {"model": ErrorResponse, "description": "未登录或不具备管理员权限"}},
+    description="按资料编号升序列出摘要，可按标题子串与类型组合筛选。total 为筛选后的总数，支持可选分页。",
+    responses={
+        403: {"model": ErrorResponse, "description": "未登录或不具备管理员权限"},
+        422: {"model": ErrorResponse, "description": "分页或筛选参数不合法"},
+    },
 )
 def list_knowledge(
     authorization: str = Header(default=""),
     offset: Annotated[int, Query(ge=0, description="跳过的条目数")] = 0,
     limit: Annotated[int | None, Query(ge=1, le=100, description="最多返回条数，省略时返回剩余全部")] = None,
+    title: Annotated[str, Query(max_length=200, description="标题字面子串，去除首尾空白后为空则不筛选")] = "",
+    kind: Annotated[Literal["manual", "faq", "rule"] | None, Query(description="资料类型精确匹配")] = None,
 ) -> dict:
     """列出已入库的资料，供管理端核对。"""
     _require_admin(authorization)
-    return knowledge.list_document_summaries(offset=offset, limit=limit)
+    return knowledge.list_document_summaries(offset=offset, limit=limit, title=title, kind=kind)
 
 
 @knowledge_router.get(

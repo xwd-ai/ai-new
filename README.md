@@ -61,7 +61,7 @@ Copy-Item backend/.env.example backend/.env
 
 [接口文档](docs/api.md) 说明知识入库、来源回查、对话、历史消息、检索诊断及健康报告的字段、权限、错误响应和 PowerShell 调用示例。服务启动后也可打开 [Swagger UI](http://127.0.0.1:8000/docs)、[ReDoc](http://127.0.0.1:8000/redoc) 或 [OpenAPI JSON](http://127.0.0.1:8000/openapi.json)。
 
-管理员可通过 `GET /api/knowledge/items` 按资料编号升序读取摘要。接口只查询编号、标题和类型，省略分页参数时返回全部摘要。传入 `offset` 和 `limit` 可读取指定窗口，例如 `GET /api/knowledge/items?offset=1&limit=1` 读取第二条。`offset` 从 0 开始，`limit` 可取 1 至 100，`total` 表示全部资料数。每次分页请求独立读取快照，期间新增资料可能改变后续页面的位置。参数和空页行为见[列表与来源回查](docs/api.md#列表与来源回查)。
+管理员可通过 `GET /api/knowledge/items` 按资料编号升序读取摘要。接口只查询编号、标题和类型，可用 `title` 按标题字面子串筛选、用 `kind=manual/faq/rule` 精确筛选类型，两者同时传入时需同时满足。`title` 最长 200 字符，去除首尾空白后为空则不筛选；`%`、`_` 不作为通配符。标题匹配沿用 SQLite LIKE 行为，默认忽略 ASCII 字母大小写，不保证其他文字的大小写折叠。省略分页参数时返回全部匹配摘要。传入 `offset` 和 `limit` 可读取指定窗口，例如 `GET /api/knowledge/items?offset=1&limit=1` 读取第二条；`GET /api/knowledge/items?title=FAQ&kind=faq&limit=1` 读取标题包含 FAQ 的 faq 类型首条。`offset` 从 0 开始，`limit` 可取 1 至 100，`total` 表示筛选后的资料数，无筛选时为全库总数。每次分页请求独立读取快照，期间新增资料可能改变后续页面的位置。参数和空页行为见[列表与来源回查](docs/api.md#列表与来源回查)。
 
 入库按规范化标题与正文判重，当前保存整篇资料，`chunks` 仅是本次计算出的分块数。对话的 `trace` 为一次性返回的事件数组。对话目前使用关键词检索，HTTP 诊断路由也未装配向量或重排 provider，服务层具备这些能力不代表 HTTP 调用已经启用混合检索。
 

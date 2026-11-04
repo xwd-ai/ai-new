@@ -82,17 +82,24 @@ def _all_docs() -> list[dict]:
         db.close()
 
 
-def list_document_summaries(*, offset: int = 0, limit: int | None = None) -> dict:
+def list_document_summaries(
+    *, offset: int = 0, limit: int | None = None, title: str = "", kind: str | None = None,
+) -> dict:
     """读取列表摘要，分页时总数与窗口来自同一次 SQLite 读事务。"""
     with SessionLocal() as db:
-        query = db.query(KnowledgeDoc.id, KnowledgeDoc.title, KnowledgeDoc.kind).order_by(KnowledgeDoc.id.asc())
+        filters = []
+        if title.strip():
+            filters.append(KnowledgeDoc.title.contains(title.strip(), autoescape=True))
+        if kind is not None:
+            filters.append(KnowledgeDoc.kind == kind)
+        query = db.query(KnowledgeDoc.id, KnowledgeDoc.title, KnowledgeDoc.kind).filter(*filters).order_by(KnowledgeDoc.id.asc())
         if offset == 0 and limit is None:
             rows = query.all()
             total = len(rows)
         else:
             # SQLite 的默认驱动模式不会为 SELECT 自动发出 BEGIN。
             db.execute(text("BEGIN"))
-            total = db.query(KnowledgeDoc.id).count()
+            total = db.query(KnowledgeDoc.id).filter(*filters).count()
             # 先比较总数，避免超大 offset 传入 SQLite 的整数绑定。
             rows = query.offset(offset).limit(limit).all() if offset < total else []
         return {
