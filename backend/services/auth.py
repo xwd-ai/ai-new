@@ -6,12 +6,18 @@
 - 密码比对委托 User.check_password：bcrypt 哈希按算法校验，仍为旧版摘要的账号按兼容逻辑比对；
 - 校验通过的账号若仍存旧版摘要，或哈希成本低于当前配置，趁这次登录把字段原地升级，
   存量用户无需重置密码即可完成迁移；
-- 登录成功后签发随机 token，会话写入 sessions 表，超过 TTL 视为过期。
+- 登录成功后签发随机 token，会话写入 sessions 表，超过 TTL 视为过期；
+- 另一条令牌路径是 JWT：载荷只带鉴权必需的声明，用 HS256 签名，密钥从环境变量读取。
 
 明文密码只作为 authenticate / register_user 的入参存在，不落库、不进日志、不随用户信息返回。
 """
 
+import base64
+import hashlib
+import hmac
+import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -95,6 +101,13 @@ class WeakPasswordError(AuthError):
 
     error_code = "AUTH_WEAK_PASSWORD"
     http_status = 422
+
+
+class TokenSigningError(AuthError):
+    """令牌签发失败：用户信息缺少签发所需的字段。"""
+
+    error_code = "AUTH_TOKEN_SIGNING_FAILED"
+    http_status = 500
 
 
 # ---- 注册：用户名与密码强度校验 ----
@@ -262,6 +275,124 @@ def authenticate(username: str, password: str) -> Optional[dict]:
         return account
     finally:
         db.close()
+
+
+# ---- JWT 签发：密钥、载荷与签名 ----
+#
+# 令牌用 JWS 紧凑格式（header.payload.signature），签名算法固定 HS256。
+# 签名只依赖标准库的 HMAC-SHA256 与 base64url，不额外引入运行时依赖。
+# 载荷只放鉴权必需的声明：身份信息靠 sub 回库取，令牌不承担用户快照的职责，
+# 改名、改角色这类变更下次请求即生效，不必等令牌过期。
+
+JWT_ALGORITHM = "HS256"
+JWT_ISSUER = "ai-new"
+JWT_AUDIENCE = "ai-new-web"
+JWT_ACCESS_TTL = 30 * 60  # access token 有效期：30 分钟
+JWT_SECRET_ENV = "AI_NEW_JWT_SECRET"
+JWT_SECRET_MIN_BYTES = 32
+TOKEN_TYPE_ACCESS = "access"
+
+# 未配置环境变量时的本地开发密钥：固定值让重启后已签发的令牌仍可校验，
+# 但只能用于本地调试，生产环境必须通过 JWT_SECRET_ENV 覆盖
+_DEV_JWT_SECRET = "ai-new-dev-secret-change-me-before-deploy"
+
+
+def _resolve_jwt_secret() -> bytes:
+    """读取签名密钥：优先环境变量，缺省回退开发密钥并给出告警。"""
+    raw = (os.environ.get(JWT_SECRET_ENV) or "").strip()
+    if not raw:
+        logger.warning(
+            "未配置 %s，JWT 使用内置开发密钥，仅限本地调试", JWT_SECRET_ENV
+        )
+        return _DEV_JWT_SECRET.encode("utf-8")
+    if len(raw.encode("utf-8")) < JWT_SECRET_MIN_BYTES:
+        logger.warning(
+            "%s 不足 %d 字节，建议换成更长的随机密钥", JWT_SECRET_ENV, JWT_SECRET_MIN_BYTES
+        )
+    return raw.encode("utf-8")
+
+
+_JWT_SECRET = _resolve_jwt_secret()
+
+
+def _b64url_encode(raw: bytes) -> str:
+    """base64url 编码并去掉填充，符合 JWS 紧凑格式要求。"""
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(text: str) -> bytes:
+    """base64url 解码，按需补齐被去掉的填充。"""
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def _compact_json(data: dict) -> bytes:
+    """序列化为紧凑 JSON 字节串：无空格、键有序，同样的声明得到同样的令牌。"""
+    return json.dumps(
+        data, separators=(",", ":"), sort_keys=True, ensure_ascii=False
+    ).encode("utf-8")
+
+
+def sign_jwt(payload: dict, secret: Optional[bytes] = None) -> str:
+    """把声明集合签成紧凑格式令牌，返回 header.payload.signature 三段字符串。
+
+    payload 只读，函数不修改入参；secret 缺省用模块级配置的密钥。
+    """
+    header = {"alg": JWT_ALGORITHM, "typ": "JWT"}
+    segments = f"{_b64url_encode(_compact_json(header))}.{_b64url_encode(_compact_json(payload))}"
+    key = _JWT_SECRET if secret is None else secret
+    signature = hmac.new(key, segments.encode("ascii"), hashlib.sha256).digest()
+    return f"{segments}.{_b64url_encode(signature)}"
+
+
+def build_access_payload(
+    user: dict,
+    ttl: int = JWT_ACCESS_TTL,
+    issued_at: Optional[int] = None,
+) -> dict:
+    """按 access token 的声明约定构造载荷。
+
+    声明分工：
+    iss/aud 限定签发方与使用方；sub 为用户 id，是回查用户的唯一依据；
+    username/role 供鉴权与日志直接取用，不做权限判定以外的业务用途；
+    iat/nbf/exp 为秒级时间戳，nbf 与 iat 取同一时刻，留出后续加宽时钟偏差的余地；
+    jti 为一次性标识，为将来的吊销名单预留锚点；typ 区分令牌用途。
+    """
+    if not isinstance(user, dict) or not user.get("id") or not user.get("username"):
+        raise TokenSigningError("用户信息缺少签发令牌所需的字段")
+    if ttl <= 0:
+        raise TokenSigningError("令牌有效期必须为正数")
+
+    now = int(time.time()) if issued_at is None else int(issued_at)
+    return {
+        "iss": JWT_ISSUER,
+        "aud": JWT_AUDIENCE,
+        "sub": user["id"],
+        "username": user["username"],
+        "role": user.get("role") or "customer",
+        "typ": TOKEN_TYPE_ACCESS,
+        "iat": now,
+        "nbf": now,
+        "exp": now + int(ttl),
+        "jti": uuid.uuid4().hex,
+    }
+
+
+def create_access_token(user: dict, ttl: int = JWT_ACCESS_TTL) -> str:
+    """为已通过校验的用户签发 access token。"""
+    return sign_jwt(build_access_payload(user, ttl=ttl))
+
+
+def describe_jwt_config() -> dict:
+    """返回当前生效的签发参数，供健康检查与排障读取，不含密钥内容。"""
+    return {
+        "algorithm": JWT_ALGORITHM,
+        "issuer": JWT_ISSUER,
+        "audience": JWT_AUDIENCE,
+        "access_ttl": JWT_ACCESS_TTL,
+        "secret_source": (
+            JWT_SECRET_ENV if (os.environ.get(JWT_SECRET_ENV) or "").strip() else "dev-default"
+        ),
+    }
 
 
 def create_session(user: dict) -> str:
