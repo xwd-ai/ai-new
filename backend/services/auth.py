@@ -6,8 +6,9 @@
 - 密码比对委托 User.check_password：bcrypt 哈希按算法校验，仍为旧版摘要的账号按兼容逻辑比对；
 - 校验通过的账号若仍存旧版摘要，或哈希成本低于当前配置，趁这次登录把字段原地升级，
   存量用户无需重置密码即可完成迁移；
-- 登录成功后签发随机 token，会话写入 sessions 表，超过 TTL 视为过期；
-- 另一条令牌路径是 JWT：载荷只带鉴权必需的声明，用 HS256 签名，密钥从环境变量读取。
+- 登录成功后签发 JWT（HS256 紧凑格式，载荷只带鉴权必需的声明），
+  同时把该令牌登记到 sessions 表：既有解析路径按令牌原文查会话，
+  在令牌校验链路接管前保持兼容，令牌到期时间与会话记录保持一致。
 
 明文密码只作为 authenticate / register_user 的入参存在，不落库、不进日志、不随用户信息返回。
 """
@@ -31,8 +32,6 @@ from backend.models import Session, User
 from backend.services.password import MAX_PASSWORD_BYTES, PasswordHashError, verify_password
 
 logger = logging.getLogger(__name__)
-
-_TOKEN_TTL = 60 * 60 * 24  # 24 小时
 
 # 对外可见的用户字段；密码哈希不在此列，避免随用户信息流到接口与页面
 _PUBLIC_FIELDS = ("id", "username", "name", "role")
@@ -395,9 +394,13 @@ def describe_jwt_config() -> dict:
     }
 
 
-def create_session(user: dict) -> str:
-    """为已通过校验的用户签发会话 token 并落库。"""
-    token = uuid.uuid4().hex
+def _record_session(user: dict, token: str, expires_at: int) -> None:
+    """把已签发的令牌登记为一条会话记录。
+
+    令牌本身自包含身份与有效期，这里登记是为了让既有按令牌查会话的解析路径
+    （/api/me、工单、对话等）在令牌校验链路接管之前继续可用；
+    记录的到期时间取自令牌的 exp，两条路径不会各自算出一套过期时间。
+    """
     db = SessionLocal()
     try:
         db.add(
@@ -405,15 +408,31 @@ def create_session(user: dict) -> str:
                 token=token,
                 user_id=user["id"],
                 username=user["username"],
-                name=user["name"],
-                role=user["role"],
-                expires_at=time.time() + _TOKEN_TTL,
+                name=user.get("name") or "",
+                role=user.get("role") or "customer",
+                expires_at=expires_at,
             )
         )
         db.commit()
     finally:
         db.close()
-    return token
+
+
+def issue_login_token(user: dict, ttl: int = JWT_ACCESS_TTL) -> dict:
+    """为登录成功的用户签发 access token 并登记会话。
+
+    返回令牌与其有效期元信息，供接口层原样回给客户端：
+    expires_in 为相对秒数（客户端用来算刷新时机），expires_at 为绝对时间戳。
+    """
+    payload = build_access_payload(user, ttl=ttl)
+    token = sign_jwt(payload)
+    _record_session(user, token, payload["exp"])
+    return {
+        "token": token,
+        "token_type": "Bearer",
+        "expires_in": payload["exp"] - payload["iat"],
+        "expires_at": payload["exp"],
+    }
 
 
 def get_session(token: str) -> Optional[dict]:

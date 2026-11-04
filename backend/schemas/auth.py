@@ -1,3 +1,5 @@
+from typing import Optional
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -7,8 +9,18 @@ class LoginRequest(BaseModel):
 
 
 class LoginResponse(BaseModel):
+    """登录响应：令牌与公开用户信息。
+
+    token_type / expires_in / expires_at 只在登录成功时出现（失败时为 null，
+    由接口层按「不输出空字段」序列化），因此凭证错误场景的响应体仍是
+    {"token": "", "user": {}} 这一既有形态。
+    """
+
     token: str
     user: dict
+    token_type: Optional[str] = Field(default=None, description="令牌类型，固定 Bearer")
+    expires_in: Optional[int] = Field(default=None, description="令牌剩余有效秒数")
+    expires_at: Optional[int] = Field(default=None, description="令牌到期时间戳（秒）")
 
 
 class RegisterRequest(BaseModel):

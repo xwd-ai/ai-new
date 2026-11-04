@@ -4,7 +4,9 @@
 - 业务失败一律抛 AuthError 派生异常，由 AuthErrorRoute 统一转成
   {error, error_code, error_detail?} 响应，接口内不拼装错误字典；
 - 登录沿用既有契约：失败也返回 200，token 为空串、user 为空对象，
-  前端据此区分「凭证错误」与「接口异常」。
+  前端据此区分「凭证错误」与「接口异常」；
+- 登录成功返回的是签名的 access token，附带令牌类型与有效期，
+  失败分支不返回这些字段，响应体与旧契约完全一致。
 """
 
 from fastapi import APIRouter, Header, Request
@@ -42,13 +44,13 @@ class AuthErrorRoute(APIRoute):
 auth_router = APIRouter(route_class=AuthErrorRoute)
 
 
-@auth_router.post("/login", response_model=LoginResponse)
+@auth_router.post("/login", response_model=LoginResponse, response_model_exclude_none=True)
 def login(req: LoginRequest):
     user = auth.authenticate(req.username, req.password)
     if not user:
         return {"token": "", "user": {}}
-    token = auth.create_session(user)
-    return {"token": token, "user": auth.public_user(user)}
+    issued = auth.issue_login_token(user)
+    return {**issued, "user": auth.public_user(user)}
 
 
 @auth_router.post(
