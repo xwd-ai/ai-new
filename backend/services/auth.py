@@ -8,12 +8,15 @@
   存量用户无需重置密码即可完成迁移；
 - 登录成功后签发 JWT（HS256 紧凑格式，载荷只带鉴权必需的声明），
   同时把该令牌登记到 sessions 表：既有解析路径按令牌原文查会话，
-  在令牌校验链路接管前保持兼容，令牌到期时间与会话记录保持一致。
+  在令牌校验链路接管前保持兼容，令牌到期时间与会话记录保持一致；
+- 令牌校验按「结构 → 算法 → 签名 → 声明」四层逐级收口，任何一层不通过都抛
+  TokenError 派生异常，错误码稳定可供客户端分支，校验本身不查库、不依赖会话表。
 
 明文密码只作为 authenticate / register_user 的入参存在，不落库、不进日志、不随用户信息返回。
 """
 
 import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -107,6 +110,61 @@ class TokenSigningError(AuthError):
 
     error_code = "AUTH_TOKEN_SIGNING_FAILED"
     http_status = 500
+
+
+# ---- 令牌校验异常：统一 401，按 error_code 区分失败环节 ----
+#
+# 具体原因只回给客户端一个稳定的错误码与简短说明，不暴露密钥、签名原文
+# 或内部分支，避免把校验细节变成试探令牌构造的线索。
+
+
+class TokenError(AuthError):
+    """令牌校验失败基类。"""
+
+    error_code = "AUTH_TOKEN_INVALID"
+    http_status = 401
+
+
+class TokenMissingError(TokenError):
+    """请求未携带令牌。"""
+
+    error_code = "AUTH_TOKEN_MISSING"
+
+
+class TokenMalformedError(TokenError):
+    """令牌结构不合法：段数不对、编码不可解码、头部或载荷不是 JSON 对象。"""
+
+    error_code = "AUTH_TOKEN_MALFORMED"
+
+
+class TokenAlgorithmError(TokenError):
+    """头部声明的签名算法不受支持（含 alg=none 这类降级尝试）。"""
+
+    error_code = "AUTH_TOKEN_UNSUPPORTED_ALG"
+
+
+class TokenSignatureError(TokenError):
+    """签名与载荷不匹配：令牌被篡改或由其它密钥签发。"""
+
+    error_code = "AUTH_TOKEN_BAD_SIGNATURE"
+
+
+class TokenExpiredError(TokenError):
+    """令牌已过期。"""
+
+    error_code = "AUTH_TOKEN_EXPIRED"
+
+
+class TokenNotYetValidError(TokenError):
+    """令牌尚未生效：nbf 或 iat 晚于当前时间，超出允许的时钟偏差。"""
+
+    error_code = "AUTH_TOKEN_NOT_YET_VALID"
+
+
+class TokenClaimsError(TokenError):
+    """声明缺失或取值不符合约定：签发方、使用方、类型、时间戳。"""
+
+    error_code = "AUTH_TOKEN_BAD_CLAIMS"
 
 
 # ---- 注册：用户名与密码强度校验 ----
@@ -339,7 +397,7 @@ def sign_jwt(payload: dict, secret: Optional[bytes] = None) -> str:
     header = {"alg": JWT_ALGORITHM, "typ": "JWT"}
     segments = f"{_b64url_encode(_compact_json(header))}.{_b64url_encode(_compact_json(payload))}"
     key = _JWT_SECRET if secret is None else secret
-    signature = hmac.new(key, segments.encode("ascii"), hashlib.sha256).digest()
+    signature = _sign(segments, key)
     return f"{segments}.{_b64url_encode(signature)}"
 
 
@@ -392,6 +450,191 @@ def describe_jwt_config() -> dict:
             JWT_SECRET_ENV if (os.environ.get(JWT_SECRET_ENV) or "").strip() else "dev-default"
         ),
     }
+
+
+# ---- JWT 解析与校验：结构、算法、签名、声明 ----
+#
+# 校验顺序刻意由外到内：先确认三段结构可解析，再看头部声明的算法，
+# 然后比对签名，最后才读载荷里的声明。前一步不通过就不进入下一步，
+# 保证「签名未验证的载荷」不会被当作可信数据读取或回显。
+# 时效判定留出 JWT_CLOCK_LEEWAY 秒余量，签发方与校验方时钟略有偏差不算过期。
+
+JWT_CLOCK_LEEWAY = 30  # 允许的时钟偏差（秒）
+JWT_MAX_TOKEN_LENGTH = 4096  # 令牌长度上限，超长直接拒绝，不做无谓解码
+JWT_REQUIRED_CLAIMS = ("iss", "aud", "sub", "exp", "iat", "typ")
+
+# base64url 段只允许这些字符；先按字符集筛一遍，避免解码器静默丢弃非法字符
+_B64URL_SEGMENT = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _split_token(token: str) -> tuple[str, str, str]:
+    """把紧凑格式令牌拆成头部、载荷、签名三段，结构不合法时抛 TokenMalformedError。"""
+    if not isinstance(token, str) or not token.strip():
+        raise TokenMissingError("缺少认证令牌")
+    value = token.strip()
+    if len(value) > JWT_MAX_TOKEN_LENGTH:
+        raise TokenMalformedError("令牌长度超出上限")
+    parts = value.split(".")
+    if len(parts) != 3:
+        raise TokenMalformedError("令牌需为三段式结构")
+    for segment in parts:
+        if not _B64URL_SEGMENT.match(segment):
+            raise TokenMalformedError("令牌包含非法字符")
+    return parts[0], parts[1], parts[2]
+
+
+def _decode_segment(segment: str, name: str) -> dict:
+    """解码一个 base64url 段并解析为 JSON 对象。"""
+    try:
+        raw = _b64url_decode(segment)
+        data = json.loads(raw)
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        raise TokenMalformedError(f"令牌{name}无法解析") from None
+    if not isinstance(data, dict):
+        raise TokenMalformedError(f"令牌{name}不是 JSON 对象")
+    return data
+
+
+def _sign(segments: str, secret: bytes) -> bytes:
+    """对 header.payload 段做 HMAC-SHA256 签名。"""
+    return hmac.new(secret, segments.encode("ascii"), hashlib.sha256).digest()
+
+
+def verify_jwt_signature(token: str, secret: Optional[bytes] = None) -> bool:
+    """只比对签名，不判时效与声明，返回布尔值而不抛异常。
+
+    适合在需要「先看令牌真伪、再决定要不要解析内容」的场景做前置过滤；
+    结构与签名任何一处对不上都返回 False，调用方拿不到失败细节。
+    """
+    try:
+        header_segment, payload_segment, signature_segment = _split_token(token)
+        expected = _sign(
+            f"{header_segment}.{payload_segment}",
+            _JWT_SECRET if secret is None else secret,
+        )
+        actual = _b64url_decode(signature_segment)
+    except (TokenError, binascii.Error, ValueError, UnicodeDecodeError):
+        return False
+    return hmac.compare_digest(expected, actual)
+
+
+def _check_algorithm(header: dict) -> None:
+    """头部算法必须与签发时一致；alg=none 之类的一律拒绝。"""
+    algorithm = header.get("alg")
+    if not isinstance(algorithm, str) or algorithm.upper() != JWT_ALGORITHM:
+        raise TokenAlgorithmError(
+            "令牌签名算法不受支持", {"expected": JWT_ALGORITHM}
+        )
+
+
+def _require_claim(claims: dict, name: str) -> None:
+    """声明必须存在且非空。"""
+    if claims.get(name) in (None, ""):
+        raise TokenClaimsError(f"令牌缺少声明 {name}", {"claim": name})
+
+
+def _timestamp_claim(claims: dict, name: str) -> int:
+    """取秒级时间戳声明；布尔值虽然也是 int 的子类，但不接受。"""
+    value = claims.get(name)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TokenClaimsError(f"令牌声明 {name} 必须是秒级时间戳", {"claim": name})
+    return value
+
+
+def _audience_matches(claim_value, expected: str) -> bool:
+    """aud 可以是单个字符串，也可以是字符串数组。"""
+    if isinstance(claim_value, str):
+        return claim_value == expected
+    if isinstance(claim_value, list):
+        return expected in claim_value
+    return False
+
+
+def decode_jwt(
+    token: str,
+    secret: Optional[bytes] = None,
+    *,
+    now: Optional[int] = None,
+    leeway: int = JWT_CLOCK_LEEWAY,
+    expected_issuer: Optional[str] = JWT_ISSUER,
+    expected_audience: Optional[str] = JWT_AUDIENCE,
+    expected_type: Optional[str] = TOKEN_TYPE_ACCESS,
+    verify_expiry: bool = True,
+) -> dict:
+    """校验令牌并返回声明集合，任一层不通过抛对应的 TokenError 子类。
+
+    expected_* 传 None 表示不校验该项，供签发侧自检或跨用途解析时放宽；
+    verify_expiry=False 只跳过时效判定，签名与声明仍然校验，用于排查刚过期的令牌。
+    now 显式传入时按该时间戳判定时效，便于测试与回溯。
+    """
+    if isinstance(leeway, bool) or not isinstance(leeway, int) or leeway < 0:
+        raise ValueError("leeway 必须是非负整数")
+
+    header_segment, payload_segment, signature_segment = _split_token(token)
+    header = _decode_segment(header_segment, "头部")
+    _check_algorithm(header)
+
+    expected_signature = _sign(
+        f"{header_segment}.{payload_segment}",
+        _JWT_SECRET if secret is None else secret,
+    )
+    try:
+        actual_signature = _b64url_decode(signature_segment)
+    except (binascii.Error, ValueError):
+        raise TokenMalformedError("令牌签名段无法解析") from None
+    if not hmac.compare_digest(expected_signature, actual_signature):
+        raise TokenSignatureError("令牌签名校验失败")
+
+    claims = _decode_segment(payload_segment, "载荷")
+
+    for name in JWT_REQUIRED_CLAIMS:
+        _require_claim(claims, name)
+    if expected_issuer is not None and claims["iss"] != expected_issuer:
+        raise TokenClaimsError("令牌签发方不匹配", {"claim": "iss"})
+    if expected_audience is not None and not _audience_matches(
+        claims["aud"], expected_audience
+    ):
+        raise TokenClaimsError("令牌使用方不匹配", {"claim": "aud"})
+    if expected_type is not None and claims["typ"] != expected_type:
+        raise TokenClaimsError("令牌用途不匹配", {"claim": "typ"})
+
+    issued_at = _timestamp_claim(claims, "iat")
+    expires_at = _timestamp_claim(claims, "exp")
+    if expires_at <= issued_at:
+        raise TokenClaimsError("令牌有效期不成立", {"claim": "exp"})
+
+    if verify_expiry:
+        current = int(time.time()) if now is None else int(now)
+        if current - leeway >= expires_at:
+            raise TokenExpiredError("令牌已过期", {"expired_at": expires_at})
+        not_before = _timestamp_claim(claims, "nbf") if "nbf" in claims else issued_at
+        if current + leeway < max(not_before, issued_at):
+            raise TokenNotYetValidError("令牌尚未生效", {"not_before": not_before})
+
+    return claims
+
+
+def verify_access_token(token: str, secret: Optional[bytes] = None, **kwargs) -> dict:
+    """按 access token 的约定校验令牌，返回声明集合。
+
+    用途固定为 access：refresh token 或其它用途的令牌走到这里会因 typ 不符被拒，
+    避免两类令牌互相顶替。
+    """
+    kwargs.setdefault("expected_type", TOKEN_TYPE_ACCESS)
+    return decode_jwt(token, secret, **kwargs)
+
+
+def extract_bearer_token(authorization: Optional[str]) -> str:
+    """从 Authorization 头取出 Bearer 令牌，缺失或格式不对时抛对应异常。"""
+    if not isinstance(authorization, str) or not authorization.strip():
+        raise TokenMissingError("未提供 Authorization 请求头")
+    parts = authorization.strip().split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise TokenMalformedError("Authorization 头需为 Bearer <token> 形式")
+    token = parts[1].strip()
+    if not token:
+        raise TokenMissingError("Bearer 后未携带令牌")
+    return token
 
 
 def _record_session(user: dict, token: str, expires_at: int) -> None:
