@@ -77,11 +77,18 @@
 
 ## 列表与来源回查
 
-`GET /api/knowledge/items` 返回所有条目的摘要，不提供分页，也不承诺排序：
+`GET /api/knowledge/items` 需要管理员权限，按资料 `id` 的字符串升序返回摘要。省略分页参数时返回全部摘要。响应保持以下结构。
 
 ```json
 {"total":1,"items":[{"id":"k-example","title":"导出 FAQ","kind":"faq"}]}
 ```
+
+| 查询参数 | 含义 |
+|---|---|
+| `offset` | 跳过的条目数，默认为 0，取非负整数 |
+| `limit` | 最多返回的条目数，取 1 至 100。省略时返回偏移后的全部摘要 |
+
+例如 `GET /api/knowledge/items?offset=1&limit=1` 返回第二条摘要。`total` 始终是资料总数，偏移等于或超过总数时 `items` 为空。参数越界或无法解析为整数时返回 HTTP 422，参数合法时非管理员返回 HTTP 403。分页的计数和窗口来自同一 SQLite 读事务。不同请求各自读取快照，翻页期间新增资料可能改变偏移位置。正文和关键词可通过来源回查读取。
 
 `GET /api/sources/{source_id}` 使用列表中的 `id` 或回答中 `sources[].id` 回查原文。返回 `id`、`title`、`kind`、`content`、`keywords`；不存在时返回 HTTP 404 和 `{"detail":"来源不存在"}`。来源编号是持久化条目编号，不是 `c1` 这样的本轮引用句柄。当前来源详情不做登录或租户隔离检查。
 

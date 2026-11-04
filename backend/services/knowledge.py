@@ -3,7 +3,7 @@
 当前实现为关键词检索（BM25），后续接入向量召回后由本模块统一融合。
 
 设计要点：
-- 对外只暴露 ``search_knowledge``，返回按相关性降序的条目列表，条目字段
+- 检索入口 ``search_knowledge`` 返回按相关性降序的条目列表，条目字段
   保持 ``id/title/kind/content/keywords`` 不变，调用方无需感知检索实现。
 - 检索分为「分词 → 打分 → 归一化 → 排序」四步。分词只做中文单字 + 英文
   词元切分，不引入额外依赖；打分使用标准 BM25，并对无界分数做归一化，
@@ -17,6 +17,8 @@ import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 from numbers import Integral, Real
+
+from sqlalchemy import text
 
 from backend.database import SessionLocal
 from backend.logging_conf import log_event
@@ -78,6 +80,25 @@ def _all_docs() -> list[dict]:
         return [r.to_dict() for r in rows]
     finally:
         db.close()
+
+
+def list_document_summaries(*, offset: int = 0, limit: int | None = None) -> dict:
+    """读取列表摘要，分页时总数与窗口来自同一次 SQLite 读事务。"""
+    with SessionLocal() as db:
+        query = db.query(KnowledgeDoc.id, KnowledgeDoc.title, KnowledgeDoc.kind).order_by(KnowledgeDoc.id.asc())
+        if offset == 0 and limit is None:
+            rows = query.all()
+            total = len(rows)
+        else:
+            # SQLite 的默认驱动模式不会为 SELECT 自动发出 BEGIN。
+            db.execute(text("BEGIN"))
+            total = db.query(KnowledgeDoc.id).count()
+            # 先比较总数，避免超大 offset 传入 SQLite 的整数绑定。
+            rows = query.offset(offset).limit(limit).all() if offset < total else []
+        return {
+            "total": total,
+            "items": [{"id": row.id, "title": row.title, "kind": row.kind} for row in rows],
+        }
 
 
 def _doc_tokens(item: dict) -> list[str]:

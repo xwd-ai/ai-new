@@ -3,7 +3,9 @@
 入库属于内容管理操作，只对管理员开放：普通用户能查资料，但不能改资料。
 """
 
-from fastapi import APIRouter, Header, HTTPException
+from typing import Annotated
+
+from fastapi import APIRouter, Header, HTTPException, Query
 
 from backend.schemas import ErrorResponse, IngestRequest, IngestResponse, KnowledgeListResponse
 from backend.services import chat as chat_service
@@ -90,19 +92,17 @@ def ingest_knowledge(
 
 @knowledge_router.get(
     "/knowledge/items", response_model=KnowledgeListResponse, summary="列出知识条目摘要",
+    description="按资料编号升序列出摘要。可选分页，total 始终为资料总数。",
     responses={403: {"model": ErrorResponse, "description": "未登录或不具备管理员权限"}},
 )
-def list_knowledge(authorization: str = Header(default="")) -> dict:
+def list_knowledge(
+    authorization: str = Header(default=""),
+    offset: Annotated[int, Query(ge=0, description="跳过的条目数")] = 0,
+    limit: Annotated[int | None, Query(ge=1, le=100, description="最多返回条数，省略时返回剩余全部")] = None,
+) -> dict:
     """列出已入库的资料，供管理端核对。"""
     _require_admin(authorization)
-    db_items = knowledge._all_docs()
-    return {
-        "total": len(db_items),
-        "items": [
-            {"id": i["id"], "title": i["title"], "kind": i["kind"]}
-            for i in db_items
-        ],
-    }
+    return knowledge.list_document_summaries(offset=offset, limit=limit)
 
 
 @knowledge_router.get(
