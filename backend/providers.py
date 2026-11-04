@@ -10,8 +10,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Protocol, Sequence
 
-from openai import OpenAI
-
 from backend.errors import ModelConfigurationError
 
 
@@ -55,6 +53,7 @@ class OpenAICompatChatProvider:
             "DEEPSEEK_BASE_URL", "https://api.deepseek.com"
         )
         self._model = model or os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+        from openai import OpenAI
         self._client = OpenAI(api_key=self._api_key, base_url=self._base_url)
 
     def chat(
@@ -107,6 +106,7 @@ class OpenAICompatEmbeddingProvider:
         self._model = model or os.getenv(
             "EMBEDDING_MODEL", "deepseek-embedding"
         )
+        from openai import OpenAI
         self._client = OpenAI(api_key=self._api_key, base_url=self._base_url)
 
     def embed(self, text: str, *, model: str | None = None) -> list[float]:
@@ -168,6 +168,7 @@ class OpenAICompatRerankProvider:
             "DEEPSEEK_BASE_URL", "https://api.deepseek.com"
         )
         self._model = model or os.getenv("RERANK_MODEL", "deepseek-reranker")
+        from openai import OpenAI
         self._client = OpenAI(api_key=self._api_key, base_url=self._base_url)
 
     def rerank(

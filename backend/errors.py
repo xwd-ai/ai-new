@@ -1,15 +1,7 @@
 """把服务异常归类为稳定的错误码与可对外展示的提示。"""
 
 from dataclasses import dataclass
-
-from openai import (
-    APIConnectionError,
-    APIStatusError,
-    APITimeoutError,
-    AuthenticationError,
-    PermissionDeniedError,
-    RateLimitError,
-)
+import sys
 
 
 class ModelConfigurationError(ValueError):
@@ -25,14 +17,27 @@ class ErrorInfo:
 
 def classify_error(exc: Exception) -> ErrorInfo:
     """按异常类型分类，不把上游响应、密钥或内部路径拼进提示。"""
-    # SDK 的超时异常也是连接异常，必须先判断超时。
-    if isinstance(exc, (APITimeoutError, TimeoutError)):
+    if isinstance(exc, TimeoutError):
         return ErrorInfo("timeout", "服务响应超时，请稍后重试。", True)
-    if isinstance(exc, (APIConnectionError, ConnectionError)):
+    if isinstance(exc, ConnectionError):
+        return ErrorInfo("connection_error", "暂时无法连接服务，请稍后重试。", True)
+    if isinstance(exc, ModelConfigurationError):
+        return ErrorInfo("model_configuration", "模型服务配置有误，请联系管理员检查。")
+    # 真实 SDK 异常只会在 SDK 已加载后产生。普通故障不触发整套 SDK 导入。
+    if sys.modules.get('openai') is None:
+        return ErrorInfo("internal_error", "处理请求时发生错误，请稍后重试或联系管理员。")
+    from openai import (
+        APIConnectionError, APIStatusError, APITimeoutError,
+        AuthenticationError, PermissionDeniedError, RateLimitError,
+    )
+    # SDK 的超时异常也是连接异常，必须先判断超时。
+    if isinstance(exc, APITimeoutError):
+        return ErrorInfo("timeout", "服务响应超时，请稍后重试。", True)
+    if isinstance(exc, APIConnectionError):
         return ErrorInfo("connection_error", "暂时无法连接服务，请稍后重试。", True)
     if isinstance(exc, RateLimitError):
         return ErrorInfo("rate_limited", "服务请求繁忙，请稍后重试。", True)
-    if isinstance(exc, (ModelConfigurationError, AuthenticationError, PermissionDeniedError)):
+    if isinstance(exc, (AuthenticationError, PermissionDeniedError)):
         return ErrorInfo("model_configuration", "模型服务配置有误，请联系管理员检查。")
     if isinstance(exc, APIStatusError):
         if exc.status_code >= 500:
