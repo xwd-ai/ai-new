@@ -56,6 +56,10 @@ def test_knowledge_page_assets_and_management_navigation(api_client):
     assert '<title>知识资料' in page.text
     assert '/assets/knowledge-browser.js' in page.text
     assert '/assets/knowledge-ingest.js' in page.text
+    assert '/assets/knowledge-recovery.js' in page.text
+    assert 'id="refreshPending"' in page.text
+    recovery_script = api_client.get('/assets/knowledge-recovery.js')
+    assert recovery_script.status_code == 200 and 'class KnowledgeRecovery' in recovery_script.text
     assert 'id="ingestForm"' in page.text
     ingest_script = api_client.get('/assets/knowledge-ingest.js')
     assert ingest_script.status_code == 200 and 'class KnowledgeIngest' in ingest_script.text

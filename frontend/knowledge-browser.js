@@ -62,6 +62,8 @@ if (typeof document !== 'undefined') {
         authorized = false;
         byId('filters').disabled = true;
         byId('ingestFields').disabled = true;
+        byId('refreshPending').disabled = true;
+        pending.clear();
         byId('previous').disabled = byId('next').disabled = true;
         byId('rows').replaceChildren();
         browser.closeDetail();
@@ -70,7 +72,10 @@ if (typeof document !== 'undefined') {
         throw new Error('登录已失效或没有管理员权限，请重新登录。');
       }
       if (response.status === 409) throw new Error('相同资料正在处理或租约已失效，请稍后核对并重试。');
-      if (!response.ok) throw new Error(response.status === 404 ? '资料不存在，请刷新列表。' :
+      const recovering = path.startsWith('/api/knowledge/ingest/recover/');
+      if (!response.ok) throw new Error(response.status === 404 ?
+        (recovering ? '待恢复记录不存在，请刷新列表。' : '资料不存在，请刷新列表。') :
+        response.status === 422 && recovering ? '持久化记录无法恢复，请人工核对输入与处理阶段。' :
         response.status === 422 && options.method === 'POST' ? '入库参数不合法，请检查标题、正文、类型与关键词。' :
         response.status === 422 ? '筛选参数不合法，请检查标题和类型。' : '服务暂时不可用，请重新筛选或稍后重试。');
       return await response.json();
@@ -136,11 +141,39 @@ if (typeof document !== 'undefined') {
   byId('viewSaved').addEventListener('click', () => {
     if (authorized && savedId) browser.source(savedId);
   });
+  const pending = new KnowledgeRecovery({request,
+    onStatus: message => { byId('pendingStatus').textContent = message; },
+    onResult: message => { byId('recoveryStatus').textContent = message; },
+    onRecovered: () => { if (authorized) browser.load(); },
+    onBusy: busy => {
+      byId('refreshPending').disabled = !authorized || busy;
+      for (const button of byId('pendingRows').querySelectorAll('button')) button.disabled = !authorized || busy;
+    },
+    onRows: items => {
+      byId('pendingRows').replaceChildren();
+      if (!authorized) return;
+      for (const item of items) {
+        const row = document.createElement('tr');
+        const stage = {parsed: '已保存输入', chunked: '已完成分块'}[item.stage] || item.stage;
+        const date = new Date(item.updated_at * 1000);
+        for (const value of [item.knowledge_id, stage, item.chunk_count,
+          Number.isNaN(date.getTime()) ? '未知时间' : date.toLocaleString()]) {
+          const cell = document.createElement('td'); cell.textContent = value; row.append(cell);
+        }
+        const cell = document.createElement('td'), button = document.createElement('button');
+        button.textContent = '恢复入库';
+        button.addEventListener('click', () => { if (authorized) pending.recover(item.fingerprint); });
+        cell.append(button); row.append(cell); byId('pendingRows').append(row);
+      }
+    },
+  });
+  byId('refreshPending').addEventListener('click', () => { if (authorized) pending.load(); });
   (async () => {
     try {
       const identity = await request('/api/me');
       if (!identity.user || identity.user.role !== 'admin') throw new Error('仅管理员可以浏览资料列表，请登录管理员账号。');
       authorized = true; byId('filters').disabled = byId('ingestFields').disabled = false;
+      byId('refreshPending').disabled = false;
       byId('access').textContent = `管理员：${identity.user.name || identity.user.username}`;
       await browser.search('', '');
     } catch (error) {
