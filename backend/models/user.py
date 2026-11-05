@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import time
+from typing import Optional
 
 from sqlalchemy import Float, String
 from sqlalchemy.orm import Mapped, mapped_column
@@ -115,3 +116,46 @@ class Session(Base):
     @property
     def expired(self) -> bool:
         return self.expires_at < time.time()
+
+
+class RefreshToken(Base):
+    """refresh token 登记记录：长期令牌的每一次签发都落一行，支撑按条吊销。
+
+    令牌本身是自包含的签名 JWT（typ=refresh，有效期按天计），
+    记录存在的意义是让吊销生效——revoke 之后即使令牌未过期也不再可用；
+    过期记录可以整行删除，不影响其它未过期令牌。
+    """
+
+    __tablename__ = "refresh_tokens"
+
+    token: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, nullable=False)
+    expires_at: Mapped[float] = mapped_column(Float, nullable=False)
+    revoked_at: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    @property
+    def expired(self) -> bool:
+        """是否已过期。"""
+        return self.expires_at < time.time()
+
+    @property
+    def revoked(self) -> bool:
+        """是否已被吊销。"""
+        return self.revoked_at is not None
+
+    @property
+    def active(self) -> bool:
+        """是否仍可使用：未吊销且未过期。"""
+        return not self.revoked and not self.expired
+
+    def revoke(self, when: Optional[float] = None) -> None:
+        """标记吊销；重复吊销保持第一次的时间不被覆盖。"""
+        if self.revoked_at is None:
+            self.revoked_at = time.time() if when is None else float(when)
+
+    def to_dict(self) -> dict:
+        return {
+            "user_id": self.user_id,
+            "expires_at": self.expires_at,
+            "revoked_at": self.revoked_at,
+        }

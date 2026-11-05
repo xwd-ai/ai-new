@@ -5,8 +5,8 @@
   {error, error_code, error_detail?} 响应，接口内不拼装错误字典；
 - 登录沿用既有契约：失败也返回 200，token 为空串、user 为空对象，
   前端据此区分「凭证错误」与「接口异常」；
-- 登录成功返回的是签名的 access token，附带令牌类型与有效期，
-  失败分支不返回这些字段，响应体与旧契约完全一致。
+- 登录成功返回签名的 access token 与长期 refresh token，附带各自的
+  有效期，失败分支不返回这些字段，响应体与旧契约完全一致。
 """
 
 from fastapi import APIRouter, Header, Request
