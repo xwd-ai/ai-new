@@ -11,6 +11,9 @@
   在令牌校验链路接管前保持兼容，令牌到期时间与会话记录保持一致；
 - 令牌校验按「结构 → 算法 → 签名 → 声明」四层逐级收口，任何一层不通过都抛
   TokenError 派生异常，错误码稳定可供客户端分支，校验本身不查库、不依赖会话表；
+- 有效期、时钟偏差与签名密钥都来自环境变量（AI_NEW_JWT_TTL / AI_NEW_JWT_LEEWAY /
+  AI_NEW_JWT_SECRET），调用时解析而非 import 时定死；配置缺失或取值非法时
+  告警并回退默认值，不会因为一处配置写错就让服务起不来；
 - 接口层取当前用户统一走 resolve_authorization：签名令牌校验通过后按 sub 回库取
   用户，用户信息始终以库为准；单段旧会话令牌在过渡期内仍可解析，不受影响。
 
@@ -342,36 +345,106 @@ def authenticate(username: str, password: str) -> Optional[dict]:
 # 签名只依赖标准库的 HMAC-SHA256 与 base64url，不额外引入运行时依赖。
 # 载荷只放鉴权必需的声明：身份信息靠 sub 回库取，令牌不承担用户快照的职责，
 # 改名、改角色这类变更下次请求即生效，不必等令牌过期。
+#
+# 有效期、时钟偏差与签名密钥都取自环境变量，且都在调用时解析而不是 import 时定死：
+# 换配置只需重启进程，不必改代码；同一进程内切换配置也能立刻生效，便于验证。
 
 JWT_ALGORITHM = "HS256"
 JWT_ISSUER = "ai-new"
 JWT_AUDIENCE = "ai-new-web"
-JWT_ACCESS_TTL = 30 * 60  # access token 有效期：30 分钟
+JWT_ACCESS_TTL = 30 * 60  # access token 默认有效期：30 分钟
+JWT_CLOCK_LEEWAY = 30  # 默认时钟偏差余量（秒）
 JWT_SECRET_ENV = "AI_NEW_JWT_SECRET"
+JWT_TTL_ENV = "AI_NEW_JWT_TTL"
+JWT_LEEWAY_ENV = "AI_NEW_JWT_LEEWAY"
 JWT_SECRET_MIN_BYTES = 32
 TOKEN_TYPE_ACCESS = "access"
+
+# 有效期允许区间：太短会让客户端频繁换发，太长则放大令牌泄露后的影响面
+JWT_TTL_MIN = 60  # 1 分钟
+JWT_TTL_MAX = 7 * 24 * 3600  # 7 天
+
+# 时钟偏差上限：足够容忍正常的对时误差，又不至于让过期令牌长期可用
+JWT_LEEWAY_MAX = 300
 
 # 未配置环境变量时的本地开发密钥：固定值让重启后已签发的令牌仍可校验，
 # 但只能用于本地调试，生产环境必须通过 JWT_SECRET_ENV 覆盖
 _DEV_JWT_SECRET = "ai-new-dev-secret-change-me-before-deploy"
 
+# 已读过的密钥按原文缓存编码结果：同一份配置只告警一次，重复签发不重复编码
+_secret_cache: dict[str, bytes] = {}
+_SECRET_CACHE_LIMIT = 8
 
-def _resolve_jwt_secret() -> bytes:
-    """读取签名密钥：优先环境变量，缺省回退开发密钥并给出告警。"""
-    raw = (os.environ.get(JWT_SECRET_ENV) or "").strip()
+
+def _env_text(name: str) -> str:
+    """读取环境变量并去掉首尾空白，未设置或全为空白时返回空串。"""
+    return (os.environ.get(name) or "").strip()
+
+
+def _env_seconds(name: str, default: int, minimum: int, maximum: int) -> int:
+    """读取以秒为单位的配置项，取值不合法时告警并按默认值处理。
+
+    只接受纯数字：写成 30m、1h 这类带单位的文本按非法值处理，
+    避免换算口径在配置与代码之间对不齐。超出允许区间同样回退默认值，
+    不让一次手误把令牌有效期放到不可控的量级。
+    """
+    raw = _env_text(name)
     if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("%s=%r 不是整数，按默认值 %d 秒处理", name, raw, default)
+        return default
+    if not minimum <= value <= maximum:
         logger.warning(
-            "未配置 %s，JWT 使用内置开发密钥，仅限本地调试", JWT_SECRET_ENV
+            "%s=%d 超出允许区间 [%d, %d]，按默认值 %d 秒处理",
+            name,
+            value,
+            minimum,
+            maximum,
+            default,
         )
-        return _DEV_JWT_SECRET.encode("utf-8")
-    if len(raw.encode("utf-8")) < JWT_SECRET_MIN_BYTES:
-        logger.warning(
-            "%s 不足 %d 字节，建议换成更长的随机密钥", JWT_SECRET_ENV, JWT_SECRET_MIN_BYTES
-        )
-    return raw.encode("utf-8")
+        return default
+    return value
 
 
-_JWT_SECRET = _resolve_jwt_secret()
+def jwt_access_ttl() -> int:
+    """当前生效的 access token 有效期（秒）。"""
+    return _env_seconds(JWT_TTL_ENV, JWT_ACCESS_TTL, JWT_TTL_MIN, JWT_TTL_MAX)
+
+
+def jwt_clock_leeway() -> int:
+    """当前生效的时钟偏差余量（秒）。"""
+    return _env_seconds(JWT_LEEWAY_ENV, JWT_CLOCK_LEEWAY, 0, JWT_LEEWAY_MAX)
+
+
+def get_jwt_secret() -> bytes:
+    """读取签名密钥：优先环境变量，缺省回退开发密钥并给出告警。
+
+    每次调用都重新读环境变量，因此改配置后下一次签发即生效；
+    编码结果按密钥原文缓存，同一份配置不会被反复告警或反复编码。
+    """
+    raw = _env_text(JWT_SECRET_ENV)
+    key = raw or _DEV_JWT_SECRET
+    cached = _secret_cache.get(key)
+    if cached is not None:
+        return cached
+
+    if not raw:
+        logger.warning("未配置 %s，JWT 使用内置开发密钥，仅限本地调试", JWT_SECRET_ENV)
+    elif len(key.encode("utf-8")) < JWT_SECRET_MIN_BYTES:
+        logger.warning(
+            "%s 不足 %d 字节，建议换成更长的随机密钥",
+            JWT_SECRET_ENV,
+            JWT_SECRET_MIN_BYTES,
+        )
+
+    secret = key.encode("utf-8")
+    if len(_secret_cache) >= _SECRET_CACHE_LIMIT:
+        _secret_cache.clear()
+    _secret_cache[key] = secret
+    return secret
 
 
 def _b64url_encode(raw: bytes) -> str:
@@ -398,14 +471,13 @@ def sign_jwt(payload: dict, secret: Optional[bytes] = None) -> str:
     """
     header = {"alg": JWT_ALGORITHM, "typ": "JWT"}
     segments = f"{_b64url_encode(_compact_json(header))}.{_b64url_encode(_compact_json(payload))}"
-    key = _JWT_SECRET if secret is None else secret
-    signature = _sign(segments, key)
+    signature = _sign(segments, get_jwt_secret() if secret is None else secret)
     return f"{segments}.{_b64url_encode(signature)}"
 
 
 def build_access_payload(
     user: dict,
-    ttl: int = JWT_ACCESS_TTL,
+    ttl: Optional[int] = None,
     issued_at: Optional[int] = None,
 ) -> dict:
     """按 access token 的声明约定构造载荷。
@@ -415,11 +487,16 @@ def build_access_payload(
     username/role 供鉴权与日志直接取用，不做权限判定以外的业务用途；
     iat/nbf/exp 为秒级时间戳，nbf 与 iat 取同一时刻，留出后续加宽时钟偏差的余地；
     jti 为一次性标识，为将来的吊销名单预留锚点；typ 区分令牌用途。
+
+    ttl 不传时取当前配置的有效期，调用方显式给值则按给的算，
+    便于为个别场景（如内部联调）签发短时令牌。
     """
     if not isinstance(user, dict) or not user.get("id") or not user.get("username"):
         raise TokenSigningError("用户信息缺少签发令牌所需的字段")
-    if ttl <= 0:
-        raise TokenSigningError("令牌有效期必须为正数")
+
+    lifetime = jwt_access_ttl() if ttl is None else ttl
+    if isinstance(lifetime, bool) or not isinstance(lifetime, int) or lifetime <= 0:
+        raise TokenSigningError("令牌有效期必须为正整数")
 
     now = int(time.time()) if issued_at is None else int(issued_at)
     return {
@@ -431,26 +508,30 @@ def build_access_payload(
         "typ": TOKEN_TYPE_ACCESS,
         "iat": now,
         "nbf": now,
-        "exp": now + int(ttl),
+        "exp": now + lifetime,
         "jti": uuid.uuid4().hex,
     }
 
 
-def create_access_token(user: dict, ttl: int = JWT_ACCESS_TTL) -> str:
+def create_access_token(user: dict, ttl: Optional[int] = None) -> str:
     """为已通过校验的用户签发 access token。"""
     return sign_jwt(build_access_payload(user, ttl=ttl))
 
 
 def describe_jwt_config() -> dict:
-    """返回当前生效的签发参数，供健康检查与排障读取，不含密钥内容。"""
+    """返回当前生效的签发参数，供健康检查与排障读取，不含密钥内容。
+
+    只回密钥来源与长度是否达标，不回密钥本身，也不回具体长度，
+    避免从配置信息反推出密钥规模。
+    """
     return {
         "algorithm": JWT_ALGORITHM,
         "issuer": JWT_ISSUER,
         "audience": JWT_AUDIENCE,
-        "access_ttl": JWT_ACCESS_TTL,
-        "secret_source": (
-            JWT_SECRET_ENV if (os.environ.get(JWT_SECRET_ENV) or "").strip() else "dev-default"
-        ),
+        "access_ttl": jwt_access_ttl(),
+        "clock_leeway": jwt_clock_leeway(),
+        "secret_source": JWT_SECRET_ENV if _env_text(JWT_SECRET_ENV) else "dev-default",
+        "secret_length_ok": len(get_jwt_secret()) >= JWT_SECRET_MIN_BYTES,
     }
 
 
@@ -459,9 +540,8 @@ def describe_jwt_config() -> dict:
 # 校验顺序刻意由外到内：先确认三段结构可解析，再看头部声明的算法，
 # 然后比对签名，最后才读载荷里的声明。前一步不通过就不进入下一步，
 # 保证「签名未验证的载荷」不会被当作可信数据读取或回显。
-# 时效判定留出 JWT_CLOCK_LEEWAY 秒余量，签发方与校验方时钟略有偏差不算过期。
+# 时效判定留出配置的时钟偏差余量，签发方与校验方时钟略有偏差不算过期。
 
-JWT_CLOCK_LEEWAY = 30  # 允许的时钟偏差（秒）
 JWT_MAX_TOKEN_LENGTH = 4096  # 令牌长度上限，超长直接拒绝，不做无谓解码
 JWT_REQUIRED_CLAIMS = ("iss", "aud", "sub", "exp", "iat", "typ")
 
@@ -512,7 +592,7 @@ def verify_jwt_signature(token: str, secret: Optional[bytes] = None) -> bool:
         header_segment, payload_segment, signature_segment = _split_token(token)
         expected = _sign(
             f"{header_segment}.{payload_segment}",
-            _JWT_SECRET if secret is None else secret,
+            get_jwt_secret() if secret is None else secret,
         )
         actual = _b64url_decode(signature_segment)
     except (TokenError, binascii.Error, ValueError, UnicodeDecodeError):
@@ -557,7 +637,7 @@ def decode_jwt(
     secret: Optional[bytes] = None,
     *,
     now: Optional[int] = None,
-    leeway: int = JWT_CLOCK_LEEWAY,
+    leeway: Optional[int] = None,
     expected_issuer: Optional[str] = JWT_ISSUER,
     expected_audience: Optional[str] = JWT_AUDIENCE,
     expected_type: Optional[str] = TOKEN_TYPE_ACCESS,
@@ -568,8 +648,10 @@ def decode_jwt(
     expected_* 传 None 表示不校验该项，供签发侧自检或跨用途解析时放宽；
     verify_expiry=False 只跳过时效判定，签名与声明仍然校验，用于排查刚过期的令牌。
     now 显式传入时按该时间戳判定时效，便于测试与回溯。
+    leeway 不传时取当前配置的时钟偏差，显式给值则按给的算。
     """
-    if isinstance(leeway, bool) or not isinstance(leeway, int) or leeway < 0:
+    tolerance = jwt_clock_leeway() if leeway is None else leeway
+    if isinstance(tolerance, bool) or not isinstance(tolerance, int) or tolerance < 0:
         raise ValueError("leeway 必须是非负整数")
 
     header_segment, payload_segment, signature_segment = _split_token(token)
@@ -578,7 +660,7 @@ def decode_jwt(
 
     expected_signature = _sign(
         f"{header_segment}.{payload_segment}",
-        _JWT_SECRET if secret is None else secret,
+        get_jwt_secret() if secret is None else secret,
     )
     try:
         actual_signature = _b64url_decode(signature_segment)
@@ -607,10 +689,10 @@ def decode_jwt(
 
     if verify_expiry:
         current = int(time.time()) if now is None else int(now)
-        if current - leeway >= expires_at:
+        if current - tolerance >= expires_at:
             raise TokenExpiredError("令牌已过期", {"expired_at": expires_at})
         not_before = _timestamp_claim(claims, "nbf") if "nbf" in claims else issued_at
-        if current + leeway < max(not_before, issued_at):
+        if current + tolerance < max(not_before, issued_at):
             raise TokenNotYetValidError("令牌尚未生效", {"not_before": not_before})
 
     return claims
@@ -734,11 +816,12 @@ def _record_session(user: dict, token: str, expires_at: int) -> None:
         db.close()
 
 
-def issue_login_token(user: dict, ttl: int = JWT_ACCESS_TTL) -> dict:
+def issue_login_token(user: dict, ttl: Optional[int] = None) -> dict:
     """为登录成功的用户签发 access token 并登记会话。
 
     返回令牌与其有效期元信息，供接口层原样回给客户端：
     expires_in 为相对秒数（客户端用来算刷新时机），expires_at 为绝对时间戳。
+    ttl 不传时取当前配置的有效期，会话记录的到期时间与令牌保持一致。
     """
     payload = build_access_payload(user, ttl=ttl)
     token = sign_jwt(payload)
