@@ -53,6 +53,7 @@ if (typeof document !== 'undefined') {
   const token = localStorage.getItem('token') || '';
   let authorized = false;
   async function request(path, options = {}) {
+    if (!authorized && path !== '/api/me') throw new Error('登录已失效，请重新登录。');
     let response;
     try {
       response = await fetch(path, {...options,
@@ -63,6 +64,7 @@ if (typeof document !== 'undefined') {
         byId('filters').disabled = true;
         byId('ingestFields').disabled = true;
         byId('refreshPending').disabled = true;
+        savedId = null; byId('viewSaved').hidden = true;
         pending.clear();
         byId('previous').disabled = byId('next').disabled = true;
         byId('rows').replaceChildren();
@@ -87,7 +89,7 @@ if (typeof document !== 'undefined') {
     }
   }
   const browser = new KnowledgeBrowser({request,
-    onStatus: message => { byId('status').textContent = message; },
+    onStatus: message => { byId('status').textContent = authorized ? message : '登录已失效，请重新登录后加载资料。'; },
     onList: data => {
       if (!authorized) data = {items: [], total: 0};
       byId('rows').replaceChildren();
@@ -120,12 +122,13 @@ if (typeof document !== 'undefined') {
   byId('closeDetail').addEventListener('click', () => browser.closeDetail());
   let savedId = null;
   const ingest = new KnowledgeIngest({request,
-    onStatus: message => { byId('ingestStatus').textContent = message; },
+    onStatus: message => { byId('ingestStatus').textContent = authorized ? message : '登录已失效，请重新登录。输入仍保留在当前页面。'; },
     onBusy: busy => {
       byId('ingestFields').disabled = !authorized || busy;
       if (busy) { savedId = null; byId('viewSaved').hidden = true; }
     },
     onSaved: data => {
+      if (!authorized) return;
       savedId = data.knowledge_id; byId('viewSaved').hidden = false;
       browser.load();
     },
@@ -142,8 +145,8 @@ if (typeof document !== 'undefined') {
     if (authorized && savedId) browser.source(savedId);
   });
   const pending = new KnowledgeRecovery({request,
-    onStatus: message => { byId('pendingStatus').textContent = message; },
-    onResult: message => { byId('recoveryStatus').textContent = message; },
+    onStatus: message => { byId('pendingStatus').textContent = authorized ? message : '登录已失效，请重新登录后读取待恢复记录。'; },
+    onResult: message => { byId('recoveryStatus').textContent = authorized ? message : ''; },
     onRecovered: () => { if (authorized) browser.load(); },
     onBusy: busy => {
       byId('refreshPending').disabled = !authorized || busy;
