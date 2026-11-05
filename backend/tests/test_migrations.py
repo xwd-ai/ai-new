@@ -10,11 +10,46 @@ from alembic.config import Config
 from alembic.migration import MigrationContext
 
 from backend import database, models  # noqa: F401
+from backend.models.user import RefreshToken
 
 
 ROOT = Path(__file__).resolve().parents[2]
 OLD_REVISION = "d1178ec7c657"
-HEAD_REVISION = "a31d9f0276bc"
+HEAD_REVISION = "b47e2d916a08"
+
+
+def test_refresh_upgrade_preserves_precreated_records(migration_env):
+    config, connection = migration_env
+    command.upgrade(config, 'a31d9f0276bc')
+    assert not sa.inspect(connection).has_table('refresh_tokens')
+    RefreshToken.__table__.create(connection)
+    connection.execute(RefreshToken.__table__.insert(), {
+        'token': 'test-only', 'user_id': 'old-user', 'expires_at': 123.0, 'revoked_at': 100.0,
+    })
+    connection.commit()
+    command.upgrade(config, 'head')
+    command.upgrade(config, 'head')
+    assert connection.scalar(sa.text("SELECT revoked_at FROM refresh_tokens WHERE token='test-only'")) == 100.0
+    assert compare_metadata(MigrationContext.configure(connection), database.Base.metadata) == []
+
+
+def test_refresh_upgrade_rejects_incompatible_precreated_table(migration_env):
+    config, connection = migration_env
+    command.upgrade(config, 'a31d9f0276bc')
+    connection.exec_driver_sql('CREATE TABLE refresh_tokens (token INTEGER PRIMARY KEY)')
+    connection.commit()
+    with pytest.raises(RuntimeError, match='refresh_tokens 表结构不兼容'):
+        command.upgrade(config, 'head')
+    assert _version(connection) == 'a31d9f0276bc'
+    assert sa.inspect(connection).get_columns('refresh_tokens')[0]['name'] == 'token'
+
+
+def test_refresh_downgrade_refuses_to_drop_records(migration_env):
+    config, connection = migration_env
+    command.upgrade(config, 'head')
+    with pytest.raises(RuntimeError, match='不支持自动回退'):
+        command.downgrade(config, 'a31d9f0276bc')
+    assert sa.inspect(connection).has_table('refresh_tokens')
 
 
 @pytest.fixture()
@@ -38,7 +73,7 @@ def _version(connection):
 def _legacy_schema(connection, *, fingerprint=True, check=False):
     metadata = sa.MetaData()
     for table in database.Base.metadata.sorted_tables:
-        if table.name in ("knowledge_ingest_leases", "knowledge_ingest_journal"):
+        if table.name in ("knowledge_ingest_leases", "knowledge_ingest_journal", "refresh_tokens"):
             continue
         if table.name == "knowledge_docs" and not fingerprint:
             sa.Table(
