@@ -52,23 +52,31 @@ if (typeof document !== 'undefined') {
   const byId = id => document.getElementById(id);
   const token = localStorage.getItem('token') || '';
   let authorized = false;
-  async function request(path) {
+  async function request(path, options = {}) {
     let response;
     try {
-      response = await fetch(path, {headers: {Authorization: `Bearer ${token}`}, signal: AbortSignal.timeout(20000)});
+      response = await fetch(path, {...options,
+        headers: {Authorization: `Bearer ${token}`, 'Content-Type': 'application/json'},
+        signal: AbortSignal.timeout(options.method === 'POST' ? 60000 : 20000)});
       if (response.status === 401 || response.status === 403) {
         authorized = false;
         byId('filters').disabled = true;
+        byId('ingestFields').disabled = true;
         byId('previous').disabled = byId('next').disabled = true;
         byId('rows').replaceChildren();
+        browser.closeDetail();
+        byId('status').textContent = '登录已失效，请重新登录后加载资料。';
         byId('loginLink').hidden = false;
         throw new Error('登录已失效或没有管理员权限，请重新登录。');
       }
+      if (response.status === 409) throw new Error('相同资料正在处理或租约已失效，请稍后核对并重试。');
       if (!response.ok) throw new Error(response.status === 404 ? '资料不存在，请刷新列表。' :
+        response.status === 422 && options.method === 'POST' ? '入库参数不合法，请检查标题、正文、类型与关键词。' :
         response.status === 422 ? '筛选参数不合法，请检查标题和类型。' : '服务暂时不可用，请重新筛选或稍后重试。');
       return await response.json();
     } catch (error) {
-      if (error.name === 'TimeoutError' || error.name === 'AbortError') throw new Error('请求超时，请重新筛选或重试查看原文。');
+      if (error.name === 'TimeoutError' || error.name === 'AbortError') throw new Error(options.method === 'POST' ?
+        '入库请求超时，保存结果尚未确认。' : '请求超时，请重新筛选或重试查看原文。');
       if (error instanceof TypeError) throw new Error('网络连接失败，请检查连接后重试。');
       throw error;
     }
@@ -105,11 +113,34 @@ if (typeof document !== 'undefined') {
   byId('previous').addEventListener('click', () => browser.move(-1));
   byId('next').addEventListener('click', () => browser.move(1));
   byId('closeDetail').addEventListener('click', () => browser.closeDetail());
+  let savedId = null;
+  const ingest = new KnowledgeIngest({request,
+    onStatus: message => { byId('ingestStatus').textContent = message; },
+    onBusy: busy => {
+      byId('ingestFields').disabled = !authorized || busy;
+      if (busy) { savedId = null; byId('viewSaved').hidden = true; }
+    },
+    onSaved: data => {
+      savedId = data.knowledge_id; byId('viewSaved').hidden = false;
+      browser.load();
+    },
+  });
+  byId('ingestForm').addEventListener('submit', event => {
+    event.preventDefault();
+    if (authorized) ingest.submit({title: byId('ingestTitle').value, content: byId('ingestContent').value,
+      kind: byId('ingestKind').value, keywords: byId('ingestKeywords').value});
+  });
+  byId('ingestForm').addEventListener('input', () => {
+    savedId = null; byId('viewSaved').hidden = true;
+  });
+  byId('viewSaved').addEventListener('click', () => {
+    if (authorized && savedId) browser.source(savedId);
+  });
   (async () => {
     try {
       const identity = await request('/api/me');
       if (!identity.user || identity.user.role !== 'admin') throw new Error('仅管理员可以浏览资料列表，请登录管理员账号。');
-      authorized = true; byId('filters').disabled = false;
+      authorized = true; byId('filters').disabled = byId('ingestFields').disabled = false;
       byId('access').textContent = `管理员：${identity.user.name || identity.user.username}`;
       await browser.search('', '');
     } catch (error) {

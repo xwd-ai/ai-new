@@ -15,7 +15,11 @@
     p { margin:8px 0 16px; } .muted { color:var(--muted); }
     fieldset { border:0; padding:0; margin:24px 0 16px; display:flex; align-items:end; gap:16px; flex-wrap:wrap; }
     label { display:grid; gap:6px; font-weight:600; } .title-field { flex:1; min-width:180px; }
-    input,select,button { font:inherit; padding:10px 12px; border:1px solid var(--border); border-radius:8px; background:white; color:var(--text); }
+    input,select,textarea,button { font:inherit; padding:10px 12px; border:1px solid var(--border); border-radius:8px; background:white; color:var(--text); }
+    textarea { width:100%; resize:vertical; } details { margin:20px 0; } summary { cursor:pointer; font-weight:600; }
+    #ingestFields { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); }
+    #ingestFields input { min-width:0; width:100%; }
+    .full { grid-column:1/-1; } #ingestStatus { overflow-wrap:anywhere; }
     button { cursor:pointer; } button.primary { background:var(--primary); border-color:var(--primary); color:#fff; }
     button:disabled,fieldset:disabled { opacity:.55; cursor:not-allowed; }
     :focus-visible { outline:3px solid #a7b5ff; outline-offset:3px; }
@@ -28,6 +32,7 @@
     .detail-head { margin-top:0; } pre { white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; border-top:1px solid var(--border); padding-top:20px; }
     [hidden] { display:none !important; }
     @media(max-width:800px) { .workspace { grid-template-columns:1fr; } main { padding:24px 16px; } }
+    @media(max-width:500px) { #ingestFields { grid-template-columns:minmax(0,1fr); } }
   </style>
 </head>
 <body>
@@ -37,6 +42,19 @@
     <p class="muted">按标题与类型查找资料，查看回答所依据的原文。</p>
     <p id="access" role="status">正在核对管理员身份…</p>
     <p id="loginLink" hidden><a href="/login">前往登录</a></p>
+    <details class="panel">
+      <summary>添加文本资料</summary>
+      <p class="muted">粘贴手册、常见问题或规则正文。相同标题与正文重复提交会返回已有资料。</p>
+      <form id="ingestForm"><fieldset id="ingestFields" disabled>
+        <label>资料标题<input id="ingestTitle" maxlength="200" required /></label>
+        <label>入库类型<select id="ingestKind"><option value="manual">手册</option><option value="faq">FAQ</option><option value="rule">规则</option></select></label>
+        <label class="full">资料正文<textarea id="ingestContent" rows="7" maxlength="100000" required></textarea></label>
+        <label class="full">关键词（可选）<textarea id="ingestKeywords" rows="2" placeholder="逗号或换行分隔，最多 20 个；留空自动提取"></textarea></label>
+        <div class="full"><button class="primary">提交入库</button></div>
+      </fieldset></form>
+      <p id="ingestStatus" role="status" aria-live="polite">提交后保留输入，方便核对或修改；不会自动重复提交。</p>
+      <button id="viewSaved" type="button" hidden>查看入库原文</button>
+    </details>
     <form id="searchForm"><fieldset id="filters" disabled>
       <label class="title-field">标题包含<input id="title" maxlength="200" placeholder="例如：导出 FAQ" /></label>
       <label>资料类型<select id="kind"><option value="">全部类型</option value="manual">手册</option><option value="faq">FAQ</option><option value="rule">规则</option></select></label>
@@ -55,6 +73,7 @@
       </section>
     </div>
   </main>
+  <script src="/assets/knowledge-ingest.js" defer></script>
   <script src="/assets/knowledge-browser.js" defer></script>
 </body>
 </html>
