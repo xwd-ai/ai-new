@@ -9,6 +9,8 @@
 - 登录成功后签发 JWT（HS256 紧凑格式，载荷只带鉴权必需的声明），
   同时把该令牌登记到 sessions 表：既有解析路径按令牌原文查会话，
   在令牌校验链路接管前保持兼容，令牌到期时间与会话记录保持一致；
+- 登录同时签发长期 refresh token（typ=refresh，默认 30 天）并登记
+  refresh_tokens 表，支持按条吊销；两类令牌同一密钥，typ 互斥、不能互相顶替；
 - 令牌校验按「结构 → 算法 → 签名 → 声明」四层逐级收口，任何一层不通过都抛
   TokenError 派生异常，错误码稳定可供客户端分支，校验本身不查库、不依赖会话表；
 - 有效期、时钟偏差与签名密钥都来自环境变量（AI_NEW_JWT_TTL / AI_NEW_JWT_LEEWAY /
@@ -37,6 +39,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from backend.database import SessionLocal
 from backend.models import Session, User
+from backend.models.user import RefreshToken
 from backend.services.password import MAX_PASSWORD_BYTES, PasswordHashError, verify_password
 
 logger = logging.getLogger(__name__)
@@ -359,10 +362,18 @@ JWT_TTL_ENV = "AI_NEW_JWT_TTL"
 JWT_LEEWAY_ENV = "AI_NEW_JWT_LEEWAY"
 JWT_SECRET_MIN_BYTES = 32
 TOKEN_TYPE_ACCESS = "access"
+TOKEN_TYPE_REFRESH = "refresh"
 
 # 有效期允许区间：太短会让客户端频繁换发，太长则放大令牌泄露后的影响面
 JWT_TTL_MIN = 60  # 1 分钟
 JWT_TTL_MAX = 7 * 24 * 3600  # 7 天
+
+# refresh token 有效期单独配置：默认按天计的长期凭证，区间比 access 宽，
+# 但也设上限，不让一次配置失误把续期凭证放到不可控的年限
+JWT_REFRESH_TTL = 30 * 24 * 3600  # refresh token 默认有效期：30 天
+JWT_REFRESH_TTL_ENV = "AI_NEW_JWT_REFRESH_TTL"
+JWT_REFRESH_TTL_MIN = 3600  # 1 小时
+JWT_REFRESH_TTL_MAX = 180 * 24 * 3600  # 180 天
 
 # 时钟偏差上限：足够容忍正常的对时误差，又不至于让过期令牌长期可用
 JWT_LEEWAY_MAX = 300
@@ -412,6 +423,13 @@ def _env_seconds(name: str, default: int, minimum: int, maximum: int) -> int:
 def jwt_access_ttl() -> int:
     """当前生效的 access token 有效期（秒）。"""
     return _env_seconds(JWT_TTL_ENV, JWT_ACCESS_TTL, JWT_TTL_MIN, JWT_TTL_MAX)
+
+
+def jwt_refresh_ttl() -> int:
+    """当前生效的 refresh token 有效期（秒）。"""
+    return _env_seconds(
+        JWT_REFRESH_TTL_ENV, JWT_REFRESH_TTL, JWT_REFRESH_TTL_MIN, JWT_REFRESH_TTL_MAX
+    )
 
 
 def jwt_clock_leeway() -> int:
@@ -518,6 +536,46 @@ def create_access_token(user: dict, ttl: Optional[int] = None) -> str:
     return sign_jwt(build_access_payload(user, ttl=ttl))
 
 
+def build_refresh_payload(
+    user: dict,
+    ttl: Optional[int] = None,
+    issued_at: Optional[int] = None,
+) -> dict:
+    """按 refresh token 的声明约定构造载荷。
+
+    声明与 access token 保持同一套结构，仅 typ 与有效期不同：
+    typ 固定 refresh，与 access 互斥，两类令牌不能互相顶替；
+    有效期默认取长期配置（30 天量级），仍可显式传 ttl 覆盖。
+    username / role 只作日志与展示参考，刷新换发时一律按 sub 回库取用户，
+    不依赖载荷里的快照。
+    """
+    if not isinstance(user, dict) or not user.get("id") or not user.get("username"):
+        raise TokenSigningError("用户信息缺少签发令牌所需的字段")
+
+    lifetime = jwt_refresh_ttl() if ttl is None else ttl
+    if isinstance(lifetime, bool) or not isinstance(lifetime, int) or lifetime <= 0:
+        raise TokenSigningError("令牌有效期必须为正整数")
+
+    now = int(time.time()) if issued_at is None else int(issued_at)
+    return {
+        "iss": JWT_ISSUER,
+        "aud": JWT_AUDIENCE,
+        "sub": user["id"],
+        "username": user["username"],
+        "role": user.get("role") or "customer",
+        "typ": TOKEN_TYPE_REFRESH,
+        "iat": now,
+        "nbf": now,
+        "exp": now + lifetime,
+        "jti": uuid.uuid4().hex,
+    }
+
+
+def create_refresh_token(user: dict, ttl: Optional[int] = None) -> str:
+    """为已通过校验的用户签发 refresh token（只签名，不落库）。"""
+    return sign_jwt(build_refresh_payload(user, ttl=ttl))
+
+
 def describe_jwt_config() -> dict:
     """返回当前生效的签发参数，供健康检查与排障读取，不含密钥内容。
 
@@ -529,6 +587,7 @@ def describe_jwt_config() -> dict:
         "issuer": JWT_ISSUER,
         "audience": JWT_AUDIENCE,
         "access_ttl": jwt_access_ttl(),
+        "refresh_ttl": jwt_refresh_ttl(),
         "clock_leeway": jwt_clock_leeway(),
         "secret_source": JWT_SECRET_ENV if _env_text(JWT_SECRET_ENV) else "dev-default",
         "secret_length_ok": len(get_jwt_secret()) >= JWT_SECRET_MIN_BYTES,
@@ -817,20 +876,26 @@ def _record_session(user: dict, token: str, expires_at: int) -> None:
 
 
 def issue_login_token(user: dict, ttl: Optional[int] = None) -> dict:
-    """为登录成功的用户签发 access token 并登记会话。
+    """为登录成功的用户签发 access token 与 refresh token，并登记会话。
 
-    返回令牌与其有效期元信息，供接口层原样回给客户端：
-    expires_in 为相对秒数（客户端用来算刷新时机），expires_at 为绝对时间戳。
-    ttl 不传时取当前配置的有效期，会话记录的到期时间与令牌保持一致。
+    返回两类令牌及其有效期元信息，供接口层原样回给客户端：
+    expires_in 为相对秒数（客户端用来算刷新时机），expires_at 为绝对时间戳；
+    refresh_* 三段是长期续期凭证，落库支持按条吊销。
+    ttl 只作用于 access token，refresh token 有效期独立取长期配置；
+    会话记录的到期时间与 access token 保持一致。
     """
     payload = build_access_payload(user, ttl=ttl)
     token = sign_jwt(payload)
     _record_session(user, token, payload["exp"])
+    refresh = issue_refresh_token(user)
     return {
         "token": token,
         "token_type": "Bearer",
         "expires_in": payload["exp"] - payload["iat"],
         "expires_at": payload["exp"],
+        "refresh_token": refresh["token"],
+        "refresh_expires_in": refresh["expires_in"],
+        "refresh_expires_at": refresh["expires_at"],
     }
 
 
@@ -848,6 +913,62 @@ def get_session(token: str) -> Optional[dict]:
             db.commit()
             return None
         return s.to_dict()
+    finally:
+        db.close()
+
+
+# ---- Refresh token 签发与吊销 ----
+#
+# 与 access token 同一密钥、同一签发器，只是 typ 与有效期不同：
+# typ=refresh 让它不能当 access token 用（verify_access_token 只认 typ=access），
+# 有效期按天计，密码只在首次登录时输入，之后靠它换发短期 access token。
+# 落库登记是为了可撤销：登出或异常时把记录标记 revoked，
+# 被吊销的令牌即使未过期、签名完好也不能再换发。
+
+
+def _record_refresh_token(user_id: str, token: str, expires_at: int) -> None:
+    """把已签发的 refresh token 登记入库，供后续吊销与清理。"""
+    db = SessionLocal()
+    try:
+        db.add(RefreshToken(token=token, user_id=user_id, expires_at=expires_at))
+        db.commit()
+    finally:
+        db.close()
+
+
+def issue_refresh_token(user: dict, ttl: Optional[int] = None) -> dict:
+    """为登录成功的用户签发 refresh token 并登记吊销记录。
+
+    返回形态与 access 签发一致：令牌原文、类型与有效期元信息。
+    ttl 不传时取长期默认配置；登记记录的到期时间与令牌 exp 保持一致。
+    """
+    payload = build_refresh_payload(user, ttl=ttl)
+    token = sign_jwt(payload)
+    _record_refresh_token(payload["sub"], token, payload["exp"])
+    return {
+        "token": token,
+        "token_type": "Bearer",
+        "expires_in": payload["exp"] - payload["iat"],
+        "expires_at": payload["exp"],
+    }
+
+
+def revoke_refresh_token(token: str) -> bool:
+    """吊销一条 refresh token：标记 revoked_at，未过期也不再可用。
+
+    令牌原文不存在时返回 False；存在则标记吊销并返回 True。
+    重复吊销保持首次时间，返回值仍为 True（已是吊销状态，语义幂等）。
+    """
+    if not isinstance(token, str) or not token.strip():
+        return False
+    db = SessionLocal()
+    try:
+        record = db.query(RefreshToken).filter(RefreshToken.token == token.strip()).first()
+        if not record:
+            return False
+        record.revoke()
+        db.commit()
+        return True
     finally:
         db.close()
 

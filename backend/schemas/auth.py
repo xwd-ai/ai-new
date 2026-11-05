@@ -13,7 +13,8 @@ class LoginResponse(BaseModel):
 
     token_type / expires_in / expires_at 只在登录成功时出现（失败时为 null，
     由接口层按「不输出空字段」序列化），因此凭证错误场景的响应体仍是
-    {"token": "", "user": {}} 这一既有形态。
+    {"token": "", "user": {}} 这一既有形态。refresh_token 及其有效期同理，
+    失败分支不返回任何续期字段。
     """
 
     token: str
@@ -21,6 +22,9 @@ class LoginResponse(BaseModel):
     token_type: Optional[str] = Field(default=None, description="令牌类型，固定 Bearer")
     expires_in: Optional[int] = Field(default=None, description="令牌剩余有效秒数")
     expires_at: Optional[int] = Field(default=None, description="令牌到期时间戳（秒）")
+    refresh_token: Optional[str] = Field(default=None, description="续期用的长期令牌")
+    refresh_expires_in: Optional[int] = Field(default=None, description="refresh token 剩余有效秒数")
+    refresh_expires_at: Optional[int] = Field(default=None, description="refresh token 到期时间戳（秒）")
 
 
 class RegisterRequest(BaseModel):
