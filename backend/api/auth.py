@@ -70,9 +70,10 @@ def register(req: RegisterRequest):
 
 @auth_router.get("/me")
 def me(authorization: str = Header(default="")):
-    token = authorization.replace("Bearer ", "").strip()
-    session = auth.get_session(token)
-    if not session:
-        return {"user": None}
-    user = auth.find_by_username(session["username"])
+    """返回当前登录用户；令牌缺失或校验失败时 user 为 null。
+
+    身份取自令牌声明并经回库确认，账号被删除后旧令牌即失效，
+    不会因为令牌仍在有效期内而返回一个已不存在的用户。
+    """
+    user = auth.resolve_authorization(authorization)
     return {"user": auth.public_user(user) if user else None}

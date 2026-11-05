@@ -63,12 +63,12 @@ tickets_router = APIRouter(route_class=TicketErrorRoute)
 
 
 def _current_user(authorization: str):
-    """按 Authorization 头解析当前登录用户，令牌无效或会话过期时返回 None。"""
-    token = authorization.replace("Bearer ", "").strip()
-    session = auth.get_session(token)
-    if not session:
-        return None
-    return auth.find_by_username(session["username"])
+    """按 Authorization 头解析当前登录用户，令牌缺失、无效或过期时返回 None。
+
+    解析由认证服务统一完成：签名令牌校验通过后回库取用户，
+    接口层不关心令牌是签名串还是过渡期的旧会话令牌。
+    """
+    return auth.resolve_authorization(authorization)
 
 
 def _require_user(authorization: str, admin_only: bool = False) -> dict:

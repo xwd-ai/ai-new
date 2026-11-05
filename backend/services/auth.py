@@ -10,7 +10,9 @@
   同时把该令牌登记到 sessions 表：既有解析路径按令牌原文查会话，
   在令牌校验链路接管前保持兼容，令牌到期时间与会话记录保持一致；
 - 令牌校验按「结构 → 算法 → 签名 → 声明」四层逐级收口，任何一层不通过都抛
-  TokenError 派生异常，错误码稳定可供客户端分支，校验本身不查库、不依赖会话表。
+  TokenError 派生异常，错误码稳定可供客户端分支，校验本身不查库、不依赖会话表；
+- 接口层取当前用户统一走 resolve_authorization：签名令牌校验通过后按 sub 回库取
+  用户，用户信息始终以库为准；单段旧会话令牌在过渡期内仍可解析，不受影响。
 
 明文密码只作为 authenticate / register_user 的入参存在，不落库、不进日志、不随用户信息返回。
 """
@@ -637,11 +639,82 @@ def extract_bearer_token(authorization: Optional[str]) -> str:
     return token
 
 
+# ---- 请求身份解析：以签名令牌为准，旧会话令牌只作过渡 ----
+#
+# 接口层只调用 resolve_authorization，不必关心令牌是哪种形态。
+# 身份一律回库取：令牌自带的 username / role 只说明签发时刻的状态，
+# 改名、调角色之后下一次请求就该生效，权限判定不能建立在令牌快照上。
+
+
+def find_by_id(user_id: Optional[str]) -> Optional[dict]:
+    """按用户 id 查询可公开的用户信息，不存在返回 None。"""
+    if not user_id:
+        return None
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+        return _account(user) if user else None
+    finally:
+        db.close()
+
+
+def _is_signed_token(token: str) -> bool:
+    """是否为三段式签名令牌；旧版会话令牌是单段随机串，不含分隔点。"""
+    return token.count(".") == 2
+
+
+def _user_from_claims(claims: dict) -> Optional[dict]:
+    """按令牌声明的 sub 回库取用户，账号已不存在时返回 None。"""
+    return find_by_id(claims.get("sub"))
+
+
+def resolve_token(token: str) -> Optional[dict]:
+    """解析令牌对应的当前用户，无法确认身份时返回 None。
+
+    签名令牌先过 verify_access_token（结构、算法、签名、时效、声明），
+    任一层不通过都直接判为未登录，不再回落会话表：伪造或过期的令牌
+    没有第二条通道可走。单段令牌按旧版会话令牌查会话表，只服务尚未
+    换发新令牌的客户端，待令牌全面换发后可整段移除。
+    """
+    if not isinstance(token, str) or not token.strip():
+        return None
+    value = token.strip()
+    if _is_signed_token(value):
+        try:
+            claims = verify_access_token(value)
+        except TokenError:
+            return None
+        return _user_from_claims(claims)
+
+    session = get_session(value)
+    if not session:
+        return None
+    return _user_from_claims({"sub": session.get("user_id")}) or find_by_username(
+        session.get("username")
+    )
+
+
+def resolve_authorization(authorization: Optional[str]) -> Optional[dict]:
+    """从 Authorization 头解析当前用户，未携带、格式不对或校验失败返回 None。
+
+    标准写法是 Bearer <token>；只给令牌原文也接受，兼容手工调试与旧客户端。
+    失败一律返回 None 而不抛异常，由接口层按自己的语义处理——
+    工单接口据此报未登录，页面与对话接口则退化成匿名访问。
+    """
+    try:
+        token = extract_bearer_token(authorization)
+    except TokenMissingError:
+        return None
+    except TokenMalformedError:
+        token = (authorization or "").strip()
+    return resolve_token(token)
+
+
 def _record_session(user: dict, token: str, expires_at: int) -> None:
     """把已签发的令牌登记为一条会话记录。
 
-    令牌本身自包含身份与有效期，这里登记是为了让既有按令牌查会话的解析路径
-    （/api/me、工单、对话等）在令牌校验链路接管之前继续可用；
+    令牌本身自包含身份与有效期，这里登记是为了让仍按令牌查会话的路径
+    （对话链路）继续可用：登录一次，两条解析路径都能拿到同一份登录态。
     记录的到期时间取自令牌的 exp，两条路径不会各自算出一套过期时间。
     """
     db = SessionLocal()
