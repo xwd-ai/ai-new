@@ -118,6 +118,41 @@ class Session(Base):
         return self.expires_at < time.time()
 
 
+class RevokedToken(Base):
+    """已作废令牌的登记记录。
+
+    访问令牌自包含身份与有效期，不依赖会话表，签发后到过期前一直可用；
+    登出要让它在剩余有效期内立刻失效，只能留一份「已作废」的凭据。
+    记录按令牌的 jti 索引：jti 每次签发唯一、长度固定，比存令牌原文省空间，
+    也不会随令牌变长而膨胀。记录只需保留到令牌自身到期，
+    过期之后令牌本来就会被时效校验拒掉，早期记录可以整批清掉。
+    """
+
+    __tablename__ = "revoked_tokens"
+
+    jti: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    token_type: Mapped[str] = mapped_column(String, nullable=False)  # access / refresh
+    expires_at: Mapped[float] = mapped_column(Float, nullable=False)
+    revoked_at: Mapped[float] = mapped_column(Float, nullable=False)
+    reason: Mapped[str] = mapped_column(String, nullable=False, default="")
+
+    @property
+    def expired(self) -> bool:
+        """令牌本身是否已过期：过期后这条记录不再有拦截作用。"""
+        return self.expires_at < time.time()
+
+    def to_dict(self) -> dict:
+        return {
+            "jti": self.jti,
+            "user_id": self.user_id,
+            "token_type": self.token_type,
+            "expires_at": self.expires_at,
+            "revoked_at": self.revoked_at,
+            "reason": self.reason,
+        }
+
+
 class RefreshToken(Base):
     """refresh token 登记记录：长期令牌的每一次签发都落一行，支撑按条吊销。
 

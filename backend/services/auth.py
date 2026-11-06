@@ -13,6 +13,8 @@
   refresh_tokens 表，支持按条吊销；两类令牌同一密钥，typ 互斥、不能互相顶替；
 - 访问令牌过期后由 refresh token 换发：签名合格之外还要求登记记录未吊销、
   未过期且主体一致，换发只重签访问令牌、不延长续期凭证自身的寿命；
+- 登出把当前访问令牌的 jti 记入 revoked_tokens 黑名单，同时删除对应的会话记录，
+  并可选吊销客户端一并提交的续期令牌；此后该令牌即使未过期也一律判为未登录；
 - 令牌校验按「结构 → 算法 → 签名 → 声明」四层逐级收口，任何一层不通过都抛
   TokenError 派生异常，错误码稳定可供客户端分支，校验本身不查库、不依赖会话表；
 - 有效期、时钟偏差与签名密钥都来自环境变量（AI_NEW_JWT_TTL / AI_NEW_JWT_LEEWAY /
@@ -41,7 +43,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from backend.database import SessionLocal
 from backend.models import Session, User
-from backend.models.user import RefreshToken
+from backend.models.user import RefreshToken, RevokedToken
 from backend.services.password import MAX_PASSWORD_BYTES, PasswordHashError, verify_password
 
 logger = logging.getLogger(__name__)
@@ -856,8 +858,9 @@ def resolve_token(token: str) -> Optional[dict]:
 
     签名令牌先过 verify_access_token（结构、算法、签名、时效、声明），
     任一层不通过都直接判为未登录，不再回落会话表：伪造或过期的令牌
-    没有第二条通道可走。单段令牌按旧版会话令牌查会话表，只服务尚未
-    换发新令牌的客户端，待令牌全面换发后可整段移除。
+    没有第二条通道可走。通过后再查一次黑名单，登出过的令牌在这一步被拦下——
+    签名仍合格、也未到期，但已经不该再代表任何人。单段令牌按旧版会话令牌
+    查会话表，只服务尚未换发新令牌的客户端，待令牌全面换发后可整段移除。
     """
     if not isinstance(token, str) or not token.strip():
         return None
@@ -866,6 +869,8 @@ def resolve_token(token: str) -> Optional[dict]:
         try:
             claims = verify_access_token(value)
         except TokenError:
+            return None
+        if is_token_revoked(claims.get("jti")):
             return None
         return _user_from_claims(claims)
 
@@ -1055,6 +1060,10 @@ def refresh_access_token(refresh_token: str, ttl: Optional[int] = None) -> dict:
         raise TokenMissingError("缺少续期令牌")
 
     claims = verify_refresh_token(value)
+    # 登出时续期令牌可能只进了黑名单而未留下吊销记录（例如登记行已被清理），
+    # 两条判据都看一遍，任一条命中都不再换发
+    if is_token_revoked(claims.get("jti")):
+        raise RefreshTokenRevokedError("续期令牌已失效，请重新登录")
 
     db = SessionLocal()
     try:
@@ -1080,6 +1089,159 @@ def refresh_access_token(refresh_token: str, ttl: Optional[int] = None) -> dict:
         "refresh_expires_in": max(claims["exp"] - int(time.time()), 0),
         "refresh_expires_at": claims["exp"],
         "user": account,
+    }
+
+
+# ---- 登出：把已签发的令牌提前作废 ----
+#
+# 令牌是自包含的，服务端不持有它的状态，登出只能反向登记一份「作废名单」：
+# 校验时先看签名与时效，再查 jti 是否在名单里，命中即视为未登录。
+# 名单按 jti 索引而不是按令牌原文：jti 定长且唯一，存原文既占空间，
+# 也让「同一用户多端登录」的记录难以区分。
+# 名单只保留到令牌自身到期，过期后令牌本就会被时效校验拦下，记录可以清掉。
+
+REVOKE_REASON_LOGOUT = "logout"
+
+
+def _blacklist_token(
+    jti: Optional[str],
+    user_id: str,
+    token_type: str,
+    expires_at: int,
+    reason: str = REVOKE_REASON_LOGOUT,
+) -> bool:
+    """把一条令牌记入作废名单，返回本次是否新增记录。
+
+    已有记录不覆盖：重复登出保持首次作废时间，也避免并发登出把时间改来改去。
+    无 jti 的旧令牌无法被单独标识，不登记（这类令牌只能等它自己过期）。
+    """
+    if not jti:
+        return False
+    db = SessionLocal()
+    try:
+        if db.query(RevokedToken).filter(RevokedToken.jti == jti).first() is not None:
+            return False
+        db.add(
+            RevokedToken(
+                jti=jti,
+                user_id=user_id or "",
+                token_type=token_type,
+                expires_at=float(expires_at),
+                revoked_at=time.time(),
+                reason=reason,
+            )
+        )
+        db.commit()
+        return True
+    except IntegrityError:
+        # 并发登出时另一条请求已写入同一 jti，按「已作废」处理
+        db.rollback()
+        return False
+    finally:
+        db.close()
+
+
+def is_token_revoked(jti: Optional[str]) -> bool:
+    """令牌是否已作废。
+
+    只按 jti 判定，不看有效期：名单里的记录本身就是「这条令牌不该再用」的结论。
+    缺少 jti 的令牌返回 False——它无从被登记，只能靠时效约束。
+    """
+    if not jti:
+        return False
+    db = SessionLocal()
+    try:
+        return db.query(RevokedToken).filter(RevokedToken.jti == jti).first() is not None
+    finally:
+        db.close()
+
+
+def _drop_session(token: str) -> bool:
+    """删除令牌对应的会话记录，返回是否确有删除。
+
+    对话链路仍按令牌原文查会话表，光把令牌拉黑不够：会话记录还在，
+    对话接口就还能认出这个人。登出必须两头一起清。
+    """
+    if not isinstance(token, str) or not token.strip():
+        return False
+    db = SessionLocal()
+    try:
+        record = db.query(Session).filter(Session.token == token.strip()).first()
+        if record is None:
+            return False
+        db.delete(record)
+        db.commit()
+        return True
+    finally:
+        db.close()
+
+
+def _logout_claims(token: str) -> dict:
+    """校验待登出的访问令牌，过期也接受。
+
+    客户端手里的访问令牌刚过期就来登出是正常时序，不该被时效判定挡在门外，
+    否则用户会遇到「想退出却退不掉」。签名、算法与声明的校验一步不减：
+    放宽时效不等于接受伪造令牌，否则任何人都能往名单里塞记录。
+    """
+    try:
+        return verify_access_token(token)
+    except TokenExpiredError:
+        return decode_jwt(token, verify_expiry=False)
+
+
+def logout(
+    access_token: str,
+    refresh_token: str = "",
+    reason: str = REVOKE_REASON_LOGOUT,
+) -> dict:
+    """登出：作废当前访问令牌，可选一并吊销续期令牌。
+
+    顺序上先校验、后写入：续期令牌若有问题，在改动任何状态之前就拒绝，
+    不留下「访问令牌已作废、续期令牌却没吊销」的半截结果。
+    续期令牌可选，但给了就必须属于当前登录用户——否则等于允许拿别人的
+    长期凭证替别人注销，这里直接拒绝而不是默默忽略。
+
+    重复调用返回同样的成功语义：客户端不必区分首次登出与重复登出，
+    返回值里的 revoked_* 只说明本次是否新增了作废记录。
+    """
+    value = access_token.strip() if isinstance(access_token, str) else ""
+    if not value:
+        raise TokenMissingError("缺少认证令牌")
+    claims = _logout_claims(value)
+
+    refresh_value = refresh_token.strip() if isinstance(refresh_token, str) else ""
+    refresh_claims: Optional[dict] = None
+    if refresh_value:
+        refresh_claims = verify_refresh_token(refresh_value, verify_expiry=False)
+        if refresh_claims.get("sub") != claims.get("sub"):
+            raise TokenClaimsError(
+                "续期令牌不属于当前登录用户", {"claim": "sub"}
+            )
+
+    revoked_access = _blacklist_token(
+        claims.get("jti"), claims.get("sub", ""), TOKEN_TYPE_ACCESS, claims["exp"], reason
+    )
+    session_removed = _drop_session(value)
+
+    revoked_refresh = False
+    if refresh_claims is not None:
+        _blacklist_token(
+            refresh_claims.get("jti"),
+            refresh_claims.get("sub", ""),
+            TOKEN_TYPE_REFRESH,
+            refresh_claims["exp"],
+            reason,
+        )
+        revoked_refresh = revoke_refresh_token(refresh_value)
+
+    return {
+        "message": "已退出登录",
+        "user": find_by_id(claims.get("sub")) or {},
+        "revoked_access": revoked_access,
+        "access_expires_at": int(claims["exp"]),
+        "session_removed": session_removed,
+        "revoked_refresh": revoked_refresh,
+        "refresh_expires_at": int(refresh_claims["exp"]) if refresh_claims else None,
     }
 
 

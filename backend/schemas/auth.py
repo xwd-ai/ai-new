@@ -58,6 +58,39 @@ class RefreshResponse(BaseModel):
     refresh_expires_at: int = Field(..., description="续期令牌的到期时间戳（秒）")
 
 
+class LogoutRequest(BaseModel):
+    """登出请求：访问令牌走 Authorization 头，续期令牌可选放在请求体。
+
+    续期令牌不是必填：客户端只拿得到访问令牌时也能退出，
+    只是那条长期凭证会留到自然过期。给了就一并吊销，登出更彻底。
+    """
+
+    refresh_token: str = Field(
+        default="",
+        max_length=4096,
+        description="登录或换发时拿到的续期令牌；留空表示只作废访问令牌",
+    )
+
+
+class LogoutResponse(BaseModel):
+    """登出响应：说明本次作废了哪些凭证。
+
+    revoked_access / revoked_refresh 表示本次是否新增作废记录，
+    重复登出时为 False，语义上仍是成功；access_expires_at 是令牌原本的
+    到期时间，便于客户端判断本地缓存何时可以彻底丢弃。
+    """
+
+    message: str
+    user: dict = Field(default_factory=dict, description="登出前确认的身份，账号已删则为空")
+    revoked_access: bool = Field(..., description="访问令牌本次是否新登记为作废")
+    access_expires_at: int = Field(..., description="作废的访问令牌原到期时间戳（秒）")
+    session_removed: bool = Field(..., description="是否同时删除了对应的会话记录")
+    revoked_refresh: bool = Field(..., description="续期令牌本次是否被吊销")
+    refresh_expires_at: Optional[int] = Field(
+        default=None, description="被吊销的续期令牌原到期时间戳（秒），未提交则为空"
+    )
+
+
 class RegisterRequest(BaseModel):
     """注册请求：只约束入参结构，用户名格式与密码强度交给服务层判定。
 

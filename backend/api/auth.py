@@ -10,6 +10,8 @@
 - 换发走严格语义：续期令牌缺失、无效、吊销、过期或账号已删都返回 401
   与稳定的错误码，不像登录那样用空 token 表示失败——换发失败意味着
   客户端手里的凭证彻底不能用了，应当直接回登录页。
+- 登出把访问令牌记入作废名单并删除会话记录，续期令牌提交了才吊销；
+  作废之后同一张令牌再来访问一律按未登录处理，直到它自然过期。
 """
 
 from typing import Optional
@@ -21,6 +23,8 @@ from fastapi.routing import APIRoute
 from backend.schemas.auth import (
     LoginRequest,
     LoginResponse,
+    LogoutRequest,
+    LogoutResponse,
     RefreshRequest,
     RefreshResponse,
     RegisterRequest,
@@ -114,6 +118,31 @@ def refresh(
     if not token:
         raise auth.TokenMissingError("缺少续期令牌")
     return auth.refresh_access_token(token)
+
+
+@auth_router.post(
+    "/logout",
+    response_model=LogoutResponse,
+    summary="登出并作废当前令牌",
+    responses={
+        401: {"description": "未携带令牌、令牌无效，或续期令牌不属于当前登录用户"},
+    },
+)
+def logout(
+    req: Optional[LogoutRequest] = Body(default=None),
+    authorization: str = Header(default=""),
+):
+    """登出：作废当前访问令牌，可选一并吊销续期令牌。
+
+    访问令牌从 Authorization 头取，缺失即按未登录拒绝——没有令牌可作废时
+    返回成功只会让客户端误以为本地状态已经清干净。
+    已经过期的访问令牌仍可登出，客户端换发失败后需要一条退出的路。
+    重复登出返回同样的成功语义，前端不必为「第二次退出」写分支。
+    """
+    token = _header_token(authorization)
+    if not token:
+        raise auth.TokenMissingError("缺少认证令牌")
+    return auth.logout(token, req.refresh_token if req else "")
 
 
 @auth_router.get("/me")
