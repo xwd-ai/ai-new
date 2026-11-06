@@ -146,7 +146,14 @@
 
 ## 入库恢复
 
-`GET /api/knowledge/ingest/pending` 返回 `{"items":[...]}`，按更新时间、指纹升序取最多 100 条未完成记录。每项包含 `fingerprint`、预留 `knowledge_id`、`stage`、`chunk_count`、`updated_at`（Unix 秒），不包含正文。记录可能仍在执行，列表不是空闲任务队列。
+`GET /api/knowledge/ingest/pending` 按更新时间、指纹升序返回未完成记录。每项包含 `fingerprint`、预留 `knowledge_id`、`stage`、`chunk_count`、`updated_at`（Unix 秒）。暂存正文保留在数据库中。列表可能包含仍在执行的记录。
+
+| 查询参数 | 含义 |
+|---|---|
+| `offset` | 跳过的记录数，非负整数，默认 0 |
+| `limit` | 每页上限，1 至 100，默认 100 |
+
+无分页参数时返回原有的 `{"items":[...]}`，最多 100 条。传入任一分页参数时返回 `{"items":[...],"total":106}`，其中 `total` 是当前全部未完成记录数。比如 `GET /api/knowledge/ingest/pending?offset=100&limit=3` 读取第 101 至 103 条。越界或无效整数返回 422。偏移到达或超过总数时，`items` 为空且仍返回 `total`。计数与窗口共享同次 SQLite 读取快照，跨请求的新增或恢复可能改变后续页面的位置。
 
 `POST /api/knowledge/ingest/recover/{fingerprint}` 无请求体，使用数据库 journal 内首次保存的输入同步恢复。`parsed` 会计算分块；`chunked` 复用计数；资料与 `stored` 完成状态同事务提交，完成后清空重复输入。重复恢复已完成项返回原资料、`created=false`、`chunks=0`。两接口仅管理员可用（403）；journal 不存在为 404；租约占用或失效为 409 并附 `Retry-After: 1`；输入指纹、格式或阶段不兼容为 422；底层数据库故障未统一分类，可能返回 500。
 
