@@ -9,6 +9,7 @@ const settle = async () => { for(let i=0;i<5;i++) await new Promise(setImmediate
 const json = (data, status=200) => new Response(JSON.stringify(data), {status,headers:{'Content-Type':'application/json'}});
 const doc = {id:'k1',title:'<b>资料</b>',kind:'faq'};
 const row = {fingerprint:'fp',knowledge_id:'k1',stage:'chunked',chunk_count:1,updated_at:123};
+const isPending = url => url.startsWith('/api/knowledge/ingest/pending?');
 
 // 仅模拟脚本实际使用的 DOM 接口；不模拟布局、HTML 校验或真实网络。
 class Element {
@@ -36,7 +37,7 @@ function page(handler=()=>null) {
       if(custom) return custom;
       if(url==='/api/me')return json({user:{role:'admin',name:'管理员'}});
       if(url.startsWith('/api/knowledge/items?'))return json({items:[doc],total:1});
-      if(url==='/api/knowledge/ingest/pending')return json({items:[row]});
+      if(isPending(url))return json({items:[row],total:1});
       if(url.startsWith('/api/sources/'))return json({...doc,content:'<script>原文</script>',keywords:['资料']});
       return json({knowledge_id:'k1',created:true,chunks:1});
     },
@@ -101,13 +102,13 @@ for(const code of [404,409,422,500]) {
 test('recovery success refreshes pending and knowledge lists',async()=>{
   const {elements:e,calls}=page();await settle();await e.refreshPending.emit('click');
   await e.pendingRows.querySelectorAll('button')[0].emit('click');assert.match(e.recoveryStatus.textContent,/恢复完成/);
-  assert.equal(calls.filter(x=>x.url==='/api/knowledge/ingest/pending').length,2);
+  assert.equal(calls.filter(x=>isPending(x.url)).length,2);
   assert.equal(calls.filter(x=>x.url.startsWith('/api/knowledge/items?')).length,2);
 });
 test('late write success after 403 does not restore saved actions or issue follow-up reads',async()=>{
   let resolve;
   const {elements:e,calls}=page(url=>url==='/api/knowledge/ingest'?new Promise(r=>resolve=r):
-    url==='/api/knowledge/ingest/pending'?json({},403):null);await settle();fill(e);
+    isPending(url)?json({},403):null);await settle();fill(e);
   const writing=e.ingestForm.emit('submit');await settle();await e.refreshPending.emit('click');const count=calls.length;
   resolve(json({knowledge_id:'k1',created:true,chunks:1}));await writing;await settle();
   assert.equal(e.ingestFields.disabled,true);assert.equal(e.viewSaved.hidden,true);assert.equal(calls.length,count);
@@ -120,11 +121,34 @@ test('late recovery success after 403 cannot fetch pending records again',async(
   denied=true;await e.searchForm.emit('submit');const count=calls.length;
   resolve(json({knowledge_id:'k1',created:true,chunks:1}));await settle();
   assert.equal(calls.length,count);assert.equal(e.refreshPending.disabled,true);assert.equal(e.pendingRows.children.length,0);
+  assert.equal(e.pendingPrevious.disabled, true);
+  assert.equal(e.pendingNext.disabled, true);
   assert.doesNotMatch(e.recoveryStatus.textContent,/恢复完成/);
 });
 test('late list success after 403 cannot replace login-required status',async()=>{
   let resolve;
   const {elements:e}=page(url=>url.startsWith('/api/knowledge/items?')?new Promise(r=>resolve=r):
-    url==='/api/knowledge/ingest/pending'?json({},403):null);await settle();await e.refreshPending.emit('click');
+    isPending(url)?json({},403):null);await settle();await e.refreshPending.emit('click');
   resolve(json({items:[doc],total:1}));await settle();assert.equal(e.rows.children.length,0);assert.match(e.status.textContent,/登录/);
+});
+
+test('pending controls navigate and refresh returns to page one', async () => {
+  const {elements: e, calls} = page(url => {
+    if (isPending(url)) return json({items: [row], total: 21});
+  });
+  await settle();
+  assert.equal(e.pendingPrevious.disabled, true);
+  assert.equal(e.pendingNext.disabled, true);
+  await e.refreshPending.emit('click');
+  assert.equal(e.pendingNext.disabled, false);
+  await e.pendingNext.emit('click');
+  assert.match(e.pendingStatus.textContent, /共 21 条.*21–21/);
+  assert.equal(e.pendingPrevious.disabled, false);
+  assert.equal(e.pendingNext.disabled, true);
+  await e.pendingPrevious.emit('click');
+  await e.pendingNext.emit('click');
+  await e.refreshPending.emit('click');
+  assert.equal(e.pendingPrevious.disabled, true);
+  assert.deepEqual(calls.filter(x => isPending(x.url)).map(x => new URLSearchParams(x.url.split('?')[1]).get('offset')),
+    ['0', '20', '0', '20', '0']);
 });

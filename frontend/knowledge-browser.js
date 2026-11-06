@@ -63,7 +63,6 @@ if (typeof document !== 'undefined') {
         authorized = false;
         byId('filters').disabled = true;
         byId('ingestFields').disabled = true;
-        byId('refreshPending').disabled = true;
         savedId = null; byId('viewSaved').hidden = true;
         pending.clear();
         byId('previous').disabled = byId('next').disabled = true;
@@ -150,6 +149,8 @@ if (typeof document !== 'undefined') {
     onRecovered: () => { if (authorized) browser.load(); },
     onBusy: busy => {
       byId('refreshPending').disabled = !authorized || busy;
+      byId('pendingPrevious').disabled = !authorized || busy || pending.offset === 0 || pending.total === 0;
+      byId('pendingNext').disabled = !authorized || busy || pending.offset + pending.limit >= pending.total;
       for (const button of byId('pendingRows').querySelectorAll('button')) button.disabled = !authorized || busy;
     },
     onRows: items => {
@@ -170,7 +171,9 @@ if (typeof document !== 'undefined') {
       }
     },
   });
-  byId('refreshPending').addEventListener('click', () => { if (authorized) pending.load(); });
+  byId('refreshPending').addEventListener('click', () => { if (authorized) pending.load(0); });
+  byId('pendingPrevious').addEventListener('click', () => { if (authorized) pending.move(-1); });
+  byId('pendingNext').addEventListener('click', () => { if (authorized) pending.move(1); });
   (async () => {
     try {
       const identity = await request('/api/me');
