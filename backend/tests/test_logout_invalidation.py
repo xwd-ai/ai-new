@@ -397,7 +397,7 @@ def test_other_user_token_unaffected_by_logout(client):
     assert auth_service.refresh_access_token(other["refresh_token"])["user"]["id"] == OTHER_ID
 
 
-def test_unknown_jti_not_revoked():
+def test_unknown_jti_not_revoked(factory):
     assert auth_service.is_token_revoked(None) is False
     assert auth_service.is_token_revoked("") is False
     assert auth_service.is_token_revoked("no-such-jti") is False

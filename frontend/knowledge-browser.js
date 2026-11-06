@@ -145,7 +145,10 @@ if (typeof document !== 'undefined') {
   });
   const pending = new KnowledgeRecovery({request,
     onStatus: message => { byId('pendingStatus').textContent = authorized ? message : '登录已失效，请重新登录后读取待恢复记录。'; },
-    onResult: message => { byId('recoveryStatus').textContent = authorized ? message : ''; },
+    onResult: message => {
+      byId('recoveryStatus').textContent = authorized ? message : '';
+      byId('viewRecovered').hidden = !authorized || !pending.recoveredId;
+    },
     onRecovered: () => { if (authorized) browser.load(); },
     onBusy: busy => {
       byId('refreshPending').disabled = !authorized || busy;
@@ -174,6 +177,12 @@ if (typeof document !== 'undefined') {
   byId('refreshPending').addEventListener('click', () => { if (authorized) pending.load(0); });
   byId('pendingPrevious').addEventListener('click', () => { if (authorized) pending.move(-1); });
   byId('pendingNext').addEventListener('click', () => { if (authorized) pending.move(1); });
+  byId('viewRecovered').addEventListener('click', () => {
+    if (authorized && pending.recoveredId) {
+      browser.source(pending.recoveredId);
+      byId('detail').focus();
+    }
+  });
   (async () => {
     try {
       const identity = await request('/api/me');

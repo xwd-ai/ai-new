@@ -5,11 +5,13 @@ class KnowledgeRecovery {
     this.offset = 0;
     this.limit = 20;
     this.total = 0;
+    this.recoveredId = null;
   }
   clear() {
     ++this.version; this.items = []; this.loading = false; this.onRows([]);
     this.offset = 0;
     this.total = 0;
+    this.recoveredId = null;
     this.onBusy(this.recovering);
     this.onStatus('待恢复记录已清空，请重新登录后读取。'); this.onResult('');
   }
@@ -46,11 +48,13 @@ class KnowledgeRecovery {
   async recover(fingerprint) {
     if (this.loading || this.recovering || !this.items.some(x => x.fingerprint === fingerprint)) return;
     const version = this.version;
+    this.recoveredId = null;
     this.recovering = true; this.onBusy(true); this.onResult('正在恢复，请勿重复操作…');
     let completed = false;
     try {
       const data = await this.request(`/api/knowledge/ingest/recover/${encodeURIComponent(fingerprint)}`, {method: 'POST'});
       if (version !== this.version) return;
+      this.recoveredId = data.knowledge_id;
       this.onResult(data.created ? `恢复完成，资料编号：${data.knowledge_id}` : `资料已完成，无需重复写入。编号：${data.knowledge_id}`);
       this.onRecovered(data); completed = true;
     } catch (error) {

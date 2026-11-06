@@ -17,6 +17,7 @@ class Element {
   append(...children) { this.children.push(...children); }
   replaceChildren(...children) { this.children=children; }
   addEventListener(name, callback) { (this.listeners[name] ||= []).push(callback); }
+  focus() { this.focused = true; }
   querySelectorAll(tag) { return this.children.flatMap(x=>[...(x.tag===tag?[x]:[]),...x.querySelectorAll(tag)]); }
   async emit(name) { for(const callback of this.listeners[name] || []) await callback({preventDefault(){}}); await settle(); }
 }
@@ -124,6 +125,62 @@ test('late recovery success after 403 cannot fetch pending records again',async(
   assert.equal(e.pendingPrevious.disabled, true);
   assert.equal(e.pendingNext.disabled, true);
   assert.doesNotMatch(e.recoveryStatus.textContent,/恢复完成/);
+  assert.equal(e.viewRecovered.hidden, true);
+});
+
+for (const created of [true, false]) {
+  test(`recovery result opens its source after list refresh failure (${created})`, async () => {
+    let reads = 0;
+    const {elements: e, calls} = page(url => {
+      if (isPending(url) && ++reads > 1) return json({}, 503);
+      if (url.startsWith('/api/knowledge/ingest/recover/')) {
+        return json({knowledge_id: 'saved id', created, chunks: created ? 1 : 0});
+      }
+    });
+    await settle();
+    await e.refreshPending.emit('click');
+    await e.pendingRows.querySelectorAll('button')[0].emit('click');
+    assert.match(e.pendingStatus.textContent, /重试/);
+    assert.equal(e.viewRecovered.hidden, false);
+    await e.viewRecovered.emit('click');
+    assert.equal(calls.at(-1).url, '/api/sources/saved%20id');
+    assert.equal(e.content.textContent, '<script>原文</script>');
+    assert.equal(e.detail.focused, true);
+  });
+}
+
+test('a new recovery hides the last result while running and after a failure', async () => {
+  let finish;
+  let writes = 0;
+  const {elements: e, calls} = page(url => {
+    if (url.startsWith('/api/knowledge/ingest/recover/') && ++writes === 2) {
+      return new Promise(resolve => { finish = resolve; });
+    }
+  });
+  await settle();
+  await e.refreshPending.emit('click');
+  await e.pendingRows.querySelectorAll('button')[0].emit('click');
+  assert.equal(e.viewRecovered.hidden, false);
+  await e.pendingRows.querySelectorAll('button')[0].emit('click');
+  assert.equal(e.viewRecovered.hidden, true);
+  finish(json({}, 409));
+  await settle();
+  assert.equal(e.viewRecovered.hidden, true);
+  const count = calls.length;
+  await e.viewRecovered.emit('click');
+  assert.equal(calls.length, count);
+});
+
+test('source access revocation hides the recovery result entry and detail', async () => {
+  const {elements: e} = page(url => url.startsWith('/api/sources/') ? json({}, 403) : null);
+  await settle();
+  await e.refreshPending.emit('click');
+  await e.pendingRows.querySelectorAll('button')[0].emit('click');
+  assert.equal(e.viewRecovered.hidden, false);
+  await e.viewRecovered.emit('click');
+  assert.equal(e.viewRecovered.hidden, true);
+  assert.equal(e.detail.hidden, true);
+  assert.equal(e.loginLink.hidden, false);
 });
 test('late list success after 403 cannot replace login-required status',async()=>{
   let resolve;

@@ -356,7 +356,7 @@ def test_revoke_is_idempotent(client, factory):
     assert first_at == second_at
 
 
-def test_revoke_unknown_token_returns_false():
+def test_revoke_unknown_token_returns_false(factory):
     assert auth_service.revoke_refresh_token("not-a-real-token") is False
     assert auth_service.revoke_refresh_token("") is False
     assert auth_service.revoke_refresh_token(None) is False

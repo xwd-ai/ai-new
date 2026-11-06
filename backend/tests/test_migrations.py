@@ -10,12 +10,12 @@ from alembic.config import Config
 from alembic.migration import MigrationContext
 
 from backend import database, models  # noqa: F401
-from backend.models.user import RefreshToken
+from backend.models.user import RefreshToken, RevokedToken
 
 
 ROOT = Path(__file__).resolve().parents[2]
 OLD_REVISION = "d1178ec7c657"
-HEAD_REVISION = "b47e2d916a08"
+HEAD_REVISION = "d9236e507b14"
 
 
 def test_refresh_upgrade_preserves_precreated_records(migration_env):
@@ -46,10 +46,47 @@ def test_refresh_upgrade_rejects_incompatible_precreated_table(migration_env):
 
 def test_refresh_downgrade_refuses_to_drop_records(migration_env):
     config, connection = migration_env
-    command.upgrade(config, 'head')
+    command.upgrade(config, 'b47e2d916a08')
     with pytest.raises(RuntimeError, match='不支持自动回退'):
         command.downgrade(config, 'a31d9f0276bc')
     assert sa.inspect(connection).has_table('refresh_tokens')
+
+
+@pytest.mark.parametrize('with_index', [True, False])
+def test_revoked_upgrade_preserves_precreated_records(migration_env, with_index):
+    config, connection = migration_env
+    command.upgrade(config, 'b47e2d916a08')
+    table = RevokedToken.__table__
+    if with_index:
+        table.create(connection)
+    else:
+        connection.execute(sa.schema.CreateTable(table))
+    record = dict(jti='test-only', user_id='old-user', token_type='access',
+                  expires_at=123.0, revoked_at=100.0, reason='logout')
+    connection.execute(table.insert(), record)
+    connection.commit()
+    command.upgrade(config, 'head')
+    command.upgrade(config, 'head')
+    assert dict(connection.execute(table.select()).mappings().one()) == record
+    assert compare_metadata(MigrationContext.configure(connection), database.Base.metadata) == []
+
+
+@pytest.mark.parametrize('index_sql', [
+    'CREATE INDEX ix_revoked_tokens_user_id ON revoked_tokens (token_type)',
+    "CREATE INDEX ix_revoked_tokens_user_id ON revoked_tokens (user_id) WHERE token_type='access'",
+])
+def test_revoked_upgrade_rejects_incompatible_index_without_replacing_it(migration_env, index_sql):
+    config, connection = migration_env
+    command.upgrade(config, 'b47e2d916a08')
+    connection.execute(sa.schema.CreateTable(RevokedToken.__table__))
+    connection.exec_driver_sql(index_sql)
+    connection.commit()
+    with pytest.raises(RuntimeError, match='用户索引不兼容'):
+        command.upgrade(config, 'head')
+    assert _version(connection) == 'b47e2d916a08'
+    assert connection.scalar(sa.text(
+        "SELECT sql FROM sqlite_master WHERE name='ix_revoked_tokens_user_id'"
+    )) == index_sql
 
 
 @pytest.fixture()
@@ -73,7 +110,7 @@ def _version(connection):
 def _legacy_schema(connection, *, fingerprint=True, check=False):
     metadata = sa.MetaData()
     for table in database.Base.metadata.sorted_tables:
-        if table.name in ("knowledge_ingest_leases", "knowledge_ingest_journal", "refresh_tokens"):
+        if table.name in ("knowledge_ingest_leases", "knowledge_ingest_journal", "refresh_tokens", "revoked_tokens"):
             continue
         if table.name == "knowledge_docs" and not fingerprint:
             sa.Table(

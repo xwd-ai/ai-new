@@ -69,6 +69,7 @@
         <button id="pendingNext" type="button" disabled>下一页</button>
       </div>
       <p id="recoveryStatus" role="status" aria-live="polite"></p>
+      <button id="viewRecovered" type="button" hidden>查看恢复原文</button>
     </details>
     <form id="searchForm"><fieldset id="filters" disabled>
       <label class="title-field">标题包含<input id="title" maxlength="200" placeholder="例如：导出 FAQ" /></label>
@@ -82,7 +83,7 @@
         <div class="paging"><button id="previous" disabled>上一页</button><span class="muted">每页 20 条</span><button id="next" disabled>下一页</button></div>
         <p class="muted">新增资料可能改变后续页面的位置，可点击筛选 / 刷新回到首页。</p>
       </section>
-      <section id="detail" class="panel" aria-label="资料原文" hidden>
+      <section id="detail" class="panel" aria-label="资料原文" tabindex="-1" hidden>
         <div class="detail-head"><h2 id="detailTitle"></h2><button id="closeDetail">关闭</button></div>
         <p id="keywords" class="muted"></p><pre id="content"></pre>
       </section>
