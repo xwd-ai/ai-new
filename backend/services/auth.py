@@ -11,6 +11,8 @@
   在令牌校验链路接管前保持兼容，令牌到期时间与会话记录保持一致；
 - 登录同时签发长期 refresh token（typ=refresh，默认 30 天）并登记
   refresh_tokens 表，支持按条吊销；两类令牌同一密钥，typ 互斥、不能互相顶替；
+- 访问令牌过期后由 refresh token 换发：签名合格之外还要求登记记录未吊销、
+  未过期且主体一致，换发只重签访问令牌、不延长续期凭证自身的寿命；
 - 令牌校验按「结构 → 算法 → 签名 → 声明」四层逐级收口，任何一层不通过都抛
   TokenError 派生异常，错误码稳定可供客户端分支，校验本身不查库、不依赖会话表；
 - 有效期、时钟偏差与签名密钥都来自环境变量（AI_NEW_JWT_TTL / AI_NEW_JWT_LEEWAY /
@@ -173,6 +175,36 @@ class TokenClaimsError(TokenError):
     """声明缺失或取值不符合约定：签发方、使用方、类型、时间戳。"""
 
     error_code = "AUTH_TOKEN_BAD_CLAIMS"
+
+
+# ---- 续期异常：签名合格但不能再换发的几种情形 ----
+#
+# 与令牌校验异常同属 401：客户端拿到这些错误码都该回到登录页，
+# 区别只在于「这条续期凭证为什么不作数」，便于前端提示与日志定位。
+
+
+class RefreshTokenError(TokenError):
+    """续期失败基类。"""
+
+    error_code = "AUTH_REFRESH_INVALID"
+
+
+class RefreshTokenUnknownError(RefreshTokenError):
+    """续期令牌不在登记表内：来路不明，或签发它的环境已被清库。"""
+
+    error_code = "AUTH_REFRESH_UNKNOWN"
+
+
+class RefreshTokenRevokedError(RefreshTokenError):
+    """续期令牌已被吊销（登出或异常处理时失效）。"""
+
+    error_code = "AUTH_REFRESH_REVOKED"
+
+
+class RefreshTokenOwnerError(RefreshTokenError):
+    """续期令牌指向的账号已不存在。"""
+
+    error_code = "AUTH_REFRESH_USER_GONE"
 
 
 # ---- 注册：用户名与密码强度校验 ----
@@ -767,6 +799,16 @@ def verify_access_token(token: str, secret: Optional[bytes] = None, **kwargs) ->
     return decode_jwt(token, secret, **kwargs)
 
 
+def verify_refresh_token(token: str, secret: Optional[bytes] = None, **kwargs) -> dict:
+    """按 refresh token 的约定校验令牌，返回声明集合。
+
+    用途固定为 refresh：access token 走到这里会因 typ 不符被拒。
+    换发只认这一类令牌，避免短期凭证被当成长期凭证无限续期。
+    """
+    kwargs.setdefault("expected_type", TOKEN_TYPE_REFRESH)
+    return decode_jwt(token, secret, **kwargs)
+
+
 def extract_bearer_token(authorization: Optional[str]) -> str:
     """从 Authorization 头取出 Bearer 令牌，缺失或格式不对时抛对应异常。"""
     if not isinstance(authorization, str) or not authorization.strip():
@@ -971,6 +1013,74 @@ def revoke_refresh_token(token: str) -> bool:
         return True
     finally:
         db.close()
+
+
+# ---- 换发：用长期凭证换一张短期访问令牌 ----
+#
+# 换发只认 typ=refresh 的令牌，且必须能在登记表里找到一条未吊销、未过期的记录：
+# 签名合格只说明令牌由本服务签发，能换发则还需要「这条凭证仍然有效」。
+# 换发不延长续期凭证本身的有效期，只重新签发访问令牌，
+# 因此长期凭证的到期时间仍由首次登录决定，续期次数不叠加寿命。
+
+
+def _refresh_record(db, token: str, user_id: str) -> RefreshToken:
+    """取出可用的续期记录，未登记、已吊销、已过期或与令牌主体不符时抛异常。
+
+    主体比对是防串用的兜底：登记表按令牌原文索引，正常情况下两者必然一致，
+    一旦出现不一致说明记录被改写，宁可判为无效也不放行。
+    """
+    record = db.query(RefreshToken).filter(RefreshToken.token == token).first()
+    if record is None:
+        raise RefreshTokenUnknownError("续期令牌未登记，请重新登录")
+    if record.user_id != user_id:
+        raise RefreshTokenUnknownError("续期令牌与登记信息不一致，请重新登录")
+    if record.revoked:
+        raise RefreshTokenRevokedError("续期令牌已失效，请重新登录")
+    if record.expired:
+        raise TokenExpiredError("续期令牌已过期", {"expired_at": record.expires_at})
+    return record
+
+
+def refresh_access_token(refresh_token: str, ttl: Optional[int] = None) -> dict:
+    """用 refresh token 换发新的 access token，返回两类令牌的有效期元信息。
+
+    校验顺序：签名与声明 → 登记记录 → 账号是否仍在。
+    换发结果与原登录响应同构（token / expires_in / expires_at 等），
+    客户端按同一套字段更新本地状态即可，不必为续期写第二套解析逻辑。
+    续期凭证原样回传，不轮换：换发失败时客户端手里仍有可用凭证，
+    不会因为一次网络异常把用户踢回登录页。
+    """
+    value = refresh_token.strip() if isinstance(refresh_token, str) else ""
+    if not value:
+        raise TokenMissingError("缺少续期令牌")
+
+    claims = verify_refresh_token(value)
+
+    db = SessionLocal()
+    try:
+        _refresh_record(db, value, claims["sub"])
+        user = db.query(User).filter(User.id == claims["sub"]).first()
+        if user is None:
+            raise RefreshTokenOwnerError("账号不存在，请重新登录")
+        account = _account(user)
+    finally:
+        db.close()
+
+    payload = build_access_payload(account, ttl=ttl)
+    token = sign_jwt(payload)
+    # 新令牌同样登记为会话：对话链路按令牌查会话，不登记会立刻失去登录态
+    _record_session(account, token, payload["exp"])
+
+    return {
+        "token": token,
+        "token_type": "Bearer",
+        "expires_in": payload["exp"] - payload["iat"],
+        "expires_at": payload["exp"],
+        "refresh_token": value,
+        "refresh_expires_in": max(claims["exp"] - int(time.time()), 0),
+        "refresh_expires_at": claims["exp"],
+        "user": account,
+    }
 
 
 def public_user(user: dict) -> dict:

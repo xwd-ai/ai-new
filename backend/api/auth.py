@@ -1,4 +1,4 @@
-"""认证接口：登录、当前用户、注册。
+"""认证接口：登录、换发、当前用户、注册。
 
 约定：
 - 业务失败一律抛 AuthError 派生异常，由 AuthErrorRoute 统一转成
@@ -6,16 +6,23 @@
 - 登录沿用既有契约：失败也返回 200，token 为空串、user 为空对象，
   前端据此区分「凭证错误」与「接口异常」；
 - 登录成功返回签名的 access token 与长期 refresh token，附带各自的
-  有效期，失败分支不返回这些字段，响应体与旧契约完全一致。
+  有效期，失败分支不返回这些字段，响应体与旧契约完全一致；
+- 换发走严格语义：续期令牌缺失、无效、吊销、过期或账号已删都返回 401
+  与稳定的错误码，不像登录那样用空 token 表示失败——换发失败意味着
+  客户端手里的凭证彻底不能用了，应当直接回登录页。
 """
 
-from fastapi import APIRouter, Header, Request
+from typing import Optional
+
+from fastapi import APIRouter, Body, Header, Request
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 
 from backend.schemas.auth import (
     LoginRequest,
     LoginResponse,
+    RefreshRequest,
+    RefreshResponse,
     RegisterRequest,
     RegisterResponse,
 )
@@ -44,6 +51,24 @@ class AuthErrorRoute(APIRoute):
 auth_router = APIRouter(route_class=AuthErrorRoute)
 
 
+def _header_token(authorization: str) -> str:
+    """从 Authorization 头取令牌，头为空时返回空串（由调用方统一报缺失）。
+
+    标准写法是 Bearer <token>；只给令牌原文也接受，便于手工联调。
+    头部内容原样交给服务层校验，非法内容在那里按令牌格式错误拒绝，
+    接口层不再重复判断一遍格式。
+    """
+    try:
+        return auth.extract_bearer_token(authorization)
+    except auth.TokenMissingError:
+        return ""
+    except auth.TokenMalformedError:
+        raw = (authorization or "").strip()
+        head = raw.split(None, 1)[0].lower() if raw else ""
+        # 写了 Bearer 却没跟令牌，仍按未携带处理；其它内容当作裸令牌交给服务层校验
+        return "" if head == "bearer" else raw
+
+
 @auth_router.post("/login", response_model=LoginResponse, response_model_exclude_none=True)
 def login(req: LoginRequest):
     user = auth.authenticate(req.username, req.password)
@@ -66,6 +91,29 @@ def register(req: RegisterRequest):
     """注册客户账号：身份固定为 customer，管理员账号不经由此接口创建。"""
     user = auth.register_user(req.username, req.password, req.name, role="customer")
     return {"user": user, "message": "注册成功"}
+
+
+@auth_router.post(
+    "/refresh",
+    response_model=RefreshResponse,
+    summary="用续期令牌换发访问令牌",
+    responses={
+        401: {"description": "续期令牌缺失、无效、已吊销、已过期或账号已删除"},
+    },
+)
+def refresh(
+    req: Optional[RefreshRequest] = Body(default=None),
+    authorization: str = Header(default=""),
+):
+    """用长期续期令牌换一张新的访问令牌。
+
+    令牌先取请求体，请求体没给再取 Authorization 头；两处都空时按未携带令牌拒绝。
+    返回体与登录成功时的令牌字段同名同义，客户端可直接复用解析逻辑。
+    """
+    token = (req.refresh_token if req else "") or _header_token(authorization)
+    if not token:
+        raise auth.TokenMissingError("缺少续期令牌")
+    return auth.refresh_access_token(token)
 
 
 @auth_router.get("/me")
