@@ -1234,14 +1234,16 @@ def logout(
 
     revoked_refresh = False
     if refresh_claims is not None:
-        _blacklist_token(
+        # revoked_refresh 与 revoked_access 同口径：只在本次新增作废记录时为真，
+        # 重复登出两头都是 False。登记表的吊销标记照常幂等写入，不参与该口径。
+        revoked_refresh = _blacklist_token(
             refresh_claims.get("jti"),
             refresh_claims.get("sub", ""),
             TOKEN_TYPE_REFRESH,
             refresh_claims["exp"],
             reason,
         )
-        revoked_refresh = revoke_refresh_token(refresh_value)
+        revoke_refresh_token(refresh_value)
 
     return {
         "message": "已退出登录",
