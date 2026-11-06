@@ -113,3 +113,40 @@ class RegisterRequest(BaseModel):
 class RegisterResponse(BaseModel):
     user: dict
     message: str
+
+
+class CleanupRequest(BaseModel):
+    """过期凭据清理请求：两个参数都有默认值，空请求体即按默认口径清理。
+
+    retention 是过期之后额外保留的秒数，默认 0 表示到期即删；
+    排查「刚过期就登不上」这类问题时可以留一段观察窗口再清。
+    limit 控制单表单次删除上限，积压较多时分多次调用，避免一次写事务过大。
+    """
+
+    retention: int = Field(
+        default=0,
+        ge=0,
+        le=30 * 24 * 3600,
+        description="过期后额外保留的秒数，默认 0（到期即删）",
+    )
+    limit: int = Field(
+        default=2000,
+        ge=1,
+        le=10000,
+        description="单表单次删除上限",
+    )
+
+
+class CleanupResponse(BaseModel):
+    """清理结果：逐表条数之和为 total，truncated 为真表示可能还有剩余。
+
+    cutoff 是本次判定过期的截止时间戳：早于它的记录都被视作失效，
+    便于从日志里对上一次清理的口径，不必回推 retention 的换算。
+    """
+
+    message: str
+    deleted: dict = Field(..., description="各表删除条数：sessions / refresh_tokens / revoked_tokens")
+    total: int = Field(..., description="本次删除总条数")
+    cutoff: int = Field(..., description="过期判定的截止时间戳（秒）")
+    retention: int = Field(..., description="本次生效的保留窗口（秒）")
+    truncated: bool = Field(..., description="是否因达到单次上限而可能仍有剩余")

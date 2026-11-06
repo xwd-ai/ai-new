@@ -12,6 +12,7 @@
   客户端手里的凭证彻底不能用了，应当直接回登录页。
 - 登出把访问令牌记入作废名单并删除会话记录，续期令牌提交了才吊销；
   作废之后同一张令牌再来访问一律按未登录处理，直到它自然过期。
+- 过期凭据清理是运维动作，只对管理员开放：未登录 401、非管理员 403。
 """
 
 from typing import Optional
@@ -21,6 +22,8 @@ from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 
 from backend.schemas.auth import (
+    CleanupRequest,
+    CleanupResponse,
     LoginRequest,
     LoginResponse,
     LogoutRequest,
@@ -71,6 +74,20 @@ def _header_token(authorization: str) -> str:
         head = raw.split(None, 1)[0].lower() if raw else ""
         # 写了 Bearer 却没跟令牌，仍按未携带处理；其它内容当作裸令牌交给服务层校验
         return "" if head == "bearer" else raw
+
+
+def _require_admin(authorization: str) -> dict:
+    """取当前用户并要求管理员身份，未登录 401、非管理员 403。
+
+    清理会删除表记录，属于运维动作，不开放给普通账号；
+    身份同样取自令牌并经回库确认，不依赖令牌里的角色快照。
+    """
+    user = auth.resolve_authorization(authorization)
+    if not user:
+        raise auth.TokenMissingError("未登录")
+    if user.get("role") != "admin":
+        raise auth.PermissionDeniedError("仅管理员可执行该操作")
+    return user
 
 
 @auth_router.post("/login", response_model=LoginResponse, response_model_exclude_none=True)
@@ -143,6 +160,29 @@ def logout(
     if not token:
         raise auth.TokenMissingError("缺少认证令牌")
     return auth.logout(token, req.refresh_token if req else "")
+
+
+@auth_router.post(
+    "/sessions/cleanup",
+    response_model=CleanupResponse,
+    summary="清理过期登录凭证",
+    responses={
+        401: {"description": "未携带令牌或令牌无效"},
+        403: {"description": "非管理员账号"},
+    },
+)
+def cleanup_sessions(
+    req: Optional[CleanupRequest] = Body(default=None),
+    authorization: str = Header(default=""),
+):
+    """删除已过期的会话、续期登记与作废记录，返回逐表条数。
+
+    全部参数可选：空请求体按「到期即删、单表 2000 条」的默认口径执行。
+    返回体的 truncated 为真时说明仍有剩余，再次调用即可继续清理。
+    """
+    _require_admin(authorization)
+    params = req or CleanupRequest()
+    return auth.purge_expired_sessions(retention=params.retention, limit=params.limit)
 
 
 @auth_router.get("/me")

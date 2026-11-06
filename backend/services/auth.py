@@ -15,6 +15,8 @@
   未过期且主体一致，换发只重签访问令牌、不延长续期凭证自身的寿命；
 - 登出把当前访问令牌的 jti 记入 revoked_tokens 黑名单，同时删除对应的会话记录，
   并可选吊销客户端一并提交的续期令牌；此后该令牌即使未过期也一律判为未登录；
+- 过期凭据由 purge_expired_sessions 批量清出：会话、续期登记、作废名单三张表
+  都按到期时间收敛，到期即失效的行不再保留，表规模跟随活跃登录数而非历史总量；
 - 令牌校验按「结构 → 算法 → 签名 → 声明」四层逐级收口，任何一层不通过都抛
   TokenError 派生异常，错误码稳定可供客户端分支，校验本身不查库、不依赖会话表；
 - 有效期、时钟偏差与签名密钥都来自环境变量（AI_NEW_JWT_TTL / AI_NEW_JWT_LEEWAY /
@@ -122,6 +124,13 @@ class TokenSigningError(AuthError):
 
     error_code = "AUTH_TOKEN_SIGNING_FAILED"
     http_status = 500
+
+
+class PermissionDeniedError(AuthError):
+    """已登录但身份不具备该操作所需的权限。"""
+
+    error_code = "AUTH_FORBIDDEN"
+    http_status = 403
 
 
 # ---- 令牌校验异常：统一 401，按 error_code 区分失败环节 ----
@@ -1242,6 +1251,90 @@ def logout(
         "session_removed": session_removed,
         "revoked_refresh": revoked_refresh,
         "refresh_expires_at": int(refresh_claims["exp"]) if refresh_claims else None,
+    }
+
+
+# ---- 过期凭据清理：让表规模跟随活跃登录数 ----
+#
+# 会话、续期登记、作废名单三张表都带到期时间，到期即失效，
+# 但行本身不会自行消失：会话过期后仍躺在 sessions 里，
+# 黑名单记录过了令牌有效期也不再拦截任何请求，续期凭证过期后同样只是占位。
+# 清理按到期时间批量删除，默认不留缓冲（过期即可清），
+# 需要回溯刚过期的登录时用 retention 留一段观察窗口。
+# 单批删除量设上限：SQLite 一次写事务过大既占写锁也容易拖长响应，
+# 积压较多时分多次调用即可，truncated 为真表示还有剩余。
+
+
+SESSION_RETENTION = 0  # 过期后额外保留的秒数，默认不留
+SESSION_RETENTION_MAX = 30 * 24 * 3600  # 保留窗口上限：30 天，避免误配成永久不删
+PURGE_BATCH_LIMIT = 2000  # 单次单表删除上限
+PURGE_BATCH_MAX = 10000
+
+
+def _bounded_int(value, default: int, minimum: int, maximum: int) -> int:
+    """把入参收敛到允许区间：非整数取默认值，越界取边界。
+
+    清理是运维动作，参数写错不该让服务报错停下，按最保守的边界执行即可；
+    真正的入参校验在接口层的 schema 上完成。
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return default
+    return max(minimum, min(value, maximum))
+
+
+def purge_expired_sessions(
+    retention: int = SESSION_RETENTION,
+    limit: int = PURGE_BATCH_LIMIT,
+    now: Optional[float] = None,
+) -> dict:
+    """删除三张表中已过期的记录，返回各表清理条数。
+
+    - sessions：过期会话不再可用，get_session 命中时也会顺手删单条，
+      这里做的是整批收敛，避免长期不登录的账号把表撑大；
+    - refresh_tokens：过期的续期登记行留着只会让换发多走一次查询，
+      过期即删不会改变换发结果（记录缺失与记录过期同样判为 401）；
+    - revoked_tokens：作废名单只需要保留到令牌自身到期，
+      到期后的令牌本就过不了时效校验，记录再无拦截作用。
+
+    cutoff 之前的记录视为过期：retention>0 时把截止时间往前推，
+    相当于多留一段刚过期的记录。now 显式传入便于回溯与测试。
+    """
+    keep = _bounded_int(retention, SESSION_RETENTION, 0, SESSION_RETENTION_MAX)
+    batch = _bounded_int(limit, PURGE_BATCH_LIMIT, 1, PURGE_BATCH_MAX)
+    current = time.time() if now is None else float(now)
+    cutoff = current - keep
+
+    deleted = {"sessions": 0, "refresh_tokens": 0, "revoked_tokens": 0}
+    truncated = False
+
+    db = SessionLocal()
+    try:
+        for name, model, key, column in (
+            ("sessions", Session, Session.token, Session.expires_at),
+            ("refresh_tokens", RefreshToken, RefreshToken.token, RefreshToken.expires_at),
+            ("revoked_tokens", RevokedToken, RevokedToken.jti, RevokedToken.expires_at),
+        ):
+            keys = [row[0] for row in db.query(key).filter(column < cutoff).limit(batch)]
+            if keys:
+                db.query(model).filter(key.in_(keys)).delete(synchronize_session=False)
+            deleted[name] = len(keys)
+            # 取满一批说明可能还有剩余，交给调用方决定是否继续清
+            truncated = truncated or len(keys) >= batch
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+    total = sum(deleted.values())
+    return {
+        "message": f"已清理 {total} 条过期登录记录",
+        "deleted": deleted,
+        "total": total,
+        "cutoff": int(cutoff),
+        "retention": keep,
+        "truncated": truncated,
     }
 
 
