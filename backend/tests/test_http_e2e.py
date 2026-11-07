@@ -188,3 +188,85 @@ def test_http_journal_recovery_after_restart_and_model_failure(server):
         assert 'private-provider-detail' not in failed.text
         assert any(event.get('retryable') for event in failed.json()['trace'] if event['kind']=='error')
         assert restarted.get('/api/conversation', headers=customer).json()['messages'][-1]['content'] == failed.json()['reply']
+
+
+def test_http_stage_filter_pagination_and_recovery_across_restarts(server):
+    pending_url = '/api/knowledge/ingest/pending'
+    documents = {}
+    # 通过实际入库链路生成两种中断状态，不直接修改 journal。
+    for mode, stage, count in [('interrupt_parsed', 'parsed', 3), ('interrupt', 'chunked', 21)]:
+        process, client = server(mode)
+        with client:
+            admin = login(client, 'admin')
+            before = client.get('/api/knowledge/items', headers=admin).json()['total']
+            for index in range(count):
+                document = {**DOCUMENT, 'title': f'E2E_{stage}_{index:02}',
+                            'content': f'{stage}-{index}: preserved input for recovery.'}
+                documents[document['title']] = document
+                assert client.post('/api/knowledge/ingest', headers=admin, json=document).status_code == 500
+            page = client.get(pending_url, headers=admin, params={'stage': stage}).json()
+            assert page['total'] == count
+            assert len(page['items']) == count
+            assert all(item['stage'] == stage for item in page['items'])
+            assert all(item['chunk_count'] == (0 if stage == 'parsed' else 1) for item in page['items'])
+            assert client.get('/api/knowledge/items', headers=admin).json()['total'] == before
+            stop_server(process, str(client.base_url))
+
+    process, client = server()
+    with client:
+        admin, customer = login(client, 'admin'), login(client, 'customer')
+
+        def read(stage=None, offset=0, limit=20):
+            params = {'offset': offset, 'limit': limit}
+            if stage is not None:
+                params['stage'] = stage
+            response = client.get(pending_url, headers=admin, params=params)
+            assert response.status_code == 200
+            return response.json()
+
+        assert client.get(pending_url, params={'stage': 'parsed'}).status_code == 403
+        assert client.get(pending_url, headers=customer, params={'stage': 'chunked'}).status_code == 403
+        for stage in ('', 'stored', 'unknown'):
+            assert client.get(pending_url, headers=admin, params={'stage': stage}).status_code == 422
+        assert read()['total'] == 24
+        parsed = read('parsed')
+        assert parsed['total'] == len(parsed['items']) == 3
+        first, last = read('chunked'), read('chunked', 20)
+        assert first['total'] == last['total'] == 21
+        assert len(first['items']) == 20 and len(last['items']) == 1
+        fingerprints = [row['fingerprint'] for row in first['items'] + last['items']]
+        assert len(set(fingerprints)) == 21
+        assert all(row['stage'] == 'chunked' and 'payload' not in row for row in first['items'] + last['items'])
+        assert read('chunked', 21) == {'items': [], 'total': 21}
+        before = client.get('/api/knowledge/items', headers=admin).json()['total']
+        restored_ids = []
+        # 恢复末页唯一一条后该页变空；另一阶段不受影响。
+        for row, stage, remaining in [(last['items'][0], 'chunked', 20), (parsed['items'][0], 'parsed', 2)]:
+            url = '/api/knowledge/ingest/recover/' + row['fingerprint']
+            assert client.post(url, headers=customer).status_code == 403
+            response = client.post(url, headers=admin)
+            assert response.status_code == 200
+            result = response.json()
+            assert result['created'] and result['knowledge_id'] == row['knowledge_id']
+            restored_ids.append(result['knowledge_id'])
+            source = client.get('/api/sources/' + result['knowledge_id'])
+            assert source.status_code == 200
+            document = documents[source.json()['title']]
+            assert source.json()['content'] == document['content']
+            assert read(stage)['total'] == remaining
+            repeated = client.post(url, headers=admin)
+            assert repeated.status_code == 200 and not repeated.json()['created']
+            assert repeated.json()['knowledge_id'] == result['knowledge_id']
+        assert read('chunked', 20) == {'items': [], 'total': 20}
+        assert len(read('chunked')['items']) == 20
+        assert read()['total'] == 22
+        assert client.get('/api/knowledge/items', headers=admin).json()['total'] == before + 2
+        stop_server(process, str(client.base_url))
+    _, restarted = server()
+    with restarted:
+        for stage, total in [('parsed', 2), ('chunked', 20)]:
+            response = restarted.get(pending_url, headers=admin, params={'stage': stage})
+            assert response.status_code == 200 and response.json()['total'] == total
+            assert not set(restored_ids) & {row['knowledge_id'] for row in response.json()['items']}
+        for source_id in restored_ids:
+            assert restarted.get('/api/sources/' + source_id).status_code == 200

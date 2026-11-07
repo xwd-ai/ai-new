@@ -67,6 +67,12 @@ def main():
             original(*args)
             raise RuntimeError('测试注入：分块 journal 提交后中断')
         ingest._journal_chunked = interrupted
+    elif mode == 'interrupt_parsed':
+        original = ingest._journal_start
+        def interrupted(*args):
+            original(*args)
+            raise RuntimeError('测试注入：输入 journal 提交后中断')
+        ingest._journal_start = interrupted
 
     with stage('app_init'):
         from backend.main import app
