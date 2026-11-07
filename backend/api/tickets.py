@@ -1,7 +1,12 @@
 """工单接口层：建单、列表、详情、状态流转、批量操作与统计。
 
 约定：
-- 身份与权限统一经 _require_user / _require_ticket 解析，接口开头不重复判空；
+- 权限在路由签名上声明：需要登录的接口挂 Depends(require_login)，管理员接口挂
+  Depends(require_admin)，匿名可用的接口挂 Depends(current_user)；
+  判定口径只有认证层一处，接口体内不再解析请求头、也不比对角色字符串；
+- 认证层抛出的 401/403 由 TicketErrorRoute 统一转成工单模块的错误码，
+  对外错误契约不因权限实现方式变化而改变；
+- 单条数据的归属校验仍走 _require_ticket：它取数与鉴权合一，与登录态解析是两件事；
 - 业务失败一律抛 TicketBusinessError 派生异常，由 TicketErrorRoute 统一转成
   {error, error_code, error_detail?} 响应，接口内不拼装错误字典；
 - 纯拼接提示文案的辅助函数集中在文件顶部，路由按功能分组排列；
@@ -9,10 +14,13 @@
   之前，否则会被路径参数匹配吞掉。
 """
 
-from fastapi import APIRouter, Header, Query, Request
+from typing import Optional
+
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 
+from backend.api.auth import current_user, require_admin, require_login
 from backend.database import SessionLocal
 from backend.models import TriedStep
 from backend.models.ticket import (
@@ -33,6 +41,21 @@ from backend.schemas.ticket import (
 from backend.services import auth, orders, tickets
 
 
+def _as_ticket_error(exc: auth.AuthError) -> Optional[TicketBusinessError]:
+    """把认证层的权限异常翻译成工单模块的错误码，无法归类时返回 None。
+
+    权限依赖由认证层实现，但工单接口对外的错误码属于本模块的契约：
+    未登录一律 TICKET_UNAUTHORIZED、无权限一律 TICKET_FORBIDDEN，
+    前端按错误码分支的逻辑不因为权限判定换了实现而失效。
+    认证层将来新增的其它 AuthError 不在这里硬猜，交给上层按原样返回。
+    """
+    if isinstance(exc, auth.TokenError):
+        return TicketAuthRequiredError()
+    if isinstance(exc, auth.PermissionDeniedError):
+        return TicketPermissionError()
+    return None
+
+
 class TicketErrorRoute(APIRoute):
     """把工单业务异常统一转换为错误响应。
 
@@ -40,6 +63,8 @@ class TicketErrorRoute(APIRoute):
     HTTP 状态取自异常的 http_status，响应体固定为
     {"error": 文案, "error_code": 错误码, "error_detail": 补充上下文（可选）}。
     新增接口不必再各写一遍 try/except，错误结构也不会随接口各自漂移。
+    权限依赖抛出的认证异常也在这里收口，路由签名只声明「需要什么身份」，
+    不必为了对齐错误码在每个接口里再包一层转换。
     """
 
     def get_route_handler(self):
@@ -50,6 +75,13 @@ class TicketErrorRoute(APIRoute):
                 return await handler(request)
             except TicketBusinessError as exc:
                 return JSONResponse(status_code=exc.http_status, content=exc.to_payload())
+            except auth.AuthError as exc:
+                translated = _as_ticket_error(exc)
+                if translated is None:
+                    raise
+                return JSONResponse(
+                    status_code=translated.http_status, content=translated.to_payload()
+                )
 
         return dispatch
 
@@ -58,36 +90,8 @@ tickets_router = APIRouter(route_class=TicketErrorRoute)
 
 
 # ---------------------------------------------------------------------------
-# 辅助函数：身份解析、取单鉴权与响应摘要（纯函数，不直接读写数据库）
+# 辅助函数：取单鉴权与响应摘要（纯函数，不直接读写数据库）
 # ---------------------------------------------------------------------------
-
-
-def _current_user(authorization: str):
-    """按 Authorization 头解析当前登录用户，令牌缺失、无效或过期时返回 None。
-
-    解析由认证服务统一完成：签名令牌校验通过后回库取用户，
-    接口层不关心令牌是签名串还是过渡期的旧会话令牌。
-    """
-    return auth.resolve_authorization(authorization)
-
-
-def _require_user(authorization: str, admin_only: bool = False) -> dict:
-    """取当前登录用户；未登录或权限不足时抛业务异常。
-
-    统一出口后，各接口开头不再重复「取用户 → 判空 → 返回错误字典」三段式，
-    只需声明自己需要什么样的身份。角色判定交给认证层，本层不再比对角色字符串；
-    认证层的异常在这里转成工单模块的错误码，保持本模块既有的错误响应契约。
-    """
-    user = _current_user(authorization)
-    try:
-        auth.require_login(user)
-        if admin_only:
-            auth.require_admin(user, "执行该操作")
-    except auth.TokenMissingError:
-        raise TicketAuthRequiredError() from None
-    except auth.PermissionDeniedError:
-        raise TicketPermissionError() from None
-    return user
 
 
 def _require_ticket(user: dict, ticket_id: str, action: str = "查看") -> dict:
@@ -95,6 +99,7 @@ def _require_ticket(user: dict, ticket_id: str, action: str = "查看") -> dict:
 
     取数与鉴权合成一步，各接口不必先查详情再自己比对 user_id；
     动作名只用于错误详情，便于提示「查看/确认/取消/判定」是哪一步被拦。
+    登录态已由权限依赖解析好，这里只管「这个人能不能动这张单」。
     """
     data = tickets.get_ticket(ticket_id)
     if data is None:
@@ -171,9 +176,8 @@ def _detail_message(data: dict) -> str:
 
 
 @tickets_router.post("/tickets")
-def create_ticket(req: CreateTicketRequest, authorization: str = Header(default="")):
-    user = _require_user(authorization)
-
+def create_ticket(req: CreateTicketRequest, user: dict = Depends(require_login)):
+    """创建待确认草稿，工单归属取自登录身份。"""
     # 若前端未显式传已尝试步骤，则从会话已记录的步骤自动沉淀
     tried_steps = req.tried_steps
     if not tried_steps:
@@ -220,7 +224,7 @@ def list_tickets(
     page: int | None = Query(default=None, description="页码，从 1 开始"),
     page_size: int | None = Query(default=None, description="每页条数，默认 20，上限 100"),
     order: str | None = Query(default=None, description="按建单时间排序，asc 正序 / desc 逆序（默认）"),
-    authorization: str = Header(default=""),
+    user: dict = Depends(require_login),
 ):
     """分页查询工单列表，支持按状态、关键词筛选与按建单时间正逆序排序。
 
@@ -231,7 +235,6 @@ def list_tickets(
     分页参数或关键词非法时返回明确错误。
     管理员看全部工单，普通用户只看本人工单；响应回显生效的筛选、分页与排序条件。
     """
-    user = _require_user(authorization)
     # keyword 优先，未传时回退到别名 q，便于前端沿用搜索框参数名
     raw_keyword = keyword if keyword is not None else q
     statuses = tickets.normalize_status_filter(status)
@@ -270,9 +273,12 @@ def list_tickets(
 
 
 @tickets_router.get("/order")
-def my_order(authorization: str = Header(default="")):
-    """查询当前用户订单与服务范围，供前端展示。"""
-    user = _current_user(authorization)
+def my_order(user: Optional[dict] = Depends(current_user)):
+    """查询当前用户订单与服务范围，供前端展示。
+
+    匿名访问不报错，返回空订单：前端据此引导登录，
+    而不是把「还没登录」处理成一次接口异常。
+    """
     if not user:
         return {"order": None}
     return {"order": orders.query_order(user["id"])}
@@ -284,9 +290,8 @@ def my_order(authorization: str = Header(default="")):
 
 
 @tickets_router.post("/tickets/reply")
-def reply_ticket(req: ReplyRequest, authorization: str = Header(default="")):
+def reply_ticket(req: ReplyRequest, user: dict = Depends(require_admin)):
     """追加一条人工回复，待处理工单随回复推进到处理中。"""
-    user = _require_user(authorization, admin_only=True)
     t = tickets.add_reply(req.ticket_id, user["name"], req.content)
     if t is None:
         raise TicketNotFoundError(req.ticket_id)
@@ -294,9 +299,8 @@ def reply_ticket(req: ReplyRequest, authorization: str = Header(default="")):
 
 
 @tickets_router.post("/tickets/status")
-def update_status(body: dict, authorization: str = Header(default="")):
+def update_status(body: dict, user: dict = Depends(require_admin)):
     """按目标状态更新工单，非法流转由状态校验拒绝。"""
-    _require_user(authorization, admin_only=True)
     ticket_id = body.get("ticket_id")
     t = tickets.update_status(ticket_id, body.get("status"))
     if t is None:
@@ -305,7 +309,7 @@ def update_status(body: dict, authorization: str = Header(default="")):
 
 
 @tickets_router.post("/tickets/transfer")
-def transfer_ticket(req: TransferRequest, authorization: str = Header(default="")):
+def transfer_ticket(req: TransferRequest, user: dict = Depends(require_admin)):
     """将工单转人工处理，写入转人工原因与命中规则。
 
     转人工前先按规则判定一次：原因未填时用判定结果回填，保证每次转人工都有
@@ -315,8 +319,6 @@ def transfer_ticket(req: TransferRequest, authorization: str = Header(default=""
     服务范围取自工单所属用户的订单，管理员处理他人工单时结论对应工单本人。
     仅管理员可转人工；非法来源状态（如已关闭的工单）由状态流转校验拒绝。
     """
-    user = _require_user(authorization, admin_only=True)
-
     data = _require_ticket(user, req.ticket_id, "转人工")
     decision = tickets.evaluate_transfer_rule(
         data,
@@ -354,7 +356,7 @@ def transfer_ticket(req: TransferRequest, authorization: str = Header(default=""
 
 
 @tickets_router.post("/tickets/batch-close")
-def batch_close_tickets(req: BatchCloseRequest, authorization: str = Header(default="")):
+def batch_close_tickets(req: BatchCloseRequest, user: dict = Depends(require_admin)):
     """批量关闭工单，逐单落痕并返回成功与失败明细。
 
     仅管理员可调用：一次提交多个工单号，每张工单在同一批次内独立结算，
@@ -362,7 +364,6 @@ def batch_close_tickets(req: BatchCloseRequest, authorization: str = Header(defa
     不影响同批其他工单；关闭原因写入每张工单的回复时间线。
     单次最多 50 个工单，重复工单号只处理一次，空列表直接拒绝。
     """
-    user = _require_user(authorization, admin_only=True)
     result = tickets.batch_close_tickets(
         req.ticket_ids, reason=req.reason, operator=user["name"]
     )
@@ -370,14 +371,13 @@ def batch_close_tickets(req: BatchCloseRequest, authorization: str = Header(defa
 
 
 @tickets_router.post("/tickets/batch-transfer")
-def batch_transfer_tickets(req: BatchTransferRequest, authorization: str = Header(default="")):
+def batch_transfer_tickets(req: BatchTransferRequest, user: dict = Depends(require_admin)):
     """批量转人工，转人工原因按转人工说明写入每张工单的时间线。
 
     仅管理员可调用：已终结或当前状态不允许转人工的工单进入 failures，
     其余工单照常流转，调用方据 success_ids 与 failures 决定是否需要重试。
     原因为空时以默认说明兜底，保证每条转人工记录都可追溯。
     """
-    user = _require_user(authorization, admin_only=True)
     result = tickets.batch_transfer_tickets(
         req.ticket_ids, reason=req.reason, operator=user["name"]
     )
@@ -390,14 +390,13 @@ def batch_transfer_tickets(req: BatchTransferRequest, authorization: str = Heade
 
 
 @tickets_router.post("/tickets/confirm")
-def confirm_ticket(req: ConfirmRequest, authorization: str = Header(default="")):
+def confirm_ticket(req: ConfirmRequest, user: dict = Depends(require_login)):
     """确认待确认草稿，将其正式流转为待处理工单。
 
     幂等：重复确认或确认已终结工单时原样返回，不产生副作用；
     工单不存在返回「工单不存在」，非法来源状态由流转校验拒绝。
     仅工单本人或管理员可确认，他人工单返回「无权限」。
     """
-    user = _require_user(authorization)
     _require_ticket(user, req.ticket_id, "确认")
     t = tickets.confirm_ticket(req.ticket_id)
     if t is None:
@@ -406,14 +405,13 @@ def confirm_ticket(req: ConfirmRequest, authorization: str = Header(default=""))
 
 
 @tickets_router.post("/tickets/cancel")
-def cancel_ticket(req: CancelRequest, authorization: str = Header(default="")):
+def cancel_ticket(req: CancelRequest, user: dict = Depends(require_login)):
     """取消待确认草稿，将其流转为已关闭，并记录取消原因。
 
     幂等：重复取消或取消已终结工单时原样返回，不产生副作用；
     工单不存在返回「工单不存在」，非法来源状态由流转校验拒绝。
     仅工单本人或管理员可取消，他人工单返回「无权限」。
     """
-    user = _require_user(authorization)
     _require_ticket(user, req.ticket_id, "取消")
     t = tickets.cancel_ticket(req.ticket_id, req.reason)
     if t is None:
@@ -425,7 +423,7 @@ def cancel_ticket(req: CancelRequest, authorization: str = Header(default="")):
 def expire_pending_tickets(
     timeout_seconds: int | None = None,
     limit: int | None = None,
-    authorization: str = Header(default=""),
+    user: dict = Depends(require_admin),
 ):
     """扫描并批量收敛超时未确认的待确认草稿。
 
@@ -433,7 +431,6 @@ def expire_pending_tickets(
     统一关闭，并写入取消说明与状态时间线。timeout_seconds / limit 可覆盖默认
     阈值与单批上限，返回的 remaining 大于 0 表示仍有超时草稿待下一批处理。
     """
-    _require_user(authorization, admin_only=True)
     result = tickets.expire_pending_tickets(timeout_seconds=timeout_seconds, limit=limit)
     if result["closed"]:
         message = f"已关闭 {result['closed']} 个超时待确认工单"
@@ -452,7 +449,7 @@ def pending_tickets(
     include_expired: bool = False,
     timeout_seconds: int | None = None,
     all_users: bool = False,
-    authorization: str = Header(default=""),
+    user: dict = Depends(require_login),
 ):
     """拉取待确认草稿列表，供前端展示确认卡片。
 
@@ -461,7 +458,6 @@ def pending_tickets(
     展示确认倒计时。普通用户只能看到自己的草稿，管理员需要全量视图时传
     all_users=true。timeout_seconds 可覆盖默认超时阈值，用于联调验证。
     """
-    user = _require_user(authorization)
     # 普通用户强制按本人隔离；管理员默认也只看自己的，显式要求时才看全量
     scope_user = tickets.user_scope(user, include_admin_all=all_users)
     result = tickets.list_pending_tickets(
@@ -489,7 +485,7 @@ def pending_tickets(
 def ticket_statistics(
     days: int | None = Query(default=None, description="只统计最近 N 天创建的工单，取值 1–365"),
     user_id: str | None = Query(default=None, description="按客户过滤，仅管理员可用"),
-    authorization: str = Header(default=""),
+    user: dict = Depends(require_login),
 ):
     """工单统计：按状态计数与平均处理时长。
 
@@ -500,7 +496,6 @@ def ticket_statistics(
     普通用户只能统计本人工单，传他人工号返回「无权限」；管理员不传 user_id
     统计全量，传了就只看该客户。
     """
-    user = _require_user(authorization)
     if tickets.is_admin(user):
         scope_user = user_id
     elif user_id and user_id != user["id"]:
@@ -522,7 +517,7 @@ def transfer_decision(
     ticket_id: str,
     user_text: str = Query(default="", max_length=500, description="用户当前消息，用于识别主动要求转人工"),
     feature: str = Query(default="", max_length=50, description="问题涉及的功能，用于判断是否在当前版本能力内"),
-    authorization: str = Header(default=""),
+    user: dict = Depends(require_login),
 ):
     """按规则判定工单是否需要转人工，返回命中原因与判定依据。
 
@@ -532,7 +527,6 @@ def transfer_decision(
     服务范围取自工单所属用户的订单而非当前登录账号，管理员查看他人工单时结论
     仍对应工单本人的服务范围。普通用户仅可判定本人工单，越权返回「无权限」。
     """
-    user = _require_user(authorization)
     data = _require_ticket(user, ticket_id, "判定")
 
     decision = tickets.evaluate_transfer_rule(
@@ -545,7 +539,7 @@ def transfer_decision(
 
 
 @tickets_router.get("/tickets/{ticket_id}")
-def ticket_detail(ticket_id: str, authorization: str = Header(default="")):
+def ticket_detail(ticket_id: str, user: dict = Depends(require_login)):
     """查询单个工单详情，返回结构化排查信息、状态时间线与回复时间线。
 
     troubleshooting 汇总已尝试步骤与排查依据：每个条目带自增序号，依据条目
@@ -558,6 +552,5 @@ def ticket_detail(ticket_id: str, authorization: str = Header(default="")):
     管理员可查看任意工单；普通用户仅可查看本人创建的工单，
     越权访问返回「无权限」，工单不存在返回「工单不存在」。
     """
-    user = _require_user(authorization)
     data = _require_ticket(user, ticket_id, "查看")
     return {"ticket": data, "message": _detail_message(data)}
