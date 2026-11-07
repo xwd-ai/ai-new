@@ -23,6 +23,8 @@ test('double recovery and refresh while writing do not create parallel requests'
   const {recovery}=setup(async(path,options)=>{calls++;return options?new Promise(r=>resolve=r):page([item]);});
   await recovery.load();const first=recovery.recover(item.fingerprint);
   await recovery.recover(item.fingerprint);await recovery.load();assert.equal(calls,2);
+  await recovery.selectStage('parsed');
+  assert.equal(recovery.stage, '');
   resolve({knowledge_id:'k1',created:false,chunks:0});await first;assert.equal(calls,3);
 });
 test('old reads and responses after access revocation cannot restore rows',async()=>{
@@ -88,4 +90,47 @@ test('recovery of the last item on a page returns to the first page with one wri
   assert.deepEqual(offsets, [0, 20, 20, 0]);
   assert.match(statuses.at(-1), /共 20 条.*1–20/);
   assert.match(results.at(-1), /恢复完成/);
+});
+
+test('stage selection resets offset and is retained on navigation and recovery', async () => {
+  const calls = [];
+  const {recovery, results} = setup(async (path, options) => {
+    calls.push(path);
+    return options ? {knowledge_id: 'k1', created: true, chunks: 1} : {items: [item], total: 21};
+  });
+  await recovery.load();
+  await recovery.move(1);
+  await recovery.selectStage('parsed');
+  assert.equal(recovery.offset, 0);
+  await recovery.move(1);
+  await recovery.recover(item.fingerprint);
+  const reads = calls.filter(path => path.includes('/pending?')).map(path => new URLSearchParams(path.split('?')[1]));
+  assert.equal(reads.at(-1).get('stage'), 'parsed');
+  assert.equal(reads.at(-1).get('offset'), '20');
+  await recovery.selectStage('');
+  assert.equal(new URLSearchParams(calls.at(-1).split('?')[1]).has('stage'), false);
+  assert.equal(recovery.recoveredId, 'k1');
+  assert.match(results.at(-1), /恢复完成/);
+});
+
+test('new stage ignores older responses including during empty page fallback', async () => {
+  const waiting = [];
+  const {recovery, rows} = setup(() => new Promise(resolve => waiting.push(resolve)));
+  const older = recovery.selectStage('parsed');
+  const newer = recovery.selectStage('chunked');
+  waiting[1]({items: [], total: 0});
+  await newer;
+  waiting[0]({items: [item], total: 1});
+  await older;
+  assert.deepEqual(rows.at(-1), []);
+  const fallback = recovery.load(20);
+  waiting[2]({items: [], total: 1});
+  await new Promise(setImmediate);
+  const latest = recovery.selectStage('parsed');
+  waiting[4]({items: [], total: 0});
+  await latest;
+  waiting[3]({items: [item], total: 1});
+  await fallback;
+  assert.equal(recovery.stage, 'parsed');
+  assert.deepEqual(rows.at(-1), []);
 });

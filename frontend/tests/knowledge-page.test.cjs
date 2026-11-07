@@ -124,6 +124,7 @@ test('late recovery success after 403 cannot fetch pending records again',async(
   assert.equal(calls.length,count);assert.equal(e.refreshPending.disabled,true);assert.equal(e.pendingRows.children.length,0);
   assert.equal(e.pendingPrevious.disabled, true);
   assert.equal(e.pendingNext.disabled, true);
+  assert.equal(e.pendingStage.disabled, true);
   assert.doesNotMatch(e.recoveryStatus.textContent,/恢复完成/);
   assert.equal(e.viewRecovered.hidden, true);
 });
@@ -208,4 +209,20 @@ test('pending controls navigate and refresh returns to page one', async () => {
   assert.equal(e.pendingPrevious.disabled, true);
   assert.deepEqual(calls.filter(x => isPending(x.url)).map(x => new URLSearchParams(x.url.split('?')[1]).get('offset')),
     ['0', '20', '0', '20', '0']);
+});
+
+test('stage selector binds query, refresh and authorization controls', async () => {
+  const {elements: e, calls} = page(url => isPending(url) ? json({items: [row], total: 21}) : null);
+  await settle();
+  assert.equal(e.pendingStage.disabled, false);
+  await e.refreshPending.emit('click');
+  await e.pendingNext.emit('click');
+  e.pendingStage.value = 'chunked';
+  await e.pendingStage.emit('change');
+  assert.equal(e.pendingPrevious.disabled, true);
+  await e.pendingNext.emit('click');
+  await e.refreshPending.emit('click');
+  const query = new URLSearchParams(calls.at(-1).url.split('?')[1]);
+  assert.equal(query.get('stage'), 'chunked');
+  assert.equal(query.get('offset'), '0');
 });

@@ -15,6 +15,7 @@
     p { margin:8px 0 16px; } .muted { color:var(--muted); }
     fieldset { border:0; padding:0; margin:24px 0 16px; display:flex; align-items:end; gap:16px; flex-wrap:wrap; }
     label { display:grid; gap:6px; font-weight:600; } .title-field { flex:1; min-width:180px; }
+    .actions { display:flex; align-items:end; gap:12px; flex-wrap:wrap; }
     input,select,textarea,button { font:inherit; padding:10px 12px; border:1px solid var(--border); border-radius:8px; background:white; color:var(--text); }
     textarea { width:100%; resize:vertical; } details { margin:20px 0; } summary { cursor:pointer; font-weight:600; }
     #ingestFields { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); }
@@ -60,7 +61,12 @@
     <details class="panel">
       <summary>恢复未完成入库</summary>
       <p class="muted">待恢复记录可能仍在执行。若提示处理中，请稍后刷新核对。刷新从首页读取。</p>
-      <button id="refreshPending" type="button" disabled>刷新待恢复列表</button>
+      <div class="actions">
+        <label>处理阶段<select id="pendingStage" aria-label="处理阶段" disabled>
+          <option value="">全部未完成</option><option value="parsed">已保存输入</option><option value="chunked">已完成分块</option>
+        </select></label>
+        <button id="refreshPending" type="button" disabled>刷新待恢复列表</button>
+      </div>
       <p id="pendingStatus" role="status" aria-live="polite">点击刷新读取待恢复记录。</p>
       <div class="table-wrap pending-table" role="region" aria-label="待恢复记录" tabindex="0"><table><thead><tr><th scope="col">预留资料编号</th><th scope="col">处理阶段</th><th scope="col">分块数</th><th scope="col">更新时间</th><th scope="col">操作</th></tr></thead><tbody id="pendingRows"></tbody></table></div>
       <div class="paging" role="group" aria-label="待恢复记录分页">

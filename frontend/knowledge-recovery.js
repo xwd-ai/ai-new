@@ -6,12 +6,14 @@ class KnowledgeRecovery {
     this.limit = 20;
     this.total = 0;
     this.recoveredId = null;
+    this.stage = '';
   }
   clear() {
     ++this.version; this.items = []; this.loading = false; this.onRows([]);
     this.offset = 0;
     this.total = 0;
     this.recoveredId = null;
+    this.stage = '';
     this.onBusy(this.recovering);
     this.onStatus('待恢复记录已清空，请重新登录后读取。'); this.onResult('');
   }
@@ -20,13 +22,23 @@ class KnowledgeRecovery {
     if (this.loading || this.recovering || offset < 0 || offset >= this.total) return;
     await this.load(offset);
   }
+  async selectStage(stage) {
+    if (this.recovering) return;
+    this.stage = stage;
+    await this.load(0);
+  }
   async load(offset = this.offset) {
     if (this.recovering) return;
     const version = ++this.version;
     this.total = 0;
     this.loading = true; this.items = []; this.onRows([]); this.onBusy(true);
     this.onStatus('正在读取待恢复记录…');
-    const readPage = start => this.request(`/api/knowledge/ingest/pending?offset=${start}&limit=${this.limit}`);
+    const stage = this.stage;
+    const readPage = start => {
+      const params = new URLSearchParams({offset: start, limit: this.limit});
+      if (stage) params.set('stage', stage);
+      return this.request(`/api/knowledge/ingest/pending?${params}`);
+    };
     try {
       let data = await readPage(offset);
       if (version !== this.version) return;

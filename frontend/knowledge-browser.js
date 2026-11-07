@@ -152,6 +152,8 @@ if (typeof document !== 'undefined') {
     onRecovered: () => { if (authorized) browser.load(); },
     onBusy: busy => {
       byId('refreshPending').disabled = !authorized || busy;
+      byId('pendingStage').disabled = !authorized || pending.recovering;
+      byId('pendingStage').value = pending.stage;
       byId('pendingPrevious').disabled = !authorized || busy || pending.offset === 0 || pending.total === 0;
       byId('pendingNext').disabled = !authorized || busy || pending.offset + pending.limit >= pending.total;
       for (const button of byId('pendingRows').querySelectorAll('button')) button.disabled = !authorized || busy;
@@ -175,6 +177,9 @@ if (typeof document !== 'undefined') {
     },
   });
   byId('refreshPending').addEventListener('click', () => { if (authorized) pending.load(0); });
+  byId('pendingStage').addEventListener('change', () => {
+    if (authorized) pending.selectStage(byId('pendingStage').value);
+  });
   byId('pendingPrevious').addEventListener('click', () => { if (authorized) pending.move(-1); });
   byId('pendingNext').addEventListener('click', () => { if (authorized) pending.move(1); });
   byId('viewRecovered').addEventListener('click', () => {
@@ -189,6 +194,7 @@ if (typeof document !== 'undefined') {
       if (!identity.user || identity.user.role !== 'admin') throw new Error('仅管理员可以浏览资料列表，请登录管理员账号。');
       authorized = true; byId('filters').disabled = byId('ingestFields').disabled = false;
       byId('refreshPending').disabled = false;
+      byId('pendingStage').disabled = false;
       byId('access').textContent = `管理员：${identity.user.name || identity.user.username}`;
       await browser.search('', '');
     } catch (error) {
