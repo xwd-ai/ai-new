@@ -23,7 +23,10 @@
   AI_NEW_JWT_SECRET），调用时解析而非 import 时定死；配置缺失或取值非法时
   告警并回退默认值，不会因为一处配置写错就让服务起不来；
 - 接口层取当前用户统一走 resolve_authorization：签名令牌校验通过后按 sub 回库取
-  用户，用户信息始终以库为准；单段旧会话令牌在过渡期内仍可解析，不受影响。
+  用户，用户信息始终以库为准；单段旧会话令牌在过渡期内仍可解析，不受影响；
+- 角色判定与拦截也收在本层：require_login / require_role / require_admin 分别对应
+  「已登录」「指定角色」「管理员」三档要求，scope_user_id 给出列表类查询的可见范围，
+  接口层只声明需要什么身份，不自己比对角色字符串。
 
 明文密码只作为 authenticate / register_user 的入参存在，不落库、不进日志、不随用户信息返回。
 """
@@ -45,7 +48,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from backend.database import SessionLocal
 from backend.models import Session, User
-from backend.models.user import RefreshToken, RevokedToken
+from backend.models.user import DEFAULT_ROLE, RefreshToken, RevokedToken, UserRole, normalize_role
 from backend.services.password import MAX_PASSWORD_BYTES, PasswordHashError, verify_password
 
 logger = logging.getLogger(__name__)
@@ -218,6 +221,96 @@ class RefreshTokenOwnerError(RefreshTokenError):
     error_code = "AUTH_REFRESH_USER_GONE"
 
 
+# ---- 角色与权限：管理员与客户的数据边界 ----
+#
+# 角色只有两种，判定与拦截都收在本段，是权限的唯一出口：
+# 管理员可以读写全量数据，客户只能访问本人的数据。
+# 接口层只声明「这一步需要什么身份」，不自己比对角色字符串，
+# 少一处判断就少一处漏判，也不会因为把 "Admin" 当成管理员而放开越权。
+#
+# 判定一律基于回库取到的用户信息，不用令牌里的角色快照：
+# 调过角色的人下一次请求就按新角色生效，不必等旧令牌过期。
+# 未登录与无权限分开报：401 提示客户端去登录，403 说明已登录但不该做这件事。
+
+ADMIN_ROLE = UserRole.ADMIN.value
+CUSTOMER_ROLE = UserRole.CUSTOMER.value
+
+
+def role_of(user: Optional[dict]) -> str:
+    """取用户角色，未登录或取值无法识别时按客户角色处理。"""
+    return normalize_role((user or {}).get("role"))
+
+
+def is_admin(user: Optional[dict]) -> bool:
+    """是否管理员。"""
+    return role_of(user) == ADMIN_ROLE
+
+
+def is_customer(user: Optional[dict]) -> bool:
+    """是否客户账号；未登录不算客户，避免匿名请求被当作客户放行。"""
+    return bool(user) and role_of(user) == CUSTOMER_ROLE
+
+
+def has_role(user: Optional[dict], *roles: str) -> bool:
+    """用户是否属于给定角色之一；未登录或角色列表为空时返回 False。
+
+    角色入参同走归一化，枚举与字符串都可以传，写错的值会被丢掉而不是放宽判定。
+    """
+    if not user:
+        return False
+    allowed = {normalize_role(role, default="") for role in roles}
+    allowed.discard("")
+    return bool(allowed) and role_of(user) in allowed
+
+
+def require_login(user: Optional[dict]) -> dict:
+    """要求已登录，未登录抛 TokenMissingError（401）。"""
+    if not user:
+        raise TokenMissingError("未登录")
+    return user
+
+
+def require_role(user: Optional[dict], *roles: str, action: str = "") -> dict:
+    """要求用户属于给定角色之一，返回用户信息。
+
+    未登录 401，已登录但角色不符 403；错误详情给出所需角色与当前角色，
+    前端据此区分「去登录」与「没有权限」，日志里也能看清是谁被拦。
+    action 只进文案与详情，说明是哪一步被拦，不参与判定。
+    """
+    account = require_login(user)
+    if has_role(account, *roles):
+        return account
+
+    required = [normalize_role(role, default="") for role in roles]
+    required = [role for role in required if role] or [ADMIN_ROLE]
+    detail = {"required_roles": required, "role": role_of(account)}
+    if action:
+        detail["action"] = action
+        message = f"当前账号无权{action}"
+    else:
+        message = "当前账号无权执行该操作"
+    raise PermissionDeniedError(message, detail)
+
+
+def require_admin(user: Optional[dict], action: str = "") -> dict:
+    """要求管理员身份：未登录 401，非管理员 403。"""
+    return require_role(user, ADMIN_ROLE, action=action)
+
+
+def scope_user_id(user: Optional[dict], include_admin_all: bool = True) -> Optional[str]:
+    """列表类查询的数据范围：None 表示全量，否则限定为该用户号。
+
+    管理员在 include_admin_all 为真时看全量，为假时与客户一样只看本人；
+    客户无论参数如何都只看本人。分页列表、待确认列表、统计共用这一口径，
+    避免每个查询接口各写一遍角色判断，也不会出现某个接口漏掉隔离。
+    未登录直接拒绝：拿不到身份时宁可报错，也不返回一个范围不明的全量查询。
+    """
+    account = require_login(user)
+    if is_admin(account) and include_admin_all:
+        return None
+    return account.get("id")
+
+
 # ---- 注册：用户名与密码强度校验 ----
 
 
@@ -275,12 +368,15 @@ def _username_exists(db, username: str) -> bool:
     )
 
 
-def register_user(username: str, password: str, name: str = "", role: str = "customer") -> dict:
+def register_user(
+    username: str, password: str, name: str = "", role: str = DEFAULT_ROLE
+) -> dict:
     """创建账号并返回可公开的用户信息。
 
     校验顺序：用户名格式 → 密码强度 → 用户名占用，全部通过才写入。
     密码经 User.set_password 哈希后落库，明文不进入返回值与日志。
-    role 由调用方决定，公开注册入口固定传 customer，不开放管理员身份的自助创建。
+    role 由调用方决定，公开注册入口固定传 customer，不开放管理员身份的自助创建；
+    入参经归一化，写错或留空都落到权限最小的客户角色。
     """
     account_name = normalize_username(username)
     problems = validate_password_strength(password, account_name)
@@ -295,7 +391,7 @@ def register_user(username: str, password: str, name: str = "", role: str = "cus
             id=f"u-{uuid.uuid4().hex[:10]}",
             username=account_name,
             name=(name or "").strip()[:NAME_MAX_LENGTH] or account_name,
-            role=role or "customer",
+            role=normalize_role(role),
         )
         user.set_password(password)
         db.add(user)
@@ -565,7 +661,7 @@ def build_access_payload(
         "aud": JWT_AUDIENCE,
         "sub": user["id"],
         "username": user["username"],
-        "role": user.get("role") or "customer",
+        "role": normalize_role(user.get("role")),
         "typ": TOKEN_TYPE_ACCESS,
         "iat": now,
         "nbf": now,
@@ -605,7 +701,7 @@ def build_refresh_payload(
         "aud": JWT_AUDIENCE,
         "sub": user["id"],
         "username": user["username"],
-        "role": user.get("role") or "customer",
+        "role": normalize_role(user.get("role")),
         "typ": TOKEN_TYPE_REFRESH,
         "iat": now,
         "nbf": now,
@@ -922,7 +1018,7 @@ def _record_session(user: dict, token: str, expires_at: int) -> None:
                 user_id=user["id"],
                 username=user["username"],
                 name=user.get("name") or "",
-                role=user.get("role") or "customer",
+                role=normalize_role(user.get("role")),
                 expires_at=expires_at,
             )
         )

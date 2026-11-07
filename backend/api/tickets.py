@@ -75,13 +75,18 @@ def _require_user(authorization: str, admin_only: bool = False) -> dict:
     """取当前登录用户；未登录或权限不足时抛业务异常。
 
     统一出口后，各接口开头不再重复「取用户 → 判空 → 返回错误字典」三段式，
-    只需声明自己需要什么样的身份，错误文案与错误码由异常类型决定。
+    只需声明自己需要什么样的身份。角色判定交给认证层，本层不再比对角色字符串；
+    认证层的异常在这里转成工单模块的错误码，保持本模块既有的错误响应契约。
     """
     user = _current_user(authorization)
-    if not user:
-        raise TicketAuthRequiredError()
-    if admin_only and not tickets.is_admin(user):
-        raise TicketPermissionError()
+    try:
+        auth.require_login(user)
+        if admin_only:
+            auth.require_admin(user, "执行该操作")
+    except auth.TokenMissingError:
+        raise TicketAuthRequiredError() from None
+    except auth.PermissionDeniedError:
+        raise TicketPermissionError() from None
     return user
 
 

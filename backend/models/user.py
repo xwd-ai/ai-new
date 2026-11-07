@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import time
+from enum import Enum
 from typing import Optional
 
 from sqlalchemy import Float, String
@@ -18,6 +19,41 @@ from backend.services.password import (
 PASSWORD_HASH_LENGTH = 60
 
 
+class UserRole(str, Enum):
+    """账号角色。
+
+    只有两种：管理员可以查看与处理全量数据，客户只能访问本人的数据。
+    角色以字符串落库，枚举供代码内比较与入参收敛使用，
+    避免各处手写 "admin" 字面量、写错一个字母就变成另一种身份。
+    """
+
+    ADMIN = "admin"
+    CUSTOMER = "customer"
+
+
+# 合法角色取值集合：注册、改角色等入口据此校验，白名单之外的取值不进库
+ROLE_VALUES = frozenset(role.value for role in UserRole)
+
+# 未显式指定角色时的默认值：公开注册一律建成客户账号，取权限最小的那个
+DEFAULT_ROLE = UserRole.CUSTOMER.value
+
+
+def normalize_role(role, default: str = DEFAULT_ROLE) -> str:
+    """把角色入参收敛为合法取值，无法识别时返回 default。
+
+    权限判定只认白名单内的取值：空值、None、历史脏数据都落到 default；
+    大小写与首尾空白先做归一，Admin 与 admin 视为同一角色，
+    不会因为写法不同而意外获得或失去权限。
+    """
+    if isinstance(role, UserRole):
+        return role.value
+    if isinstance(role, str):
+        value = role.strip().lower()
+        if value in ROLE_VALUES:
+            return value
+    return default
+
+
 def _digest_legacy(password: str) -> str:
     """迁移前的旧存法：不加盐的 sha256 摘要，仅供兼容读取，新写入不再产生。"""
     return hashlib.sha256(password.encode()).hexdigest()
@@ -30,7 +66,24 @@ class User(Base):
     username: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String(PASSWORD_HASH_LENGTH), nullable=False)
     name: Mapped[str] = mapped_column(String, nullable=False)
-    role: Mapped[str] = mapped_column(String, nullable=False)  # admin / customer
+    role: Mapped[str] = mapped_column(String, nullable=False)  # admin / customer，取值见 UserRole
+
+    # ---- 角色读取：只做判定，不改变账号状态 ----
+
+    @property
+    def role_value(self) -> str:
+        """归一化后的角色取值，无法识别时按客户角色处理。"""
+        return normalize_role(self.role)
+
+    @property
+    def is_admin(self) -> bool:
+        """是否管理员。"""
+        return self.role_value == UserRole.ADMIN.value
+
+    @property
+    def is_customer(self) -> bool:
+        """是否客户账号。"""
+        return self.role_value == UserRole.CUSTOMER.value
 
     # ---- 密码读写：字段只存哈希，明文不落库、不进日志 ----
 

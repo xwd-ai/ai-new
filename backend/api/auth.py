@@ -12,12 +12,14 @@
   客户端手里的凭证彻底不能用了，应当直接回登录页。
 - 登出把访问令牌记入作废名单并删除会话记录，续期令牌提交了才吊销；
   作废之后同一张令牌再来访问一律按未登录处理，直到它自然过期。
-- 过期凭据清理是运维动作，只对管理员开放：未登录 401、非管理员 403。
+- 身份与角色统一由依赖函数声明：current_user 允许匿名、require_login 要求登录、
+  require_admin 要求管理员，接口内不再自己比对角色字符串。
+  过期凭据清理是运维动作，只对管理员开放：未登录 401、非管理员 403。
 """
 
 from typing import Optional
 
-from fastapi import APIRouter, Body, Header, Request
+from fastapi import APIRouter, Body, Depends, Header, Request
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 
@@ -76,18 +78,48 @@ def _header_token(authorization: str) -> str:
         return "" if head == "bearer" else raw
 
 
-def _require_admin(authorization: str) -> dict:
-    """取当前用户并要求管理员身份，未登录 401、非管理员 403。
+# ---------------------------------------------------------------------------
+# 权限依赖：接口只声明需要什么身份，判定与拦截都交给认证服务
+# ---------------------------------------------------------------------------
+#
+# 三个依赖按「匿名 → 已登录 → 管理员」逐级收紧，路由按需选用即可：
+# 判定口径只有认证服务一处，接口层不再自己比对角色字符串，
+# 也就不会出现某个接口把 "Admin" 当成管理员、或漏判整个角色校验的情况。
+# 依赖里抛的异常同样由 AuthErrorRoute 统一转成错误响应。
 
-    清理会删除表记录，属于运维动作，不开放给普通账号；
-    身份同样取自令牌并经回库确认，不依赖令牌里的角色快照。
+
+def current_user(authorization: str = Header(default="")) -> Optional[dict]:
+    """依赖：解析当前登录用户，未登录返回 None。
+
+    供「匿名也能访问、登录后行为不同」的接口使用；
+    需要强制登录的接口改用 require_login，让未登录在入口就被拒绝。
     """
-    user = auth.resolve_authorization(authorization)
-    if not user:
-        raise auth.TokenMissingError("未登录")
-    if user.get("role") != "admin":
-        raise auth.PermissionDeniedError("仅管理员可执行该操作")
-    return user
+    return auth.resolve_authorization(authorization)
+
+
+def require_login(authorization: str = Header(default="")) -> dict:
+    """依赖：要求已登录，未登录按 401 拒绝。"""
+    return auth.require_login(auth.resolve_authorization(authorization))
+
+
+def require_customer(authorization: str = Header(default="")) -> dict:
+    """依赖：要求客户账号，管理员账号走这条分支会被 403 拒绝。
+
+    用于只对客户开放的自助操作（如本人资料、本人订单），
+    把「客户能做什么」与「管理员能做什么」分开声明，而不是靠路由各自注解。
+    """
+    return auth.require_role(
+        auth.resolve_authorization(authorization), auth.CUSTOMER_ROLE
+    )
+
+
+def require_admin(authorization: str = Header(default="")) -> dict:
+    """依赖：要求管理员身份，未登录 401、非管理员 403。
+
+    清理、批处理这类会改动他人数据的运维动作只声明这一个依赖即可；
+    身份取自令牌并经回库确认，不依赖令牌里的角色快照。
+    """
+    return auth.require_admin(auth.resolve_authorization(authorization), "执行该操作")
 
 
 @auth_router.post("/login", response_model=LoginResponse, response_model_exclude_none=True)
@@ -173,24 +205,24 @@ def logout(
 )
 def cleanup_sessions(
     req: Optional[CleanupRequest] = Body(default=None),
-    authorization: str = Header(default=""),
+    user: dict = Depends(require_admin),
 ):
     """删除已过期的会话、续期登记与作废记录，返回逐表条数。
 
     全部参数可选：空请求体按「到期即删、单表 2000 条」的默认口径执行。
     返回体的 truncated 为真时说明仍有剩余，再次调用即可继续清理。
+    权限由 require_admin 依赖把关：未登录 401、非管理员 403，进入函数时
+    已是管理员身份，函数体内不再重复判断。
     """
-    _require_admin(authorization)
     params = req or CleanupRequest()
     return auth.purge_expired_sessions(retention=params.retention, limit=params.limit)
 
 
 @auth_router.get("/me")
-def me(authorization: str = Header(default="")):
+def me(user: Optional[dict] = Depends(current_user)):
     """返回当前登录用户；令牌缺失或校验失败时 user 为 null。
 
     身份取自令牌声明并经回库确认，账号被删除后旧令牌即失效，
     不会因为令牌仍在有效期内而返回一个已不存在的用户。
     """
-    user = auth.resolve_authorization(authorization)
     return {"user": auth.public_user(user) if user else None}

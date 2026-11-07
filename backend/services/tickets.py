@@ -2,7 +2,7 @@
 
 分层约定（文件内按此顺序分段）：
 - 会话与取数：统一的连接边界与单条取数；
-- 权限层：数据可见范围（普通用户仅本人，管理员可全量）；
+- 权限层：数据可见范围（普通用户仅本人，管理员可全量），角色判定复用认证层的口径；
 - 状态机层：状态变更的唯一写入口，负责校验、留痕与字段赋值；
 - 入参归一化层：状态、分页、排序、关键词等外部入参收敛为内部口径；
 - 写入层、查询层、统计层、组装层、判定层：各自只负责一件事。
@@ -34,6 +34,7 @@ from backend.models.ticket import (
     is_valid_status,
     validate_transition,
 )
+from backend.services import auth as auth_service
 
 # 状态取值别名：业务代码统一引用这些常量，避免裸字符串分散在各处函数里
 STATUS_PENDING_CONFIRM = TicketStatus.PENDING_CONFIRM.value
@@ -45,9 +46,6 @@ STATUS_CLOSED = TicketStatus.CLOSED.value
 
 # 建单落地的初始状态：两阶段建单先挂起为待确认草稿，确认后才进入待处理
 INITIAL_STATUS = STATUS_PENDING_CONFIRM
-
-# 管理员角色名：数据可见范围按此角色区分全量与本人
-ADMIN_ROLE = "admin"
 
 # 待确认草稿的超时阈值（秒）：超时未确认的草稿收敛为已关闭，避免僵尸工单堆积
 PENDING_CONFIRM_TIMEOUT_SECONDS = 30 * 60
@@ -204,11 +202,15 @@ def _load_ticket(db, ticket_id: str):
 # ---------------------------------------------------------------------------
 # 权限层：数据可见范围（普通用户仅限本人，管理员可全量）
 # ---------------------------------------------------------------------------
+#
+# 角色怎么判由认证层定义，本层不再维护第二套口径：管理员与客户的边界只有一处
+# 真相，避免工单侧认 admins、认证侧认 admin 这类拼写差异把隔离打穿。
+# 本层只负责把角色换算成工单侧的语义——可见范围与单条数据的归属校验。
 
 
 def is_admin(user: dict | None) -> bool:
-    """判断当前登录用户是否为管理员。"""
-    return bool(user) and user.get("role") == ADMIN_ROLE
+    """判断当前登录用户是否为管理员（判定口径与认证层一致）。"""
+    return auth_service.is_admin(user)
 
 
 def user_scope(user: dict | None, include_admin_all: bool = True) -> str | None:
@@ -217,10 +219,9 @@ def user_scope(user: dict | None, include_admin_all: bool = True) -> str | None:
     管理员在 include_admin_all 为真时看全量，为假时与普通用户一样只看本人；
     普通用户无论参数如何都只看本人。分页列表、待确认列表、统计共用这一口径，
     避免每个查询接口各写一遍角色判断，也不会出现某个接口漏掉隔离的情况。
+    未登录直接拒绝，不返回范围不明的全量查询。
     """
-    if is_admin(user) and include_admin_all:
-        return None
-    return (user or {}).get("id")
+    return auth_service.scope_user_id(user, include_admin_all=include_admin_all)
 
 
 def ensure_ticket_access(
