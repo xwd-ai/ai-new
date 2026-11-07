@@ -61,6 +61,8 @@ def test_legacy_and_paged_reads_beyond_first_hundred(listing):
     assert set(page['items'][0]) == {'fingerprint', 'knowledge_id', 'stage', 'chunk_count', 'updated_at'}
     remainder = client.get(PENDING, params={'offset': 100}, headers=ADMIN).json()
     assert [row['fingerprint'] for row in remainder['items']] == expected[100:]
+    filtered = client.get(PENDING, params={'stage': 'chunked'}, headers=ADMIN).json()
+    assert filtered == {'items': legacy['items'], 'total': 106}
     assert statements and all('payload' not in statement for statement in statements)
 
 
@@ -79,9 +81,44 @@ def test_empty_pages_keep_total_and_require_admin(listing):
     assert client.get(PENDING, params={'offset': 0}, headers={'Authorization': 'customer'}).status_code == 403
 
 
-def test_count_and_page_share_snapshot_during_recovery(listing):
+def test_stage_filter_applies_to_items_total_and_offset(listing):
+    client, engine = listing
+    insert(engine, ['a', 'd'], stage='parsed')
+    insert(engine, ['b', 'c'], stage='chunked')
+    insert(engine, ['finished'], stage='stored', updated_at=0)
+
+    parsed = client.get(PENDING, params={'stage': 'parsed', 'offset': 1, 'limit': 1}, headers=ADMIN).json()
+    assert parsed['total'] == 2
+    assert [row['fingerprint'] for row in parsed['items']] == ['d']
+    chunked = client.get(PENDING, params={'stage': 'chunked'}, headers=ADMIN).json()
+    assert chunked['total'] == 2
+    assert [row['fingerprint'] for row in chunked['items']] == ['b', 'c']
+    assert client.get(PENDING, params={'stage': 'parsed', 'offset': 2}, headers=ADMIN).json() == {
+        'items': [], 'total': 2,
+    }
+    assert client.get(PENDING, params={'stage': 'parsed'}, headers={'Authorization': 'customer'}).status_code == 403
+
+
+@pytest.mark.parametrize('stage', ['stored', 'unknown', ''])
+def test_invalid_stage_returns_422(listing, stage):
+    client, _ = listing
+    assert client.get(PENDING, params={'stage': stage}, headers=ADMIN).status_code == 422
+
+
+def test_empty_stage_filter_excludes_other_pending_records(listing):
+    client, engine = listing
+    insert(engine, ['one'], stage='chunked')
+    assert client.get(PENDING, params={'stage': 'parsed'}, headers=ADMIN).json() == {'items': [], 'total': 0}
+
+
+@pytest.mark.parametrize('stage', [None, 'chunked'])
+def test_count_and_page_share_snapshot_during_recovery(listing, stage):
     client, engine = listing
     insert(engine, ['a', 'b'])
+    params = {'limit': 1}
+    if stage is not None:
+        insert(engine, ['older-other-stage'], stage='parsed', updated_at=0)
+        params['stage'] = stage
     updated = False
 
     @sa.event.listens_for(engine, 'after_cursor_execute')
@@ -93,7 +130,7 @@ def test_count_and_page_share_snapshot_during_recovery(listing):
                 writer.execute(sa.update(KnowledgeIngestJournal).where(
                     KnowledgeIngestJournal.fingerprint == 'a').values(stage='stored'))
 
-    before = client.get(PENDING, params={'limit': 1}, headers=ADMIN).json()
+    before = client.get(PENDING, params=params, headers=ADMIN).json()
     assert updated and before['total'] == 2 and before['items'][0]['fingerprint'] == 'a'
-    after = client.get(PENDING, params={'limit': 1}, headers=ADMIN).json()
+    after = client.get(PENDING, params=params, headers=ADMIN).json()
     assert after['total'] == 1 and after['items'][0]['fingerprint'] == 'b'

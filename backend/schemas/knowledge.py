@@ -101,4 +101,4 @@ class PendingIngest(BaseModel):
 
 class PendingIngestResponse(BaseModel):
     items: list[PendingIngest]
-    total: int | None = Field(default=None, description='传入分页参数时返回全部待恢复记录数')
+    total: int | None = Field(default=None, description='传入筛选或分页参数时返回匹配的待恢复记录总数')

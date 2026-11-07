@@ -130,7 +130,7 @@ node --test frontend/tests/chat-recovery.test.cjs
 
 新版文本入库在同一 SQLite 的 `knowledge_ingest_journal` 中保存 `parsed → chunked → stored` 阶段。`parsed` 保存可恢复输入及预留资料编号；`chunked` 保存已计算的分块数量，恢复时跳过该计算；`stored` 与知识资料在同一事务中提交，并清空 journal 中重复的正文输入。当前仍整篇保存资料，journal 不增加逐块存储或向量索引。
 
-管理员可调用 `GET /api/knowledge/ingest/pending` 查看未完成记录。无参数时沿用 `items` 响应，最多返回最早 100 条。传入 `offset` 或 `limit` 时附带全部待恢复数 `total`，例如 `GET /api/knowledge/ingest/pending?offset=100&limit=3` 读取第 101 至 103 条。记录按更新时间、指纹升序排列。计数与当前页使用同一次 SQLite 读取快照，翻页期间完成的记录可能使后续记录前移。接口只读取摘要，不查询暂存正文。
+管理员可调用 `GET /api/knowledge/ingest/pending` 查看未完成记录。无参数时沿用 `items` 响应，最多返回最早 100 条。`stage=parsed` 筛选已保存输入的记录，`stage=chunked` 筛选已完成分块的记录。传入 `stage`、`offset` 或 `limit` 时附带匹配记录总数 `total`。例如 `GET /api/knowledge/ingest/pending?stage=parsed&offset=1&limit=1` 读取已保存输入的第 2 条记录。记录按更新时间、指纹升序排列。计数与当前页使用同一次 SQLite 读取快照，翻页期间记录的阶段变化可能使后续记录前移。接口只读取摘要，不查询暂存正文。阶段筛选可通过 API 使用，管理页当前按全部未完成记录分页。
 
 通过 `POST /api/knowledge/ingest/recover/{fingerprint}` 同步恢复单条记录。恢复复用现有租约与心跳，进程崩溃后需等待租约过期，占用时返回 409 和 `Retry-After: 1`。完成记录重复恢复返回 `created=false`，缺失记录返回 404，损坏输入或状态不匹配返回 422。底层数据库故障仍可能返回 500。
 

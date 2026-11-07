@@ -114,20 +114,22 @@ def list_knowledge(
     '/knowledge/ingest/pending', response_model=PendingIngestResponse,
     response_model_exclude_none=True,
     summary='查看待恢复的入库记录',
-    description='按更新时间和指纹升序返回。无分页参数时返回前 100 条，传入任一分页参数时附带待恢复总数。',
-    responses={403: {'model': ErrorResponse}, 422: {'model': ErrorResponse, 'description': '分页参数不合法'}},
+    description='按更新时间和指纹升序返回。无参数时返回前 100 条，传入筛选或分页参数时附带匹配记录总数。',
+    responses={403: {'model': ErrorResponse}, 422: {'model': ErrorResponse, 'description': '筛选或分页参数不合法'}},
 )
 def pending_ingests(
     authorization: str = Header(default=''),
     offset: Annotated[int | None, Query(ge=0, description='跳过的记录数，省略时为 0')] = None,
     limit: Annotated[int | None, Query(ge=1, le=100, description='每页上限，省略时为 100')] = None,
+    stage: Annotated[Literal['parsed', 'chunked'] | None, Query(description='按已保存输入或已完成分块筛选')] = None,
 ) -> dict:
     _require_admin(authorization)
-    if offset is None and limit is None:
+    if offset is None and limit is None and stage is None:
         return {'items': ingest_service.pending_ingests()}
     return ingest_service.pending_ingest_page(
         offset=0 if offset is None else offset,
         limit=100 if limit is None else limit,
+        stage=stage,
     )
 
 

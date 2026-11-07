@@ -152,8 +152,9 @@
 |---|---|
 | `offset` | 跳过的记录数，非负整数，默认 0 |
 | `limit` | 每页上限，1 至 100，默认 100 |
+| `stage` | 可选处理阶段。`parsed` 为已保存输入，`chunked` 为已完成分块 |
 
-无分页参数时返回原有的 `{"items":[...]}`，最多 100 条。传入任一分页参数时返回 `{"items":[...],"total":106}`，其中 `total` 是当前全部未完成记录数。比如 `GET /api/knowledge/ingest/pending?offset=100&limit=3` 读取第 101 至 103 条。越界或无效整数返回 422。偏移到达或超过总数时，`items` 为空且仍返回 `total`。计数与窗口共享同次 SQLite 读取快照，跨请求的新增或恢复可能改变后续页面的位置。
+无参数时返回原有的 `{"items":[...]}`，最多 100 条。传入筛选或分页参数时返回 `{"items":[...],"total":2}`，其中 `total` 是匹配筛选条件的全部未完成记录数。仅传 `stage` 时也返回总数，并使用默认分页。比如 `GET /api/knowledge/ingest/pending?stage=parsed&offset=1&limit=1` 读取已保存输入的第 2 条记录。无效阶段（包括 `stored` 和空值）或分页参数返回 422。偏移到达或超过匹配总数时，`items` 为空且仍返回 `total`。计数与窗口共享同次 SQLite 读取快照，跨请求的新增、恢复或阶段变化可能改变后续页面的位置。
 
 `POST /api/knowledge/ingest/recover/{fingerprint}` 无请求体，使用数据库 journal 内首次保存的输入同步恢复。`parsed` 会计算分块；`chunked` 复用计数；资料与 `stored` 完成状态同事务提交，完成后清空重复输入。重复恢复已完成项返回原资料、`created=false`、`chunks=0`。两接口仅管理员可用（403）；journal 不存在为 404；租约占用或失效为 409 并附 `Retry-After: 1`；输入指纹、格式或阶段不兼容为 422；底层数据库故障未统一分类，可能返回 500。
 

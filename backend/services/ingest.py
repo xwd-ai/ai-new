@@ -329,11 +329,14 @@ def _journal_chunked(lease, chunk_count: int) -> None:
         db.commit()
 
 
-def _pending_summary_query(db: Session):
+def _pending_summary_query(db: Session, stage: str | None = None):
     journal = KnowledgeIngestJournal
-    return db.query(
+    query = db.query(
         journal.fingerprint, journal.knowledge_id, journal.stage, journal.chunk_count, journal.updated_at,
-    ).filter(journal.stage != STAGE_STORED).order_by(journal.updated_at, journal.fingerprint)
+    ).filter(journal.stage != STAGE_STORED)
+    if stage is not None:
+        query = query.filter(journal.stage == stage)
+    return query.order_by(journal.updated_at, journal.fingerprint)
 
 
 def pending_ingests() -> list[dict]:
@@ -341,11 +344,11 @@ def pending_ingests() -> list[dict]:
         return [row._asdict() for row in _pending_summary_query(db).limit(100)]
 
 
-def pending_ingest_page(*, offset: int, limit: int) -> dict:
+def pending_ingest_page(*, offset: int, limit: int, stage: str | None = None) -> dict:
     """在一次 SQLite 读事务内读取待恢复总数和当前页。"""
     with SessionLocal() as db:
         db.execute(text('BEGIN'))
-        query = _pending_summary_query(db)
+        query = _pending_summary_query(db, stage)
         total = query.order_by(None).count()
         # 超出末页时直接返回，避免绑定超出 SQLite 整数范围的偏移量。
         rows = query.offset(offset).limit(limit).all() if offset < total else []
