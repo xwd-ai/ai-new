@@ -1,32 +1,44 @@
-"""认证与会话服务。
+"""认证服务：账号、令牌与权限的唯一收口。
 
-用户查询、注册、密码校验与会话签发都在这一层收口：
-- 用户信息从 users 表读取，对外只暴露 id / username / name / role，密码哈希不出本层；
-- 注册时校验用户名格式与密码强度，通过后写入 bcrypt 哈希，明文不落库；
-- 密码比对委托 User.check_password：bcrypt 哈希按算法校验，仍为旧版摘要的账号按兼容逻辑比对；
-- 校验通过的账号若仍存旧版摘要，或哈希成本低于当前配置，趁这次登录把字段原地升级，
-  存量用户无需重置密码即可完成迁移；
-- 登录成功后签发 JWT（HS256 紧凑格式，载荷只带鉴权必需的声明），
-  同时把该令牌登记到 sessions 表：既有解析路径按令牌原文查会话，
-  在令牌校验链路接管前保持兼容，令牌到期时间与会话记录保持一致；
-- 登录同时签发长期 refresh token（typ=refresh，默认 30 天）并登记
-  refresh_tokens 表，支持按条吊销；两类令牌同一密钥，typ 互斥、不能互相顶替；
-- 访问令牌过期后由 refresh token 换发：签名合格之外还要求登记记录未吊销、
-  未过期且主体一致，换发只重签访问令牌、不延长续期凭证自身的寿命；
-- 登出把当前访问令牌的 jti 记入 revoked_tokens 黑名单，同时删除对应的会话记录，
-  并可选吊销客户端一并提交的续期令牌；此后该令牌即使未过期也一律判为未登录；
-- 过期凭据由 purge_expired_sessions 批量清出：会话、续期登记、作废名单三张表
-  都按到期时间收敛，到期即失效的行不再保留，表规模跟随活跃登录数而非历史总量；
-- 令牌校验按「结构 → 算法 → 签名 → 声明」四层逐级收口，任何一层不通过都抛
-  TokenError 派生异常，错误码稳定可供客户端分支，校验本身不查库、不依赖会话表；
-- 有效期、时钟偏差与签名密钥都来自环境变量（AI_NEW_JWT_TTL / AI_NEW_JWT_LEEWAY /
-  AI_NEW_JWT_SECRET），调用时解析而非 import 时定死；配置缺失或取值非法时
-  告警并回退默认值，不会因为一处配置写错就让服务起不来；
-- 接口层取当前用户统一走 resolve_authorization：签名令牌校验通过后按 sub 回库取
-  用户，用户信息始终以库为准；单段旧会话令牌在过渡期内仍可解析，不受影响；
-- 角色判定与拦截也收在本层：require_login / require_role / require_admin 分别对应
-  「已登录」「指定角色」「管理员」三档要求，scope_user_id 给出列表类查询的可见范围，
-  接口层只声明需要什么身份，不自己比对角色字符串。
+文件按职责纵向分层，上层只调用下层，同层之间不互相依赖：
+
+一、错误与错误码
+   AuthError 派生出一族业务异常，各自带稳定的 error_code 与建议的 HTTP 状态；
+   接口层只负责把它们转成 {error, error_code, error_detail?}，不判断具体类型。
+
+二、账号与密码
+   用户从 users 表读取，对外只暴露 id / username / name / role，密码哈希不出本层；
+   注册校验用户名格式与密码强度，通过后写 bcrypt 哈希，明文不落库；
+   登录校验委托 authenticate，失败一律返回 None，调用方无从区分失败原因；
+   校验通过且字段仍是旧版摘要或成本偏低时，趁这次登录原地升级，存量账号无需重置密码。
+
+三、令牌原语
+   紧凑格式（header.payload.signature）的编解码、HMAC-SHA256 签名与签名比对；
+   有效期、时钟偏差与密钥都来自环境变量，调用时解析而非 import 时定死，
+   配置缺失或取值非法时告警并回退默认值，不会因为一处配置写错就让服务起不来。
+
+四、签发层
+   按用途构造载荷（access / refresh 共用一套声明结构，仅 typ 与有效期不同），
+   签名后登记：access 记入 sessions 表供按令牌查会话的路径使用，
+   refresh 记入 refresh_tokens 表供按条吊销；返回值统一带 expires_in / expires_at。
+
+五、校验层
+   按「结构 → 算法 → 签名 → 声明 → 时效」逐级收口，任何一层不通过都抛 TokenError
+   派生异常，错误码稳定可供客户端分支；校验本身不查库、不依赖会话表。
+   请求身份解析（resolve_authorization）在这之上：令牌通过后按 sub 回库取用户，
+   身份始终以库为准，改名、调角色下一次请求即生效，不必等令牌过期。
+
+六、刷新层
+   换发只认 typ=refresh 且登记表里未吊销、未过期的凭证，签名合格只是前提；
+   换发只重签访问令牌，不延长续期凭证自身的寿命，续期次数不叠加寿命。
+
+七、注销与清理
+   登出把当前令牌的 jti 记入 revoked_tokens 黑名单并删除会话记录，
+   此后该令牌即使未过期也判为未登录；过期凭据由 purge_expired_sessions 批量收敛。
+
+八、权限层
+   角色判定与拦截只此一处：require_login / require_role / require_admin 对应三档要求，
+   scope_user_id 给出列表类查询的可见范围，接口层只声明需要什么身份。
 
 明文密码只作为 authenticate / register_user 的入参存在，不落库、不进日志、不随用户信息返回。
 """
@@ -53,34 +65,11 @@ from backend.services.password import MAX_PASSWORD_BYTES, PasswordHashError, ver
 
 logger = logging.getLogger(__name__)
 
-# 对外可见的用户字段；密码哈希不在此列，避免随用户信息流到接口与页面
-_PUBLIC_FIELDS = ("id", "username", "name", "role")
 
-# 账号不存在时用于消耗一次哈希校验的占位串（cost 与默认成本一致，明文不参与比对），
-# 使「账号不存在」与「密码错误」两条失败分支耗时接近，不借响应速度探测账号
-_PLACEHOLDER_HASH = "$2b$12$sEi4W.uy8dqAnA/yZybMn.5v344bf3eEqrCiF6wyb0p2AWAQFWIIu"
-
-# 用户名：3–32 位，字母开头，其余可为字母、数字、下划线、点、连字符
-USERNAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{2,31}$")
-
-# 密码策略：至少 8 位、同时含字母与数字、不含空白、不与用户名相关、不在常见弱口令内。
-# 上限取 bcrypt 的处理窗口（72 字节），超出部分算法不参与计算，故直接拒绝而不静默截断。
-PASSWORD_MIN_LENGTH = 8
-
-# 显示名上限，超出部分截断（名称只是展示用，不必因此拒绝整个注册）
-NAME_MAX_LENGTH = 32
-
-# 常见弱口令：命中即拒绝，避免撞库成本过低的账号进入系统
-_WEAK_PASSWORDS = frozenset(
-    {
-        "12345678", "123456789", "1234567890", "11111111", "88888888",
-        "password", "password1", "passw0rd", "p@ssw0rd", "qwerty123",
-        "abc12345", "a1234567", "admin123", "iloveyou", "letmein1",
-    }
-)
-
-
-# ---- 业务异常：由接口层统一转成 {error, error_code, error_detail?} 响应 ----
+# ============================ 一、错误与错误码 ============================
+#
+# 具体原因只回给客户端一个稳定的错误码与简短说明，不暴露密钥、签名原文
+# 或内部分支，避免把校验细节变成试探令牌构造的线索。
 
 
 class AuthError(ValueError):
@@ -99,6 +88,9 @@ class AuthError(ValueError):
         if self.detail:
             payload["error_detail"] = self.detail
         return payload
+
+
+# ---- 账号与密码：注册阶段的入参问题 ----
 
 
 class InvalidUsernameError(AuthError):
@@ -136,10 +128,7 @@ class PermissionDeniedError(AuthError):
     http_status = 403
 
 
-# ---- 令牌校验异常：统一 401，按 error_code 区分失败环节 ----
-#
-# 具体原因只回给客户端一个稳定的错误码与简短说明，不暴露密钥、签名原文
-# 或内部分支，避免把校验细节变成试探令牌构造的线索。
+# ---- 令牌校验：统一 401，按 error_code 区分失败环节 ----
 
 
 class TokenError(AuthError):
@@ -191,7 +180,7 @@ class TokenClaimsError(TokenError):
     error_code = "AUTH_TOKEN_BAD_CLAIMS"
 
 
-# ---- 续期异常：签名合格但不能再换发的几种情形 ----
+# ---- 续期失败：签名合格但不能再换发的几种情形 ----
 #
 # 与令牌校验异常同属 401：客户端拿到这些错误码都该回到登录页，
 # 区别只在于「这条续期凭证为什么不作数」，便于前端提示与日志定位。
@@ -221,97 +210,33 @@ class RefreshTokenOwnerError(RefreshTokenError):
     error_code = "AUTH_REFRESH_USER_GONE"
 
 
-# ---- 角色与权限：管理员与客户的数据边界 ----
-#
-# 角色只有两种，判定与拦截都收在本段，是权限的唯一出口：
-# 管理员可以读写全量数据，客户只能访问本人的数据。
-# 接口层只声明「这一步需要什么身份」，不自己比对角色字符串，
-# 少一处判断就少一处漏判，也不会因为把 "Admin" 当成管理员而放开越权。
-#
-# 判定一律基于回库取到的用户信息，不用令牌里的角色快照：
-# 调过角色的人下一次请求就按新角色生效，不必等旧令牌过期。
-# 未登录与无权限分开报：401 提示客户端去登录，403 说明已登录但不该做这件事。
+# ============================ 二、账号与密码 ============================
 
-ADMIN_ROLE = UserRole.ADMIN.value
-CUSTOMER_ROLE = UserRole.CUSTOMER.value
+# 对外可见的用户字段；密码哈希不在此列，避免随用户信息流到接口与页面
+_PUBLIC_FIELDS = ("id", "username", "name", "role")
 
+# 账号不存在时用于消耗一次哈希校验的占位串（cost 与默认成本一致，明文不参与比对），
+# 使「账号不存在」与「密码错误」两条失败分支耗时接近，不借响应速度探测账号
+_PLACEHOLDER_HASH = "$2b$12$sEi4W.uy8dqAnA/yZybMn.5v344bf3eEqrCiF6wyb0p2AWAQFWIIu"
 
-def role_of(user: Optional[dict]) -> str:
-    """取用户角色，未登录或取值无法识别时按客户角色处理。"""
-    return normalize_role((user or {}).get("role"))
+# 用户名：3–32 位，字母开头，其余可为字母、数字、下划线、点、连字符
+USERNAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{2,31}$")
 
+# 密码策略：至少 8 位、同时含字母与数字、不含空白、不与用户名相关、不在常见弱口令内。
+# 上限取 bcrypt 的处理窗口（72 字节），超出部分算法不参与计算，故直接拒绝而不静默截断。
+PASSWORD_MIN_LENGTH = 8
 
-def is_admin(user: Optional[dict]) -> bool:
-    """是否管理员。"""
-    return role_of(user) == ADMIN_ROLE
+# 显示名上限，超出部分截断（名称只是展示用，不必因此拒绝整个注册）
+NAME_MAX_LENGTH = 32
 
-
-def is_customer(user: Optional[dict]) -> bool:
-    """是否客户账号；未登录不算客户，避免匿名请求被当作客户放行。"""
-    return bool(user) and role_of(user) == CUSTOMER_ROLE
-
-
-def has_role(user: Optional[dict], *roles: str) -> bool:
-    """用户是否属于给定角色之一；未登录或角色列表为空时返回 False。
-
-    角色入参同走归一化，枚举与字符串都可以传，写错的值会被丢掉而不是放宽判定。
-    """
-    if not user:
-        return False
-    allowed = {normalize_role(role, default="") for role in roles}
-    allowed.discard("")
-    return bool(allowed) and role_of(user) in allowed
-
-
-def require_login(user: Optional[dict]) -> dict:
-    """要求已登录，未登录抛 TokenMissingError（401）。"""
-    if not user:
-        raise TokenMissingError("未登录")
-    return user
-
-
-def require_role(user: Optional[dict], *roles: str, action: str = "") -> dict:
-    """要求用户属于给定角色之一，返回用户信息。
-
-    未登录 401，已登录但角色不符 403；错误详情给出所需角色与当前角色，
-    前端据此区分「去登录」与「没有权限」，日志里也能看清是谁被拦。
-    action 只进文案与详情，说明是哪一步被拦，不参与判定。
-    """
-    account = require_login(user)
-    if has_role(account, *roles):
-        return account
-
-    required = [normalize_role(role, default="") for role in roles]
-    required = [role for role in required if role] or [ADMIN_ROLE]
-    detail = {"required_roles": required, "role": role_of(account)}
-    if action:
-        detail["action"] = action
-        message = f"当前账号无权{action}"
-    else:
-        message = "当前账号无权执行该操作"
-    raise PermissionDeniedError(message, detail)
-
-
-def require_admin(user: Optional[dict], action: str = "") -> dict:
-    """要求管理员身份：未登录 401，非管理员 403。"""
-    return require_role(user, ADMIN_ROLE, action=action)
-
-
-def scope_user_id(user: Optional[dict], include_admin_all: bool = True) -> Optional[str]:
-    """列表类查询的数据范围：None 表示全量，否则限定为该用户号。
-
-    管理员在 include_admin_all 为真时看全量，为假时与客户一样只看本人；
-    客户无论参数如何都只看本人。分页列表、待确认列表、统计共用这一口径，
-    避免每个查询接口各写一遍角色判断，也不会出现某个接口漏掉隔离。
-    未登录直接拒绝：拿不到身份时宁可报错，也不返回一个范围不明的全量查询。
-    """
-    account = require_login(user)
-    if is_admin(account) and include_admin_all:
-        return None
-    return account.get("id")
-
-
-# ---- 注册：用户名与密码强度校验 ----
+# 常见弱口令：命中即拒绝，避免撞库成本过低的账号进入系统
+_WEAK_PASSWORDS = frozenset(
+    {
+        "12345678", "123456789", "1234567890", "11111111", "88888888",
+        "password", "password1", "passw0rd", "p@ssw0rd", "qwerty123",
+        "abc12345", "a1234567", "admin123", "iloveyou", "letmein1",
+    }
+)
 
 
 def normalize_username(username: str) -> str:
@@ -360,12 +285,22 @@ def validate_password_strength(password: str, username: str = "") -> list[str]:
     return problems
 
 
+def _account(user: User) -> dict:
+    """把用户记录转成对外字典。"""
+    return {field: getattr(user, field) for field in _PUBLIC_FIELDS}
+
+
 def _username_exists(db, username: str) -> bool:
     """用户名是否已被占用，比较时忽略大小写（Admin 与 admin 视为同名）。"""
     return (
         db.query(User).filter(func.lower(User.username) == username.lower()).first()
         is not None
     )
+
+
+def _query_user(db, username: str) -> Optional[User]:
+    """按用户名取用户记录，未命中返回 None。"""
+    return db.query(User).filter(User.username == username).first()
 
 
 def register_user(
@@ -405,16 +340,6 @@ def register_user(
         db.close()
 
 
-def _account(user: User) -> dict:
-    """把用户记录转成对外字典。"""
-    return {field: getattr(user, field) for field in _PUBLIC_FIELDS}
-
-
-def _query_user(db, username: str) -> Optional[User]:
-    """按用户名取用户记录，未命中返回 None。"""
-    return db.query(User).filter(User.username == username).first()
-
-
 def find_by_username(username: str) -> Optional[dict]:
     """按用户名查询用户信息，不存在返回 None。"""
     if not username:
@@ -422,6 +347,22 @@ def find_by_username(username: str) -> Optional[dict]:
     db = SessionLocal()
     try:
         user = _query_user(db, username)
+        return _account(user) if user else None
+    finally:
+        db.close()
+
+
+def find_by_id(user_id: Optional[str]) -> Optional[dict]:
+    """按用户 id 查询可公开的用户信息，不存在返回 None。
+
+    令牌只携带 sub，请求身份一律经这里回库确认：用户被删除后旧令牌即失效，
+    不会因为令牌仍在有效期内而认出一个已不存在的账号。
+    """
+    if not user_id:
+        return None
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
         return _account(user) if user else None
     finally:
         db.close()
@@ -481,13 +422,9 @@ def authenticate(username: str, password: str) -> Optional[dict]:
         db.close()
 
 
-# ---- JWT 签发：密钥、载荷与签名 ----
+# ============================ 三、令牌原语 ============================
 #
-# 令牌用 JWS 紧凑格式（header.payload.signature），签名算法固定 HS256。
-# 签名只依赖标准库的 HMAC-SHA256 与 base64url，不额外引入运行时依赖。
-# 载荷只放鉴权必需的声明：身份信息靠 sub 回库取，令牌不承担用户快照的职责，
-# 改名、改角色这类变更下次请求即生效，不必等令牌过期。
-#
+# 签名算法固定 HS256，只依赖标准库的 HMAC-SHA256 与 base64url，不额外引入运行时依赖。
 # 有效期、时钟偏差与签名密钥都取自环境变量，且都在调用时解析而不是 import 时定死：
 # 换配置只需重启进程，不必改代码；同一进程内切换配置也能立刻生效，便于验证。
 
@@ -621,6 +558,11 @@ def _compact_json(data: dict) -> bytes:
     ).encode("utf-8")
 
 
+def _sign(segments: str, secret: bytes) -> bytes:
+    """对 header.payload 段做 HMAC-SHA256 签名。"""
+    return hmac.new(secret, segments.encode("ascii"), hashlib.sha256).digest()
+
+
 def sign_jwt(payload: dict, secret: Optional[bytes] = None) -> str:
     """把声明集合签成紧凑格式令牌，返回 header.payload.signature 三段字符串。
 
@@ -630,89 +572,6 @@ def sign_jwt(payload: dict, secret: Optional[bytes] = None) -> str:
     segments = f"{_b64url_encode(_compact_json(header))}.{_b64url_encode(_compact_json(payload))}"
     signature = _sign(segments, get_jwt_secret() if secret is None else secret)
     return f"{segments}.{_b64url_encode(signature)}"
-
-
-def build_access_payload(
-    user: dict,
-    ttl: Optional[int] = None,
-    issued_at: Optional[int] = None,
-) -> dict:
-    """按 access token 的声明约定构造载荷。
-
-    声明分工：
-    iss/aud 限定签发方与使用方；sub 为用户 id，是回查用户的唯一依据；
-    username/role 供鉴权与日志直接取用，不做权限判定以外的业务用途；
-    iat/nbf/exp 为秒级时间戳，nbf 与 iat 取同一时刻，留出后续加宽时钟偏差的余地；
-    jti 为一次性标识，为将来的吊销名单预留锚点；typ 区分令牌用途。
-
-    ttl 不传时取当前配置的有效期，调用方显式给值则按给的算，
-    便于为个别场景（如内部联调）签发短时令牌。
-    """
-    if not isinstance(user, dict) or not user.get("id") or not user.get("username"):
-        raise TokenSigningError("用户信息缺少签发令牌所需的字段")
-
-    lifetime = jwt_access_ttl() if ttl is None else ttl
-    if isinstance(lifetime, bool) or not isinstance(lifetime, int) or lifetime <= 0:
-        raise TokenSigningError("令牌有效期必须为正整数")
-
-    now = int(time.time()) if issued_at is None else int(issued_at)
-    return {
-        "iss": JWT_ISSUER,
-        "aud": JWT_AUDIENCE,
-        "sub": user["id"],
-        "username": user["username"],
-        "role": normalize_role(user.get("role")),
-        "typ": TOKEN_TYPE_ACCESS,
-        "iat": now,
-        "nbf": now,
-        "exp": now + lifetime,
-        "jti": uuid.uuid4().hex,
-    }
-
-
-def create_access_token(user: dict, ttl: Optional[int] = None) -> str:
-    """为已通过校验的用户签发 access token。"""
-    return sign_jwt(build_access_payload(user, ttl=ttl))
-
-
-def build_refresh_payload(
-    user: dict,
-    ttl: Optional[int] = None,
-    issued_at: Optional[int] = None,
-) -> dict:
-    """按 refresh token 的声明约定构造载荷。
-
-    声明与 access token 保持同一套结构，仅 typ 与有效期不同：
-    typ 固定 refresh，与 access 互斥，两类令牌不能互相顶替；
-    有效期默认取长期配置（30 天量级），仍可显式传 ttl 覆盖。
-    username / role 只作日志与展示参考，刷新换发时一律按 sub 回库取用户，
-    不依赖载荷里的快照。
-    """
-    if not isinstance(user, dict) or not user.get("id") or not user.get("username"):
-        raise TokenSigningError("用户信息缺少签发令牌所需的字段")
-
-    lifetime = jwt_refresh_ttl() if ttl is None else ttl
-    if isinstance(lifetime, bool) or not isinstance(lifetime, int) or lifetime <= 0:
-        raise TokenSigningError("令牌有效期必须为正整数")
-
-    now = int(time.time()) if issued_at is None else int(issued_at)
-    return {
-        "iss": JWT_ISSUER,
-        "aud": JWT_AUDIENCE,
-        "sub": user["id"],
-        "username": user["username"],
-        "role": normalize_role(user.get("role")),
-        "typ": TOKEN_TYPE_REFRESH,
-        "iat": now,
-        "nbf": now,
-        "exp": now + lifetime,
-        "jti": uuid.uuid4().hex,
-    }
-
-
-def create_refresh_token(user: dict, ttl: Optional[int] = None) -> str:
-    """为已通过校验的用户签发 refresh token（只签名，不落库）。"""
-    return sign_jwt(build_refresh_payload(user, ttl=ttl))
 
 
 def describe_jwt_config() -> dict:
@@ -733,7 +592,164 @@ def describe_jwt_config() -> dict:
     }
 
 
-# ---- JWT 解析与校验：结构、算法、签名、声明 ----
+# ============================ 四、签发层 ============================
+#
+# 载荷只放鉴权必需的声明：身份信息靠 sub 回库取，令牌不承担用户快照的职责。
+# 两类令牌共用同一套声明结构与同一个签名器，仅 typ 与有效期不同，
+# 因此构造逻辑收在一处，避免两边声明字段写歪导致互相顶替。
+
+
+def _build_payload(
+    user: dict,
+    token_type: str,
+    default_ttl,
+    ttl: Optional[int],
+    issued_at: Optional[int],
+) -> dict:
+    """按给定用途构造载荷，access 与 refresh 共用。
+
+    声明分工：iss/aud 限定签发方与使用方；sub 为用户 id，是回查用户的唯一依据；
+    username/role 供鉴权与日志直接取用，不做权限判定以外的业务用途；
+    iat/nbf/exp 为秒级时间戳，nbf 与 iat 取同一时刻；jti 是一次性标识，
+    为吊销名单提供锚点；typ 区分用途，两类令牌不能互相顶替。
+
+    ttl 不传时按 default_ttl 解析当前配置，显式给值则按给的算。
+    """
+    if not isinstance(user, dict) or not user.get("id") or not user.get("username"):
+        raise TokenSigningError("用户信息缺少签发令牌所需的字段")
+
+    lifetime = default_ttl() if ttl is None else ttl
+    if isinstance(lifetime, bool) or not isinstance(lifetime, int) or lifetime <= 0:
+        raise TokenSigningError("令牌有效期必须为正整数")
+
+    now = int(time.time()) if issued_at is None else int(issued_at)
+    return {
+        "iss": JWT_ISSUER,
+        "aud": JWT_AUDIENCE,
+        "sub": user["id"],
+        "username": user["username"],
+        "role": normalize_role(user.get("role")),
+        "typ": token_type,
+        "iat": now,
+        "nbf": now,
+        "exp": now + lifetime,
+        "jti": uuid.uuid4().hex,
+    }
+
+
+def build_access_payload(
+    user: dict,
+    ttl: Optional[int] = None,
+    issued_at: Optional[int] = None,
+) -> dict:
+    """构造 access token 载荷：默认取短期有效期配置，typ 固定 access。"""
+    return _build_payload(user, TOKEN_TYPE_ACCESS, jwt_access_ttl, ttl, issued_at)
+
+
+def build_refresh_payload(
+    user: dict,
+    ttl: Optional[int] = None,
+    issued_at: Optional[int] = None,
+) -> dict:
+    """构造 refresh token 载荷：默认取长期有效期配置，typ 固定 refresh。
+
+    username / role 只作日志与展示参考，刷新换发时一律按 sub 回库取用户，
+    不依赖载荷里的快照。
+    """
+    return _build_payload(user, TOKEN_TYPE_REFRESH, jwt_refresh_ttl, ttl, issued_at)
+
+
+def create_access_token(user: dict, ttl: Optional[int] = None) -> str:
+    """为已通过校验的用户签发 access token。"""
+    return sign_jwt(build_access_payload(user, ttl=ttl))
+
+
+def create_refresh_token(user: dict, ttl: Optional[int] = None) -> str:
+    """为已通过校验的用户签发 refresh token（只签名，不落库）。"""
+    return sign_jwt(build_refresh_payload(user, ttl=ttl))
+
+
+def _token_meta(payload: dict, token: str) -> dict:
+    """把已签发的令牌与其有效期元信息组装成对外的统一形态。
+
+    expires_in 是相对秒数（客户端用来算刷新时机），expires_at 是绝对时间戳；
+    两类令牌用同一组字段名，客户端不必为续期写第二套解析逻辑。
+    """
+    return {
+        "token": token,
+        "token_type": "Bearer",
+        "expires_in": payload["exp"] - payload["iat"],
+        "expires_at": payload["exp"],
+    }
+
+
+def _record_session(user: dict, token: str, expires_at: int) -> None:
+    """把已签发的令牌登记为一条会话记录。
+
+    令牌本身自包含身份与有效期，这里登记是为了让仍按令牌查会话的路径
+    （对话链路）继续可用：登录一次，两条解析路径都能拿到同一份登录态。
+    记录的到期时间取自令牌的 exp，两条路径不会各自算出一套过期时间。
+    """
+    db = SessionLocal()
+    try:
+        db.add(
+            Session(
+                token=token,
+                user_id=user["id"],
+                username=user["username"],
+                name=user.get("name") or "",
+                role=normalize_role(user.get("role")),
+                expires_at=expires_at,
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _record_refresh_token(user_id: str, token: str, expires_at: int) -> None:
+    """把已签发的 refresh token 登记入库，供后续吊销与清理。"""
+    db = SessionLocal()
+    try:
+        db.add(RefreshToken(token=token, user_id=user_id, expires_at=expires_at))
+        db.commit()
+    finally:
+        db.close()
+
+
+def issue_refresh_token(user: dict, ttl: Optional[int] = None) -> dict:
+    """为登录成功的用户签发 refresh token 并登记吊销记录。
+
+    返回形态与 access 签发一致：令牌原文、类型与有效期元信息。
+    ttl 不传时取长期默认配置；登记记录的到期时间与令牌 exp 保持一致。
+    """
+    payload = build_refresh_payload(user, ttl=ttl)
+    token = sign_jwt(payload)
+    _record_refresh_token(payload["sub"], token, payload["exp"])
+    return _token_meta(payload, token)
+
+
+def issue_login_token(user: dict, ttl: Optional[int] = None) -> dict:
+    """为登录成功的用户签发 access token 与 refresh token，并登记会话。
+
+    返回两类令牌及其有效期元信息，供接口层原样回给客户端；
+    refresh_* 三段是长期续期凭证，落库支持按条吊销。
+    ttl 只作用于 access token，refresh token 有效期独立取长期配置；
+    会话记录的到期时间与 access token 保持一致。
+    """
+    payload = build_access_payload(user, ttl=ttl)
+    token = sign_jwt(payload)
+    _record_session(user, token, payload["exp"])
+    refresh = issue_refresh_token(user)
+    return {
+        **_token_meta(payload, token),
+        "refresh_token": refresh["token"],
+        "refresh_expires_in": refresh["expires_in"],
+        "refresh_expires_at": refresh["expires_at"],
+    }
+
+
+# ============================ 五、校验层 ============================
 #
 # 校验顺序刻意由外到内：先确认三段结构可解析，再看头部声明的算法，
 # 然后比对签名，最后才读载荷里的声明。前一步不通过就不进入下一步，
@@ -775,29 +791,6 @@ def _decode_segment(segment: str, name: str) -> dict:
     return data
 
 
-def _sign(segments: str, secret: bytes) -> bytes:
-    """对 header.payload 段做 HMAC-SHA256 签名。"""
-    return hmac.new(secret, segments.encode("ascii"), hashlib.sha256).digest()
-
-
-def verify_jwt_signature(token: str, secret: Optional[bytes] = None) -> bool:
-    """只比对签名，不判时效与声明，返回布尔值而不抛异常。
-
-    适合在需要「先看令牌真伪、再决定要不要解析内容」的场景做前置过滤；
-    结构与签名任何一处对不上都返回 False，调用方拿不到失败细节。
-    """
-    try:
-        header_segment, payload_segment, signature_segment = _split_token(token)
-        expected = _sign(
-            f"{header_segment}.{payload_segment}",
-            get_jwt_secret() if secret is None else secret,
-        )
-        actual = _b64url_decode(signature_segment)
-    except (TokenError, binascii.Error, ValueError, UnicodeDecodeError):
-        return False
-    return hmac.compare_digest(expected, actual)
-
-
 def _check_algorithm(header: dict) -> None:
     """头部算法必须与签发时一致；alg=none 之类的一律拒绝。"""
     algorithm = header.get("alg")
@@ -828,6 +821,24 @@ def _audience_matches(claim_value, expected: str) -> bool:
     if isinstance(claim_value, list):
         return expected in claim_value
     return False
+
+
+def verify_jwt_signature(token: str, secret: Optional[bytes] = None) -> bool:
+    """只比对签名，不判时效与声明，返回布尔值而不抛异常。
+
+    适合在需要「先看令牌真伪、再决定要不要解析内容」的场景做前置过滤；
+    结构与签名任何一处对不上都返回 False，调用方拿不到失败细节。
+    """
+    try:
+        header_segment, payload_segment, signature_segment = _split_token(token)
+        expected = _sign(
+            f"{header_segment}.{payload_segment}",
+            get_jwt_secret() if secret is None else secret,
+        )
+        actual = _b64url_decode(signature_segment)
+    except (TokenError, binascii.Error, ValueError, UnicodeDecodeError):
+        return False
+    return hmac.compare_digest(expected, actual)
 
 
 def decode_jwt(
@@ -929,25 +940,6 @@ def extract_bearer_token(authorization: Optional[str]) -> str:
     return token
 
 
-# ---- 请求身份解析：以签名令牌为准，旧会话令牌只作过渡 ----
-#
-# 接口层只调用 resolve_authorization，不必关心令牌是哪种形态。
-# 身份一律回库取：令牌自带的 username / role 只说明签发时刻的状态，
-# 改名、调角色之后下一次请求就该生效，权限判定不能建立在令牌快照上。
-
-
-def find_by_id(user_id: Optional[str]) -> Optional[dict]:
-    """按用户 id 查询可公开的用户信息，不存在返回 None。"""
-    if not user_id:
-        return None
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter(User.id == user_id).first()
-        return _account(user) if user else None
-    finally:
-        db.close()
-
-
 def _is_signed_token(token: str) -> bool:
     """是否为三段式签名令牌；旧版会话令牌是单段随机串，不含分隔点。"""
     return token.count(".") == 2
@@ -1003,54 +995,6 @@ def resolve_authorization(authorization: Optional[str]) -> Optional[dict]:
     return resolve_token(token)
 
 
-def _record_session(user: dict, token: str, expires_at: int) -> None:
-    """把已签发的令牌登记为一条会话记录。
-
-    令牌本身自包含身份与有效期，这里登记是为了让仍按令牌查会话的路径
-    （对话链路）继续可用：登录一次，两条解析路径都能拿到同一份登录态。
-    记录的到期时间取自令牌的 exp，两条路径不会各自算出一套过期时间。
-    """
-    db = SessionLocal()
-    try:
-        db.add(
-            Session(
-                token=token,
-                user_id=user["id"],
-                username=user["username"],
-                name=user.get("name") or "",
-                role=normalize_role(user.get("role")),
-                expires_at=expires_at,
-            )
-        )
-        db.commit()
-    finally:
-        db.close()
-
-
-def issue_login_token(user: dict, ttl: Optional[int] = None) -> dict:
-    """为登录成功的用户签发 access token 与 refresh token，并登记会话。
-
-    返回两类令牌及其有效期元信息，供接口层原样回给客户端：
-    expires_in 为相对秒数（客户端用来算刷新时机），expires_at 为绝对时间戳；
-    refresh_* 三段是长期续期凭证，落库支持按条吊销。
-    ttl 只作用于 access token，refresh token 有效期独立取长期配置；
-    会话记录的到期时间与 access token 保持一致。
-    """
-    payload = build_access_payload(user, ttl=ttl)
-    token = sign_jwt(payload)
-    _record_session(user, token, payload["exp"])
-    refresh = issue_refresh_token(user)
-    return {
-        "token": token,
-        "token_type": "Bearer",
-        "expires_in": payload["exp"] - payload["iat"],
-        "expires_at": payload["exp"],
-        "refresh_token": refresh["token"],
-        "refresh_expires_in": refresh["expires_in"],
-        "refresh_expires_at": refresh["expires_at"],
-    }
-
-
 def get_session(token: str) -> Optional[dict]:
     """按 token 取会话，过期的会话顺手删除，无效或过期返回 None。"""
     if not token:
@@ -1069,63 +1013,7 @@ def get_session(token: str) -> Optional[dict]:
         db.close()
 
 
-# ---- Refresh token 签发与吊销 ----
-#
-# 与 access token 同一密钥、同一签发器，只是 typ 与有效期不同：
-# typ=refresh 让它不能当 access token 用（verify_access_token 只认 typ=access），
-# 有效期按天计，密码只在首次登录时输入，之后靠它换发短期 access token。
-# 落库登记是为了可撤销：登出或异常时把记录标记 revoked，
-# 被吊销的令牌即使未过期、签名完好也不能再换发。
-
-
-def _record_refresh_token(user_id: str, token: str, expires_at: int) -> None:
-    """把已签发的 refresh token 登记入库，供后续吊销与清理。"""
-    db = SessionLocal()
-    try:
-        db.add(RefreshToken(token=token, user_id=user_id, expires_at=expires_at))
-        db.commit()
-    finally:
-        db.close()
-
-
-def issue_refresh_token(user: dict, ttl: Optional[int] = None) -> dict:
-    """为登录成功的用户签发 refresh token 并登记吊销记录。
-
-    返回形态与 access 签发一致：令牌原文、类型与有效期元信息。
-    ttl 不传时取长期默认配置；登记记录的到期时间与令牌 exp 保持一致。
-    """
-    payload = build_refresh_payload(user, ttl=ttl)
-    token = sign_jwt(payload)
-    _record_refresh_token(payload["sub"], token, payload["exp"])
-    return {
-        "token": token,
-        "token_type": "Bearer",
-        "expires_in": payload["exp"] - payload["iat"],
-        "expires_at": payload["exp"],
-    }
-
-
-def revoke_refresh_token(token: str) -> bool:
-    """吊销一条 refresh token：标记 revoked_at，未过期也不再可用。
-
-    令牌原文不存在时返回 False；存在则标记吊销并返回 True。
-    重复吊销保持首次时间，返回值仍为 True（已是吊销状态，语义幂等）。
-    """
-    if not isinstance(token, str) or not token.strip():
-        return False
-    db = SessionLocal()
-    try:
-        record = db.query(RefreshToken).filter(RefreshToken.token == token.strip()).first()
-        if not record:
-            return False
-        record.revoke()
-        db.commit()
-        return True
-    finally:
-        db.close()
-
-
-# ---- 换发：用长期凭证换一张短期访问令牌 ----
+# ============================ 六、刷新层 ============================
 #
 # 换发只认 typ=refresh 的令牌，且必须能在登记表里找到一条未吊销、未过期的记录：
 # 签名合格只说明令牌由本服务签发，能换发则还需要「这条凭证仍然有效」。
@@ -1149,6 +1037,26 @@ def _refresh_record(db, token: str, user_id: str) -> RefreshToken:
     if record.expired:
         raise TokenExpiredError("续期令牌已过期", {"expired_at": record.expires_at})
     return record
+
+
+def revoke_refresh_token(token: str) -> bool:
+    """吊销一条 refresh token：标记 revoked_at，未过期也不再可用。
+
+    令牌原文不存在时返回 False；存在则标记吊销并返回 True。
+    重复吊销保持首次时间，返回值仍为 True（已是吊销状态，语义幂等）。
+    """
+    if not isinstance(token, str) or not token.strip():
+        return False
+    db = SessionLocal()
+    try:
+        record = db.query(RefreshToken).filter(RefreshToken.token == token.strip()).first()
+        if not record:
+            return False
+        record.revoke()
+        db.commit()
+        return True
+    finally:
+        db.close()
 
 
 def refresh_access_token(refresh_token: str, ttl: Optional[int] = None) -> dict:
@@ -1186,10 +1094,7 @@ def refresh_access_token(refresh_token: str, ttl: Optional[int] = None) -> dict:
     _record_session(account, token, payload["exp"])
 
     return {
-        "token": token,
-        "token_type": "Bearer",
-        "expires_in": payload["exp"] - payload["iat"],
-        "expires_at": payload["exp"],
+        **_token_meta(payload, token),
         "refresh_token": value,
         "refresh_expires_in": max(claims["exp"] - int(time.time()), 0),
         "refresh_expires_at": claims["exp"],
@@ -1197,7 +1102,7 @@ def refresh_access_token(refresh_token: str, ttl: Optional[int] = None) -> dict:
     }
 
 
-# ---- 登出：把已签发的令牌提前作废 ----
+# ============================ 七、注销与清理 ============================
 #
 # 令牌是自包含的，服务端不持有它的状态，登出只能反向登记一份「作废名单」：
 # 校验时先看签名与时效，再查 jti 是否在名单里，命中即视为未登录。
@@ -1362,7 +1267,6 @@ def logout(
 # 单批删除量设上限：SQLite 一次写事务过大既占写锁也容易拖长响应，
 # 积压较多时分多次调用即可，truncated 为真表示还有剩余。
 
-
 SESSION_RETENTION = 0  # 过期后额外保留的秒数，默认不留
 SESSION_RETENTION_MAX = 30 * 24 * 3600  # 保留窗口上限：30 天，避免误配成永久不删
 PURGE_BATCH_LIMIT = 2000  # 单次单表删除上限
@@ -1434,6 +1338,96 @@ def purge_expired_sessions(
         "retention": keep,
         "truncated": truncated,
     }
+
+
+# ============================ 八、权限层 ============================
+#
+# 角色只有两种，判定与拦截都收在本段，是权限的唯一出口：
+# 管理员可以读写全量数据，客户只能访问本人的数据。
+# 接口层只声明「这一步需要什么身份」，不自己比对角色字符串，
+# 少一处判断就少一处漏判，也不会因为把 "Admin" 当成管理员而放开越权。
+#
+# 判定一律基于回库取到的用户信息，不用令牌里的角色快照：
+# 调过角色的人下一次请求就按新角色生效，不必等旧令牌过期。
+# 未登录与无权限分开报：401 提示客户端去登录，403 说明已登录但不该做这件事。
+
+ADMIN_ROLE = UserRole.ADMIN.value
+CUSTOMER_ROLE = UserRole.CUSTOMER.value
+
+
+def role_of(user: Optional[dict]) -> str:
+    """取用户角色，未登录或取值无法识别时按客户角色处理。"""
+    return normalize_role((user or {}).get("role"))
+
+
+def is_admin(user: Optional[dict]) -> bool:
+    """是否管理员。"""
+    return role_of(user) == ADMIN_ROLE
+
+
+def is_customer(user: Optional[dict]) -> bool:
+    """是否客户账号；未登录不算客户，避免匿名请求被当作客户放行。"""
+    return bool(user) and role_of(user) == CUSTOMER_ROLE
+
+
+def has_role(user: Optional[dict], *roles: str) -> bool:
+    """用户是否属于给定角色之一；未登录或角色列表为空时返回 False。
+
+    角色入参同走归一化，枚举与字符串都可以传，写错的值会被丢掉而不是放宽判定。
+    """
+    if not user:
+        return False
+    allowed = {normalize_role(role, default="") for role in roles}
+    allowed.discard("")
+    return bool(allowed) and role_of(user) in allowed
+
+
+def require_login(user: Optional[dict]) -> dict:
+    """要求已登录，未登录抛 TokenMissingError（401）。"""
+    if not user:
+        raise TokenMissingError("未登录")
+    return user
+
+
+def require_role(user: Optional[dict], *roles: str, action: str = "") -> dict:
+    """要求用户属于给定角色之一，返回用户信息。
+
+    未登录 401，已登录但角色不符 403；错误详情给出所需角色与当前角色，
+    前端据此区分「去登录」与「没有权限」，日志里也能看清是谁被拦。
+    action 只进文案与详情，说明是哪一步被拦，不参与判定。
+    """
+    account = require_login(user)
+    if has_role(account, *roles):
+        return account
+
+    required = [normalize_role(role, default="") for role in roles]
+    required = [role for role in required if role] or [ADMIN_ROLE]
+    detail = {"required_roles": required, "role": role_of(account)}
+    if action:
+        detail["action"] = action
+        message = f"当前账号无权{action}"
+    else:
+        message = "当前账号无权执行该操作"
+    raise PermissionDeniedError(message, detail)
+
+
+def require_admin(user: Optional[dict], action: str = "") -> dict:
+    """要求管理员身份：未登录 401，非管理员 403。"""
+    return require_role(user, ADMIN_ROLE, action=action)
+
+
+def scope_user_id(user: Optional[dict], include_admin_all: bool = True) -> Optional[str]:
+    """列表类查询的数据范围：None 表示全量，否则限定为该用户号。
+
+    管理员在 include_admin_all 为真时看全量，为假时与客户一样只看本人；
+    客户无论参数如何都只看本人。分页列表、待确认列表、统计共用这一口径，
+    避免每个查询接口各写一遍角色判断，也不会出现某个接口漏掉隔离。
+    未登录直接拒绝：拿不到身份时宁可报错，也不返回一个范围不明的全量查询。
+    """
+    account = require_login(user)
+    if is_admin(account) and include_admin_all:
+        return None
+    return account.get("id")
 
 
 def public_user(user: dict) -> dict:
