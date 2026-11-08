@@ -6,7 +6,7 @@ import pytest
 
 from backend.models import User
 from backend.models.user import RevokedToken
-from backend.services import auth, chat, retrieval_config
+from backend.services import auth, chat, knowledge, retrieval_config
 from backend.tests.test_api_contracts import api_client, _headers
 
 
@@ -31,10 +31,32 @@ def isolated_settings(tmp_path, monkeypatch):
     ('GET', '/api/knowledge/items', {'params': {'limit': 'bad'}}),
     ('POST', '/api/knowledge/ingest', {'json': {}}),
     ('PUT', '/api/knowledge/settings', {'json': {}}),
+    ('GET', '/api/knowledge/diagnose', {}),
+    ('GET', '/api/knowledge/diagnose', {'params': {'q': 'permissions', 'top_k': 'bad'}}),
 ])
 def test_permission_dependency_precedes_field_validation(api_client, method, path, kwargs):
     assert api_client.request(method, path, **kwargs).status_code == 403
     assert api_client.request(method, path, headers=_headers(api_client), **kwargs).status_code == 422
+
+
+def test_diagnosis_denial_does_not_run_retrieval(api_client, monkeypatch):
+    calls = []
+    original = knowledge.diagnose
+
+    def observe(q, top_k):
+        calls.append((q, top_k))
+        return original(q, top_k=top_k)
+
+    monkeypatch.setattr(knowledge, 'diagnose', observe)
+    for headers in ({}, _headers(api_client, 'customer')):
+        for params in ({}, {'q': '导出'}, {'q': '导出', 'top_k': 'bad'}):
+            response = api_client.get('/api/knowledge/diagnose', headers=headers, params=params)
+            assert response.status_code == 403
+            assert response.json() == {'detail': '需要管理员权限'}
+    assert calls == []
+    response = api_client.get('/api/knowledge/diagnose', headers=_headers(api_client), params={'q': '导出'})
+    assert response.status_code == 200
+    assert calls == [('导出', 3)]
 
 
 @pytest.mark.parametrize('method,path,payload,success', ENDPOINTS)

@@ -7,7 +7,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
-from backend.schemas import ErrorResponse, IngestRequest, IngestResponse, KnowledgeListResponse
+from backend.schemas import KnowledgeDiagnosisResponse, ErrorResponse, IngestRequest, IngestResponse, KnowledgeListResponse
 from backend.api.auth import require_admin
 from backend.services import auth as auth_service
 from backend.services import ingest as ingest_service
@@ -143,3 +143,21 @@ def recover_ingest(fingerprint: str) -> dict:
         raise HTTPException(status_code=409, detail=str(exc), headers={'Retry-After': '1'}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail='入库 journal 无法恢复，请人工核对持久化输入与阶段') from exc
+
+
+@knowledge_router.get(
+    "/knowledge/diagnose", response_model=KnowledgeDiagnosisResponse, summary="诊断知识检索",
+    responses={403: {"model": ErrorResponse, "description": "未登录或不具备管理员权限"}},
+)
+def diagnose_knowledge(
+    q: str,
+    top_k: Annotated[int, Query(description="实际截断到 1～20，不因整数超出范围返回 422")] = 3,
+) -> dict:
+    """诊断一次检索，返回每个阶段的命中情况。
+
+    用于排查「为什么搜不到 / 为什么返回的是这些」：直接看出是没召回、
+    被融合挤掉、被阈值拦下，还是被去冗余合并了。
+
+    管理员专属：它会把内部标识与打分过程暴露出来，不适合给普通用户。
+    """
+    return knowledge.diagnose(q, top_k=max(1, min(top_k, 20)))

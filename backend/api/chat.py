@@ -1,13 +1,11 @@
-from typing import Annotated
-
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException
 
 from backend.database import SessionLocal
 from backend.services import chat as chat_service, knowledge
 from backend.models import Conversation, Message
 from backend.schemas import (
     ChatRequest, ChatResponse, ConversationResponse, ErrorResponse,
-    KnowledgeDiagnosisResponse, SourceDetail,
+    SourceDetail,
 )
 
 chat_router = APIRouter()
@@ -54,28 +52,6 @@ def source_detail(source_id: str) -> SourceDetail:
         content=doc["content"],
         keywords=doc.get("keywords", []),
     )
-
-
-@chat_router.get(
-    "/knowledge/diagnose", response_model=KnowledgeDiagnosisResponse, summary="诊断知识检索",
-    responses={403: {"model": ErrorResponse, "description": "未登录或不具备管理员权限"}},
-)
-def diagnose_knowledge(
-    q: str,
-    top_k: Annotated[int, Query(description="实际截断到 1～20，不因整数超出范围返回 422")] = 3,
-    authorization: str = Header(default=""),
-) -> dict:
-    """诊断一次检索，返回每个阶段的命中情况。
-
-    用于排查「为什么搜不到 / 为什么返回的是这些」：直接看出是没召回、
-    被融合挤掉、被阈值拦下，还是被去冗余合并了。
-
-    管理员专属：它会把内部标识与打分过程暴露出来，不适合给普通用户。
-    """
-    user = chat_service.current_user(authorization)
-    if not user or user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="需要管理员权限")
-    return knowledge.diagnose(q, top_k=max(1, min(top_k, 20)))
 
 
 @chat_router.get(
