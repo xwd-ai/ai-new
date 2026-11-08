@@ -5,10 +5,11 @@
 
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
 from backend.schemas import ErrorResponse, IngestRequest, IngestResponse, KnowledgeListResponse
-from backend.services import chat as chat_service
+from backend.api.auth import require_admin
+from backend.services import auth as auth_service
 from backend.services import ingest as ingest_service
 from backend.services import knowledge
 from backend.services import retrieval_config
@@ -16,23 +17,23 @@ from backend.schemas.retrieval import RetrievalSettings
 from backend.schemas.knowledge import PendingIngestResponse
 from backend.services.ingest_leases import IngestBusyError, IngestLeaseLostError
 
-knowledge_router = APIRouter()
+
+def _require_admin(authorization: str = Header(default="")) -> dict:
+    """复用统一管理员依赖，保留知识库的 403 detail 错误契约。"""
+    try:
+        return require_admin(authorization)
+    except auth_service.AuthError as exc:
+        raise HTTPException(status_code=403, detail="需要管理员权限") from exc
 
 
-def _require_admin(authorization: str) -> dict:
-    """校验管理员身份，非管理员一律拒绝。"""
-    user = chat_service.current_user(authorization)
-    if not user or user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="需要管理员权限")
-    return user
+knowledge_router = APIRouter(dependencies=[Depends(_require_admin)])
 
 
 @knowledge_router.get(
     "/knowledge/settings", response_model=RetrievalSettings, summary="读取当前检索设置",
     responses={403: {"model": ErrorResponse, "description": "需要管理员权限"}},
 )
-def get_retrieval_settings(authorization: str = Header(default="")) -> RetrievalSettings:
-    _require_admin(authorization)
+def get_retrieval_settings() -> RetrievalSettings:
     return retrieval_config.current_settings()
 
 
@@ -46,9 +47,8 @@ def get_retrieval_settings(authorization: str = Header(default="")) -> Retrieval
     },
 )
 def put_retrieval_settings(
-    settings: RetrievalSettings, authorization: str = Header(default=""),
+    settings: RetrievalSettings,
 ) -> RetrievalSettings:
-    _require_admin(authorization)
     try:
         return retrieval_config.save_settings(settings)
     except OSError as exc:
@@ -68,14 +68,13 @@ def put_retrieval_settings(
     },
 )
 def ingest_knowledge(
-    req: IngestRequest, authorization: str = Header(default="")
+    req: IngestRequest,
 ) -> IngestResponse:
     """把一份资料写入知识库。
 
     同一份内容重复提交会返回已有记录（``created=false``），不会产生
     重复知识；因此前端重试或用户重复点击都是安全的。
     """
-    _require_admin(authorization)
     try:
         result = ingest_service.ingest(
             title=req.title,
@@ -99,14 +98,12 @@ def ingest_knowledge(
     },
 )
 def list_knowledge(
-    authorization: str = Header(default=""),
     offset: Annotated[int, Query(ge=0, description="跳过的条目数")] = 0,
     limit: Annotated[int | None, Query(ge=1, le=100, description="最多返回条数，省略时返回剩余全部")] = None,
     title: Annotated[str, Query(max_length=200, description="标题字面子串，去除首尾空白后为空则不筛选")] = "",
     kind: Annotated[Literal["manual", "faq", "rule"] | None, Query(description="资料类型精确匹配")] = None,
 ) -> dict:
     """列出已入库的资料，供管理端核对。"""
-    _require_admin(authorization)
     return knowledge.list_document_summaries(offset=offset, limit=limit, title=title, kind=kind)
 
 
@@ -118,12 +115,10 @@ def list_knowledge(
     responses={403: {'model': ErrorResponse}, 422: {'model': ErrorResponse, 'description': '筛选或分页参数不合法'}},
 )
 def pending_ingests(
-    authorization: str = Header(default=''),
     offset: Annotated[int | None, Query(ge=0, description='跳过的记录数，省略时为 0')] = None,
     limit: Annotated[int | None, Query(ge=1, le=100, description='每页上限，省略时为 100')] = None,
     stage: Annotated[Literal['parsed', 'chunked'] | None, Query(description='按已保存输入或已完成分块筛选')] = None,
 ) -> dict:
-    _require_admin(authorization)
     if offset is None and limit is None and stage is None:
         return {'items': ingest_service.pending_ingests()}
     return ingest_service.pending_ingest_page(
@@ -139,8 +134,7 @@ def pending_ingests(
     responses={403: {'model': ErrorResponse}, 404: {'model': ErrorResponse},
                409: {'model': ErrorResponse}, 422: {'model': ErrorResponse}},
 )
-def recover_ingest(fingerprint: str, authorization: str = Header(default='')) -> dict:
-    _require_admin(authorization)
+def recover_ingest(fingerprint: str) -> dict:
     try:
         return ingest_service.recover_ingest(fingerprint).to_dict()
     except LookupError as exc:

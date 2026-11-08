@@ -18,7 +18,7 @@ def listing(tmp_path, monkeypatch):
         conn.exec_driver_sql('PRAGMA journal_mode=WAL').close()
     Base.metadata.create_all(engine)
     monkeypatch.setattr(api.knowledge, 'SessionLocal', sessionmaker(bind=engine))
-    monkeypatch.setattr(api.chat_service, 'current_user', lambda token: {'role': token} if token else None)
+    monkeypatch.setattr(api.auth_service, 'resolve_authorization', lambda token: {'role': token} if token else None)
     app = FastAPI()
     app.include_router(api.knowledge_router, prefix='/api')
     with TestClient(app) as client:

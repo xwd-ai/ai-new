@@ -17,7 +17,7 @@ from sqlalchemy.orm import sessionmaker
 
 from backend import database, models
 from backend.api.knowledge import knowledge_router
-from backend.services import chat, ingest
+from backend.services import auth, ingest
 
 
 @pytest.fixture()
@@ -178,7 +178,7 @@ def test_renewal_waiting_for_write_lock_cannot_revive_an_expired_lease(ingest_en
 def test_busy_ingest_returns_409_with_retry_hint(ingest_env, monkeypatch):
     factory, _ = ingest_env
     leases = _leases()
-    monkeypatch.setattr(chat, "current_user", lambda _: {"id": "admin", "role": "admin"})
+    monkeypatch.setattr(auth, "resolve_authorization", lambda _: {"id": "admin", "role": "admin"})
     app = FastAPI()
     app.include_router(knowledge_router, prefix="/api")
     fingerprint = ingest.content_fingerprint("FAQ", "正在处理的资料")

@@ -21,11 +21,7 @@ _chat_provider: ChatProvider | None = None
 def current_user(authorization: str):
     from backend.services import auth
 
-    token = authorization.replace("Bearer ", "").strip()
-    session = auth.get_session(token)
-    if not session:
-        return None
-    return auth.find_by_username(session["username"])
+    return auth.resolve_authorization(authorization)
 
 
 def append_message(conversation_id: str, role: str, content: str) -> None:
