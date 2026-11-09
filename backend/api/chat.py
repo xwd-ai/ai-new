@@ -1,4 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import text
 
 from backend.api.auth import current_user
 from backend.database import SessionLocal
@@ -56,13 +59,21 @@ def source_detail(source_id: str) -> SourceDetail:
 
 @chat_router.get(
     "/conversation", response_model=ConversationResponse, summary="读取最近会话的消息",
-    description="未登录或登录态无效时返回空消息列表；有效用户仅返回其最近会话。",
+    response_model_exclude_none=True,
+    description="有效用户仅返回最近会话。无分页参数时返回全部消息；传入 offset 或 limit 时附带 total。无效登录态返回空历史。",
 )
-def conversation(user: dict | None = Depends(current_user)):
+def conversation(
+    user: dict | None = Depends(current_user),
+    offset: Annotated[int | None, Query(ge=0, description="跳过的消息数，省略时为 0")] = None,
+    limit: Annotated[int | None, Query(ge=1, le=100, description="最多返回条数，分页时默认 100")] = None,
+):
+    paged = offset is not None or limit is not None
+    empty = {"messages": [], **({"total": 0} if paged else {})}
     if not user:
-        return {"messages": []}
+        return empty
     db = SessionLocal()
     try:
+        db.execute(text('BEGIN'))
         conv = (
             db.query(Conversation)
             .filter(Conversation.user_id == user["id"])
@@ -72,17 +83,25 @@ def conversation(user: dict | None = Depends(current_user)):
             .first()
         )
         if not conv:
-            return {"messages": []}
-        messages = (
-            db.query(Message)
+            return empty
+        query = (
+            db.query(Message.role, Message.content, Message.at)
             .filter(Message.conversation_id == conv.id)
-            .order_by(Message.at.asc(), Message.id.asc())
-            .all()
         )
-        return {
+        total = query.count() if paged else None
+        query = query.order_by(Message.at.asc(), Message.id.asc())
+        if paged:
+            start = 0 if offset is None else offset
+            messages = query.offset(start).limit(100 if limit is None else limit).all() if start < total else []
+        else:
+            messages = query.all()
+        result = {
             "messages": [
                 {"role": m.role, "content": m.content, "at": m.at} for m in messages
             ]
         }
+        if paged:
+            result["total"] = total
+        return result
     finally:
         db.close()

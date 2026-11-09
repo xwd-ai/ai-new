@@ -32,7 +32,8 @@ class ConversationMessage(BaseModel):
 
 
 class ConversationResponse(BaseModel):
-    messages: list[ConversationMessage] = Field(default_factory=list, description="最近会话的全部消息，按时间升序")
+    messages: list[ConversationMessage] = Field(default_factory=list, description="最近会话的消息，按时间及编号升序；分页时为指定窗口")
+    total: int | None = Field(default=None, ge=0, description="分页时返回最近会话的消息总数；无有效用户或会话时为 0")
 
 
 class SourceDetail(BaseModel):

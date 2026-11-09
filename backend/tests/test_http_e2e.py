@@ -173,6 +173,9 @@ def test_http_optional_identity_logout_and_history_isolation(server):
         verify_answer(client, customer, source_id)
         before = client.get('/api/conversation', headers=customer).json()
         assert len(before['messages']) == 2
+        page = client.get('/api/conversation', headers=customer, params={'offset': 1, 'limit': 1})
+        assert page.status_code == 200
+        assert page.json() == {'messages': before['messages'][1:2], 'total': 2}
         assert client.post('/api/logout', headers=customer).status_code == 200
         # 同一用户重新登录的凭据仍应能读取原来的私人历史。
         renewed = login(client, 'customer')
@@ -180,6 +183,7 @@ def test_http_optional_identity_logout_and_history_isolation(server):
         for headers in ({}, {'Authorization': 'Bearer not-a-token'}, customer):
             assert client.get('/api/me', headers=headers).json() == {'user': None}
             assert client.get('/api/conversation', headers=headers).json() == {'messages': []}
+            assert client.get('/api/conversation', headers=headers, params={'limit': 1}).json() == {'messages': [], 'total': 0}
             verify_answer(client, headers, source_id)
             assert client.get('/api/conversation', headers=headers).json() == {'messages': []}
             assert client.get('/api/conversation', headers=renewed).json() == before
