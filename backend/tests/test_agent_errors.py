@@ -113,7 +113,6 @@ def chat_client(monkeypatch):
     monkeypatch.setattr(chat, "history", lambda _: [])
     monkeypatch.setattr(chat, "append_turn", lambda *args: None)
     monkeypatch.setattr(chat, "append_tried_step", lambda *args: None)
-    monkeypatch.setattr(chat, "current_user", lambda _: None)
     monkeypatch.setattr(chat.knowledge, "search_knowledge", lambda _: [])
     app = FastAPI()
     app.include_router(chat_router, prefix="/api")

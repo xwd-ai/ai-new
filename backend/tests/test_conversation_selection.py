@@ -21,8 +21,8 @@ def selection_store(tmp_path, monkeypatch):
     factory = sessionmaker(bind=engine, autoflush=False)
     monkeypatch.setattr(chat, 'SessionLocal', factory)
     monkeypatch.setattr(chat_api, 'SessionLocal', factory)
-    monkeypatch.setattr(chat, 'current_user', lambda _: {'id': 'user'})
     app = FastAPI()
+    app.dependency_overrides[chat_api.current_user] = lambda: {'id': 'user'}
     app.include_router(chat_api.chat_router, prefix='/api')
     with chat.execution_scope(), TestClient(app) as client:
         yield factory, client
