@@ -606,18 +606,7 @@
     const recovery = new ChatRecovery({
       fetchHistory: async () => {
         const options = {headers: {'Authorization': 'Bearer ' + token}, signal: AbortSignal.timeout(10000)};
-        // 旧历史接口对失效会话返回空数组，先校验身份，避免误作空历史。
-        const identity = await fetch('/api/me', options);
-        if (!identity.ok) throw new Error('身份检查失败');
-        const account = await identity.json();
-        if (!account.user || account.user.id !== me.id) {
-          throw Object.assign(new Error('登录已失效或账号已改变，请重新登录。'), {retryable:false});
-        }
-        const response = await fetch('/api/conversation', options);
-        if (!response.ok) throw new Error('历史读取失败');
-        const data = await response.json();
-        if (!Array.isArray(data.messages)) throw new Error('历史格式错误');
-        return data.messages;
+        return fetchPagedHistory(path => fetch(path, options), me.id);
       },
       onMessages: messages => {
         if (!messages.length) return; // 未落库时保留欢迎语或结果不确定的本地消息。

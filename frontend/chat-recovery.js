@@ -1,6 +1,38 @@
 /* HTTP 历史恢复只重试读取，绝不自动重发对话 POST。 */
 (function (root) {
   'use strict';
+  async function fetchPagedHistory(request, userId) {
+    const read = async path => {
+      const response = await request(path);
+      if (response.status === 401 || response.status === 403) {
+        throw Object.assign(new Error('登录已失效，请重新登录。'), {retryable:false});
+      }
+      if (!response.ok) throw new Error('历史读取失败');
+      return response.json();
+    };
+    const checkIdentity = async () => {
+      const identity = await read('/api/me');
+      if (!identity.user || identity.user.id !== userId) {
+        throw Object.assign(new Error('登录已失效或账号已改变，请重新登录。'), {retryable:false});
+      }
+    };
+    await checkIdentity();
+    const messages = [];
+    let total;
+    do {
+      const data = await read(`/api/conversation?offset=${messages.length}&limit=100`);
+      if (!Array.isArray(data.messages) || !Number.isSafeInteger(data.total) || data.total < 0) {
+        throw new Error('历史格式错误');
+      }
+      if (total !== undefined && total !== data.total) throw new Error('历史数量发生变化，请重新同步。');
+      total = data.total;
+      if (data.messages.length !== Math.min(100, total - messages.length)) throw new Error('历史分页不完整');
+      messages.push(...data.messages);
+    } while (messages.length < total);
+    await checkIdentity();
+    return messages;
+  }
+
   class ChatRecovery {
     constructor({fetchHistory, onMessages, onStatus, onBusy,
       sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
@@ -63,6 +95,6 @@
       }
     }
   }
-  if (typeof module !== 'undefined' && module.exports) module.exports = {ChatRecovery};
-  else root.ChatRecovery = ChatRecovery;
+  if (typeof module !== 'undefined' && module.exports) module.exports = {ChatRecovery, fetchPagedHistory};
+  else { root.ChatRecovery = ChatRecovery; root.fetchPagedHistory = fetchPagedHistory; }
 })(globalThis);

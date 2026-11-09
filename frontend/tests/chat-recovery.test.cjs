@@ -1,6 +1,7 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const {ChatRecovery} = require('../chat-recovery.js');
+const {fetchPagedHistory} = require('../chat-recovery.js');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const html = fs.readFileSync(require('node:path').join(__dirname, '../index.html'), 'utf8');
@@ -120,4 +121,70 @@ test('concurrent history refreshes do not append duplicate messages', async () =
   await first;
   assert.equal(calls, 1);
   assert.equal(messages.length, 1);
+});
+
+const json = data => ({ok:true, json:async () => data});
+test('page history callback shares one ten second signal for identity and pages', async () => {
+  const source = html.replace(/\r\n/g,'\n');
+  const start = source.indexOf('fetchHistory: async () => {');
+  const end = source.indexOf('\n      },\n      onMessages:',start);
+  const code = source.slice(start+'fetchHistory: '.length,end)+'\n      }';
+  const options = [], timeouts = [], signal = {};
+  const callback = vm.runInNewContext('('+code+')', {
+    token:'test', me:{id:'u'}, fetchPagedHistory,
+    AbortSignal:{timeout:ms=>{timeouts.push(ms);return signal;}},
+    fetch:async (path,option)=>{options.push(option);return json(path==='/api/me'?{user:{id:'u'}}:{messages:[],total:0});},
+  });
+  assert.deepEqual(await callback(),[]);
+  assert.deepEqual(timeouts,[10000]); assert.equal(options.length,3);
+  assert.ok(options.every(option=>option===options[0] && option.signal===signal));
+});
+
+test('paged history reads in order and checks identity before and after', async () => {
+  const calls = [], rows = Array.from({length:205}, (_,i) => ({role:'user',content:String(i)}));
+  const result = await fetchPagedHistory(async path => {
+    calls.push(path);
+    if (path === '/api/me') return json({user:{id:'u'}});
+    const offset = Number(new URLSearchParams(path.split('?')[1]).get('offset'));
+    return json({messages:rows.slice(offset,offset+100),total:205});
+  }, 'u');
+  assert.deepEqual(result,rows);
+  assert.deepEqual(calls,['/api/me','/api/conversation?offset=0&limit=100',
+    '/api/conversation?offset=100&limit=100','/api/conversation?offset=200&limit=100','/api/me']);
+});
+
+test('failed later page restarts complete read and never renders a partial history', async () => {
+  let fail = true; const offsets = [];
+  const {recovery,messages} = setup(() => fetchPagedHistory(async path => {
+    if (path === '/api/me') return json({user:{id:'u'}});
+    const offset = Number(new URLSearchParams(path.split('?')[1]).get('offset')); offsets.push(offset);
+    if (offset === 100 && fail) { fail=false; throw Error('network'); }
+    return json({messages:Array.from({length:offset ? 1:100},()=>({role:'user',content:'saved'})),total:101});
+  },'u'));
+  await recovery.sync();
+  assert.deepEqual(offsets,[0,100,0,100]);
+  assert.equal(messages.length,1); assert.equal(messages[0].length,101);
+});
+
+test('expiry at final identity check stops retries and does not replace history', async () => {
+  let identities=0;
+  const {recovery,messages,statuses} = setup(() => fetchPagedHistory(async path => {
+    if (path === '/api/me') return json({user:++identities===1 ? {id:'u'}:null});
+    return json({messages:[],total:0});
+  },'u'));
+  await recovery.sync();
+  assert.equal(identities,2); assert.deepEqual(messages,[]); assert.match(statuses.at(-1),/重新登录/);
+});
+
+for (const data of [{messages:[],total:1},{messages:[],total:-1},{messages:[]},
+  {messages:[],total:0.5}]) {
+  test('invalid page rejected: '+JSON.stringify(data),async()=>{
+    await assert.rejects(fetchPagedHistory(async path => json(path === '/api/me' ? {user:{id:'u'}}:data),'u'));
+  });
+}
+
+test('changed total on a later page is rejected', async () => {
+  let page=0;
+  await assert.rejects(fetchPagedHistory(async path => path === '/api/me' ? json({user:{id:'u'}})
+    : json({messages:Array(100).fill({}),total:++page===1 ? 101:102}),'u'),/变化/);
 });
