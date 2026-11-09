@@ -46,9 +46,11 @@ ENDPOINTS = [
 ]
 
 # 订单查询接口对匿名是宽松的，只参与路由注册检查，不参与未登录拦截检查；
+# 服务范围查询要求登录，但结论依赖具体的订单配置，同样只校验路由注册；
 # 批量接口会真实改变工单状态，也只校验路由注册，不进冒烟主流程。
 ROUTES = ENDPOINTS + [
     ("get", "/api/order", {}),
+    ("get", "/api/order/scope", {}),
     ("post", "/api/tickets/batch-close", {}),
     ("post", "/api/tickets/batch-transfer", {}),
 ]

@@ -14,7 +14,7 @@
   之前，否则会被路径参数匹配吞掉。
 """
 
-from typing import Optional
+from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
@@ -31,6 +31,7 @@ from backend.models.ticket import (
     TicketRuleError,
 )
 from backend.schemas import CreateTicketRequest, ReplyRequest
+from backend.schemas.order import OrderQueryRequest, OrderScopeResponse
 from backend.schemas.ticket import (
     BatchCloseRequest,
     BatchTransferRequest,
@@ -282,6 +283,24 @@ def my_order(user: Optional[dict] = Depends(current_user)):
     if not user:
         return {"order": None}
     return {"order": orders.query_order(user["id"])}
+
+
+@tickets_router.get("/order/scope", response_model=OrderScopeResponse)
+def order_scope(
+    params: Annotated[OrderQueryRequest, Query()],
+    user: dict = Depends(require_login),
+):
+    """查询当前用户订单的服务范围：版本、服务期与功能是否包含。
+
+    与 /order 的分工：/order 面向页面展示、字段固定；本接口回答「能不能用」，
+    把判定结论、原因码与一句可展示的说明一次给全，供前端提示与对话链路引用。
+    与 /order 的匿名宽松策略不同，这里要求登录：结论涉及账号权益，
+    未登录应当被明确拒绝，而不是返回一份空结论让调用方误当成「没有订单」。
+
+    feature 走查询参数（?feature=批量导出），留空只判断整体服务状态。
+    功能名解析与判定全部在服务层完成，接口层不重复解释规则。
+    """
+    return orders.describe_order(user["id"], feature=params.feature)
 
 
 # ---------------------------------------------------------------------------
