@@ -363,7 +363,12 @@ def evaluate_service_scope(
     else:
         scope["feature_included"] = True
 
-    scope["allowed"] = scope["in_service"] and scope["feature_included"]
+    # 放行需要同时满足三件事：版本可识别、服务在期内、功能在版本内。
+    # 版本不可识别时必须判为不放行——判断不了版本还能不能用，等于判断不了权益，
+    # 这里放开会让一个查不到产品配置的账号直接拿到全部能力。
+    scope["allowed"] = (
+        capabilities["known"] and scope["in_service"] and scope["feature_included"]
+    )
 
     for code, hit in (
         ("tier_unknown", not capabilities["known"]),
@@ -453,4 +458,59 @@ def query_order(user_id: str) -> dict:
         "in_service": scope["in_service"],
         "features": product["features"] if product else scope["features"],
         "expires_at": order["expires_at"],
+    }
+
+
+# ============================ 五、查询结论 ============================
+
+
+def _scope_message(scope: dict) -> str:
+    """把判定结论拼成一句可展示的中文说明。
+
+    判定原因已经带了版本名与时间，正常情况下直接沿用；
+    只有「在服务范围内」需要额外补上到期时间与剩余天数——
+    这是用户最关心的信息，也是后续续费提示的落点。
+    """
+    if not scope["has_order"]:
+        return scope["reason"]
+
+    if scope["reason_code"] != "in_service":
+        return scope["reason"]
+
+    period = scope["period"] or {}
+    target = scope["feature"]
+    if target and target["included"]:
+        head = f"{scope['tier_label']}包含「{target['name']}」"
+    else:
+        head = f"{scope['tier_label']}服务中"
+    return (
+        f"{head}，服务期至 {period['expires_text']}"
+        f"（剩余 {period['days_remaining']} 天）"
+    )
+
+
+def describe_order(user_id: str, feature=None, now: Optional[float] = None) -> dict:
+    """查询用户订单，返回版本、服务期与功能范围的完整结论。
+
+    与 query_order 的分工：query_order 面向页面展示，字段固定为既有契约；
+    本函数面向「能不能用」的判断，把判定过程一并透出——
+    版本、服务期、功能是否包含、原因码与一句可直接展示的说明。
+
+    先取订单再交给纯函数判定，取数与判定分开，判定逻辑可脱离数据库单测。
+    """
+    scope = evaluate_service_scope(get_order(user_id), feature, now)
+    return {
+        "has_order": scope["has_order"],
+        "order_id": scope["order_id"],
+        "tier": scope["tier"],
+        "tier_label": scope["tier_label"],
+        "order_status": scope["order_status"],
+        "period": scope["period"],
+        "features": list(scope["features"]),
+        "feature": scope["feature"],
+        "in_service": scope["in_service"],
+        "allowed": scope["allowed"],
+        "reason_code": scope["reason_code"],
+        "reason": scope["reason"],
+        "message": _scope_message(scope),
     }
