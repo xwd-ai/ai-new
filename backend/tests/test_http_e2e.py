@@ -163,6 +163,41 @@ def test_http_ingest_retrieval_chat_and_restart_persistence(server):
         verify_answer(restarted, customer, source_id)
 
 
+def test_http_optional_identity_logout_and_history_isolation(server):
+    process, client = server()
+    with client:
+        admin, customer = login(client, 'admin'), login(client, 'customer')
+        created = client.post('/api/knowledge/ingest', headers=admin, json=DOCUMENT)
+        assert created.status_code == 200
+        source_id = created.json()['knowledge_id']
+        verify_answer(client, customer, source_id)
+        before = client.get('/api/conversation', headers=customer).json()
+        assert len(before['messages']) == 2
+        assert client.post('/api/logout', headers=customer).status_code == 200
+        # 同一用户重新登录的凭据仍应能读取原来的私人历史。
+        renewed = login(client, 'customer')
+        assert renewed != customer
+        for headers in ({}, {'Authorization': 'Bearer not-a-token'}, customer):
+            assert client.get('/api/me', headers=headers).json() == {'user': None}
+            assert client.get('/api/conversation', headers=headers).json() == {'messages': []}
+            verify_answer(client, headers, source_id)
+            assert client.get('/api/conversation', headers=headers).json() == {'messages': []}
+            assert client.get('/api/conversation', headers=renewed).json() == before
+            assert client.get('/api/conversation', headers=admin).json() == {'messages': []}
+        stop_server(process, str(client.base_url))
+    _, restarted = server()
+    with restarted:
+        assert restarted.get('/api/me', headers=customer).json() == {'user': None}
+        assert restarted.get('/api/conversation', headers=customer).json() == {'messages': []}
+        assert restarted.get('/api/conversation', headers=renewed).json() == before
+        verify_answer(restarted, customer, source_id)
+        assert restarted.get('/api/conversation', headers=renewed).json() == before
+        verify_answer(restarted, renewed, source_id)
+        messages = restarted.get('/api/conversation', headers=renewed).json()['messages']
+        assert messages[:2] == before['messages']
+        assert [message['role'] for message in messages] == ['user', 'assistant', 'user', 'assistant']
+
+
 def test_http_journal_recovery_after_restart_and_model_failure(server):
     process, client = server('interrupt')
     with client:
