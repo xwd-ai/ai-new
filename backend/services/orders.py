@@ -405,7 +405,7 @@ def _scope_reason_text(code: str, scope: dict, target: Optional[Feature]) -> str
     return text
 
 
-# ============================ 四、查询入口 ============================
+# ============================ 四、订单取数与挑选 ============================
 
 
 def _get_product(db, tier: str) -> Optional[dict]:
@@ -413,17 +413,88 @@ def _get_product(db, tier: str) -> Optional[dict]:
     return product.to_dict() if product else None
 
 
-def get_order(user_id: str) -> Optional[dict]:
-    """取用户当前订单记录，没有订单返回 None。
+def list_orders(user_id: str) -> list[dict]:
+    """取用户的全部订单，按到期时间从晚到早排列，同到期时间按订单号升序。
 
-    同一用户存在多条订单时取第一条，多订单的挑选口径在后续接口层处理。
+    一个用户可以买多个产品，也可以续费多次，订单与用户因此是一对多关系。
+    把确定的口径放在取数这一层，上层挑选与展示都不必再依赖数据库返回顺序。
     """
     db = SessionLocal()
     try:
-        order = db.query(Order).filter(Order.user_id == user_id).first()
-        return order.to_dict() if order else None
+        rows = (
+            db.query(Order)
+            .filter(Order.user_id == user_id)
+            .order_by(Order.expires_at.desc(), Order.id.asc())
+            .all()
+        )
+        return [row.to_dict() for row in rows]
     finally:
         db.close()
+
+
+def _order_rank(order: dict, now: Optional[float] = None) -> tuple:
+    """主订单排序键：服务中优先 → 订单状态有效 → 到期更晚 → 订单号更小。
+
+    前三项仍不能区分时用订单号兜底，保证同一批数据每次挑出的是同一条；
+    否则「当前在用哪个版本」这类结论会在两次查询之间来回跳。
+    """
+    scope = evaluate_service_scope(order, now=now)
+    period = scope["period"] or {}
+    expires = period.get("expires_at") or 0.0
+    return (
+        0 if scope["in_service"] else 1,
+        1 if scope["reason_code"] == "order_inactive" else 0,
+        -expires,
+        str(order.get("id") or ""),
+    )
+
+
+def select_primary_order(orders, now: Optional[float] = None) -> Optional[dict]:
+    """从多条订单中选一条作为主订单，空入参返回 None。
+
+    主订单用于「当前用户在用什么产品」这类只能给单一答案的场合：
+    优先取服务期内的，多个版本都在期时取到期最晚的，通常是最近一次续费或升级。
+    """
+    candidates = [order for order in orders or [] if order]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda order: _order_rank(order, now))
+
+
+def get_order(user_id: str, order_id: Optional[str] = None) -> Optional[dict]:
+    """取用户的一条订单：指定 order_id 时精确取，否则取主订单。
+
+    指定了订单号但该订单不属于这个用户时返回 None，由调用方按「订单不存在」
+    处理——别人的订单号不能因为格式正确就被放行。
+    """
+    orders = list_orders(user_id)
+    if not orders:
+        return None
+    if order_id:
+        return next((order for order in orders if order["id"] == order_id), None)
+    return select_primary_order(orders)
+
+
+def _order_scope(order: dict, now: Optional[float] = None) -> dict:
+    """单条订单的服务范围摘要，供多订单列表逐条展示。"""
+    scope = evaluate_service_scope(order, now=now)
+    return {
+        "order_id": order["id"],
+        "product_tier": order["product_tier"],
+        "tier": scope["tier"],
+        "tier_label": scope["tier_label"],
+        "order_status": scope["order_status"],
+        "period": scope["period"],
+        "in_service": scope["in_service"],
+        "allowed": scope["allowed"],
+        "reason_code": scope["reason_code"],
+        "reason": scope["reason"],
+    }
+
+
+def list_order_scopes(user_id: str, now: Optional[float] = None) -> list[dict]:
+    """列出用户全部订单及各自的服务范围，顺序与 list_orders 一致。"""
+    return [_order_scope(order, now) for order in list_orders(user_id)]
 
 
 def query_order(user_id: str) -> dict:
@@ -461,6 +532,64 @@ def query_order(user_id: str) -> dict:
     }
 
 
+def query_orders(user_id: str, now: Optional[float] = None) -> dict:
+    """多订单视图：逐条摘要、主订单与在期版本的能力并集。
+
+    用户同时持有多个在期订单时，可用功能取并集：基础版和专业版都在期，
+    不该因为主订单挑中基础版就把批量导出判成不可用。
+    能力列表沿用产品表配置（运营可改），产品行缺失时退回内置矩阵。
+    """
+    orders = list_orders(user_id)
+    if not orders:
+        return {
+            "has_order": False,
+            "order_count": 0,
+            "in_service_count": 0,
+            "primary_order_id": None,
+            "orders": [],
+            "features": [],
+            "message": "未查询到该用户的订单记录",
+        }
+
+    items = [_order_scope(order, now) for order in orders]
+    primary = select_primary_order(orders, now)
+    active = [item for item in items if item["in_service"]]
+
+    features: list[str] = []
+    db = SessionLocal()
+    try:
+        for item in active:
+            tier = item["tier"] or item["product_tier"]
+            product = _get_product(db, tier)
+            names = (
+                product["features"]
+                if product
+                else tier_capabilities(item["product_tier"])["features"]
+            )
+            for name in names:
+                if name not in features:
+                    features.append(name)
+    finally:
+        db.close()
+
+    if not active:
+        message = f"共 {len(orders)} 个订单，当前均不在服务期内"
+    elif len(active) == len(orders):
+        message = f"共 {len(orders)} 个订单，均在服务期内"
+    else:
+        message = f"共 {len(orders)} 个订单，{len(active)} 个在服务期内"
+
+    return {
+        "has_order": True,
+        "order_count": len(orders),
+        "in_service_count": len(active),
+        "primary_order_id": primary["id"] if primary else None,
+        "orders": items,
+        "features": features,
+        "message": message,
+    }
+
+
 # ============================ 五、查询结论 ============================
 
 
@@ -489,16 +618,24 @@ def _scope_message(scope: dict) -> str:
     )
 
 
-def describe_order(user_id: str, feature=None, now: Optional[float] = None) -> dict:
+def describe_order(
+    user_id: str,
+    feature=None,
+    now: Optional[float] = None,
+    order_id: Optional[str] = None,
+) -> dict:
     """查询用户订单，返回版本、服务期与功能范围的完整结论。
 
     与 query_order 的分工：query_order 面向页面展示，字段固定为既有契约；
     本函数面向「能不能用」的判断，把判定过程一并透出——
     版本、服务期、功能是否包含、原因码与一句可直接展示的说明。
 
+    order_id 留空时判定主订单；指定后只判定那一条订单，
+    多产品用户要核实某个具体订单时不必依赖主订单的挑选结果。
+
     先取订单再交给纯函数判定，取数与判定分开，判定逻辑可脱离数据库单测。
     """
-    scope = evaluate_service_scope(get_order(user_id), feature, now)
+    scope = evaluate_service_scope(get_order(user_id, order_id), feature, now)
     return {
         "has_order": scope["has_order"],
         "order_id": scope["order_id"],

@@ -50,6 +50,7 @@ ENDPOINTS = [
 # 批量接口会真实改变工单状态，也只校验路由注册，不进冒烟主流程。
 ROUTES = ENDPOINTS + [
     ("get", "/api/order", {}),
+    ("get", "/api/order/list", {}),
     ("get", "/api/order/scope", {}),
     ("post", "/api/tickets/batch-close", {}),
     ("post", "/api/tickets/batch-transfer", {}),

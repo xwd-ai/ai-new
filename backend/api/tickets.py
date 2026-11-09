@@ -31,7 +31,11 @@ from backend.models.ticket import (
     TicketRuleError,
 )
 from backend.schemas import CreateTicketRequest, ReplyRequest
-from backend.schemas.order import OrderQueryRequest, OrderScopeResponse
+from backend.schemas.order import (
+    OrderListView,
+    OrderQueryRequest,
+    OrderScopeResponse,
+)
 from backend.schemas.ticket import (
     BatchCloseRequest,
     BatchTransferRequest,
@@ -285,6 +289,20 @@ def my_order(user: Optional[dict] = Depends(current_user)):
     return {"order": orders.query_order(user["id"])}
 
 
+@tickets_router.get("/order/list", response_model=OrderListView)
+def my_orders(user: dict = Depends(require_login)):
+    """列出当前用户的全部订单，并标出主订单与在期能力并集。
+
+    与 /order 的分工：/order 只给一条主订单，供右侧面板展示当前版本；
+    本接口面向多产品用户——买了基础版又买了专业版时，
+    需要看到每一条订单各自的服务期与状态，而不是只看到其中一条。
+
+    匿名访问在这里直接拒绝，不做「返回空列表」的宽松处理：
+    空列表与「确实没有订单」无法区分，调用方容易把未登录当成没买过东西。
+    """
+    return orders.query_orders(user["id"])
+
+
 @tickets_router.get("/order/scope", response_model=OrderScopeResponse)
 def order_scope(
     params: Annotated[OrderQueryRequest, Query()],
@@ -297,10 +315,13 @@ def order_scope(
     与 /order 的匿名宽松策略不同，这里要求登录：结论涉及账号权益，
     未登录应当被明确拒绝，而不是返回一份空结论让调用方误当成「没有订单」。
 
-    feature 走查询参数（?feature=批量导出），留空只判断整体服务状态。
+    feature 走查询参数（?feature=批量导出），留空只判断整体服务状态；
+    order_id 同样走查询参数，指定后只判定那一条订单，留空判定主订单。
     功能名解析与判定全部在服务层完成，接口层不重复解释规则。
     """
-    return orders.describe_order(user["id"], feature=params.feature)
+    return orders.describe_order(
+        user["id"], feature=params.feature, order_id=params.order_id or None
+    )
 
 
 # ---------------------------------------------------------------------------
