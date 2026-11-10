@@ -33,6 +33,7 @@ from backend.models.ticket import (
 from backend.schemas import CreateTicketRequest, ReplyRequest
 from backend.schemas.order import (
     ExpireResultResponse,
+    FeatureCheckResponse,
     OrderListView,
     OrderQueryRequest,
     OrderScopeResponse,
@@ -324,6 +325,25 @@ def order_scope(
     return orders.describe_order(
         user["id"], feature=params.feature, order_id=params.order_id or None
     )
+
+
+@tickets_router.get("/order/feature-scope", response_model=FeatureCheckResponse)
+def order_feature_scope(
+    feature: str = Query(
+        default="", max_length=50, description="要确认的功能，如「批量导出」「API」"
+    ),
+    user: dict = Depends(require_login),
+):
+    """判定某功能是否在当前用户的服务范围内（跨全部订单）。
+
+    与 /order/scope 的分工：那个接口判定单条订单，多产品用户可能被主订单
+    带偏；本接口把全部订单放在一起看，任一在期订单的版本覆盖该功能即判为
+    在范围内，回答「这个功能现在能不能用」，供前端提示与对话链路引用。
+
+    feature 走查询参数，可以是标准名称、能力编码或用户口语；
+    解析与判定全部在服务层完成，接口层只做取数透传与登录校验。
+    """
+    return orders.describe_feature_scope(user["id"], feature=feature)
 
 
 @tickets_router.get("/order/renewal", response_model=RenewalListView)

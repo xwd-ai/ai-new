@@ -9,7 +9,9 @@
 3. 综合判定：版本 + 服务期 + 具体功能，给出「能否按已购服务处理」的结论，
    以及一条可直接展示给用户的原因；
 4. 过期与续费：把服务期换算成续费提醒状态，并支持把服务期已结束、状态仍是
-   有效的订单归档为过期。
+   有效的订单归档为过期；
+5. 功能服务范围判定：跨全部订单回答「某个功能能不能用」——任一在期订单的
+   版本覆盖该功能即判为在范围内，与多订单能力并集的口径一致。
 
 判定函数一律保持纯函数：只读入参，不查库、不写库；需要订单数据时由
 query_order 取好后传入，便于单测、也便于对话链路按只读方式反复调用。
@@ -1075,3 +1077,126 @@ def expire_overdue_orders(
         "skipped": skipped,
         "message": message,
     }
+
+
+# ============================ 八、功能服务范围判定 ============================
+
+FEATURE_SCOPE_REASONS = {
+    "feature_required": "请提供要确认的功能名称",
+}
+
+
+def _feature_scope_message(target: Feature, scope: dict) -> str:
+    """拼「功能在服务范围内」的展示文案，带上覆盖它的版本与服务期。"""
+    period = scope.get("period") or {}
+    if period.get("expires_text"):
+        return (
+            f"「{target.name}」在服务范围内（{scope['tier_label']}，"
+            f"服务期至 {period['expires_text']}，剩余 {period['days_remaining']} 天）"
+        )
+    return f"「{target.name}」在服务范围内"
+
+
+def evaluate_feature_scope(
+    orders: Optional[list] = None,
+    feature=None,
+    now: Optional[float] = None,
+) -> dict:
+    """跨全部订单判定某功能是否在服务范围内。
+
+    与 evaluate_service_scope 的分工：那个函数只看一条订单，多产品用户里
+    「主订单是基础版、另有一条在期专业版」时会把批量导出误判为不可用。
+    本函数把用户全部订单放在一起看：任一在期订单的版本包含该功能即判为
+    在范围内，covered_by 给出具体是哪条订单覆盖的，口径与多订单能力并集一致。
+
+    不在范围内时按「先报最上游问题」只给一个原因码：
+    没有订单 → 未给功能 → 功能不可识别 → 有在期订单但都不包含（取在期主订单
+    的原因，版本不可识别也落在这里）→ 没有在期订单（取主订单的服务态原因）。
+    逐单明细照常返回，个别订单的到期或退订情况由调用方按明细展示。
+    """
+    query = " ".join(str(feature or "").split())
+    rows = [
+        (order, evaluate_service_scope(order, query or None, now))
+        for order in (orders or [])
+        if order
+    ]
+    items = [
+        {
+            "order_id": scope["order_id"],
+            "tier_label": scope["tier_label"],
+            "order_status": scope["order_status"],
+            "in_service": scope["in_service"],
+            "feature_included": scope["feature_included"],
+            "reason_code": scope["reason_code"],
+            "reason": scope["reason"],
+        }
+        for _, scope in rows
+    ]
+    active = [(order, scope) for order, scope in rows if scope["in_service"]]
+    covered = [(order, scope) for order, scope in active if scope["feature_included"]]
+
+    result = {
+        "has_order": bool(rows),
+        "feature": {
+            "query": query,
+            "code": "",
+            "name": "",
+            # included 是「版本层是否含该功能」，与单订单判定同口径；
+            # 未给功能时没有可判定的对象，保持 false
+            "included": bool(query) and any(item["feature_included"] for item in items),
+        },
+        "in_scope": False,
+        "covered_by": None,
+        "order_count": len(rows),
+        "in_service_count": len(active),
+        "reason_code": "",
+        "reason": "",
+        "message": "",
+        "orders": items,
+    }
+
+    def settle(code: str, reason: str, covered_by: Optional[str] = None) -> dict:
+        result["reason_code"] = code
+        result["reason"] = reason
+        result["message"] = reason
+        if code == "in_scope":
+            result["in_scope"] = True
+            result["covered_by"] = covered_by
+        return result
+
+    if not rows:
+        return settle("no_order", SCOPE_REASONS["no_order"])
+    if not query:
+        return settle("feature_required", FEATURE_SCOPE_REASONS["feature_required"])
+
+    target = resolve_feature(query)
+    if target is None:
+        return settle(
+            "feature_unknown", f"{SCOPE_REASONS['feature_unknown']}「{query}」"
+        )
+    result["feature"]["code"] = target.code
+    result["feature"]["name"] = target.name
+
+    if covered:
+        order, scope = min(covered, key=lambda pair: _order_rank(pair[0], now))
+        return settle("in_scope", _feature_scope_message(target, scope), scope["order_id"])
+
+    # 都不覆盖：有在期订单时报版本/功能层的问题，没有在期订单时报服务态问题。
+    # 两条路径都取排序最优的那条订单的单订单判定原因，避免多原因并列让调用方难分支。
+    pool = active or rows
+    _, scope = min(pool, key=lambda pair: _order_rank(pair[0], now))
+    return settle(scope["reason_code"], scope["reason"])
+
+
+def describe_feature_scope(
+    user_id: str,
+    feature=None,
+    now: Optional[float] = None,
+) -> dict:
+    """查询用户全部订单，判定某功能是否在服务范围内。
+
+    与 describe_order 的分工：describe_order 判定单条订单（主订单或指定订单），
+    本函数按多订单汇总判定，回答「这个功能现在能不能用」。
+    取数与判定分离：判定逻辑在纯函数里，可脱离数据库单测。
+    """
+    return evaluate_feature_scope(list_orders(user_id), feature, now)

@@ -173,3 +173,40 @@ class ExpireResultResponse(BaseModel):
     archived: list[str] = Field(default_factory=list, description="本次归档为过期的订单号")
     skipped: list[str] = Field(default_factory=list, description="无需变更或不满足归档条件的订单号")
     message: str = ""
+
+
+class FeatureScopeItemResponse(BaseModel):
+    """功能判定里一条订单的结论摘要：版本、状态与该版本是否覆盖功能。
+
+    feature_included 是版本层结论（该版本能力表里有没有这项功能），
+    与服务期无关；能不能用还要叠加 in_service 一起看。
+    """
+
+    order_id: str
+    tier_label: str = "未知版本"
+    order_status: str = ""
+    in_service: bool = False
+    feature_included: bool = False
+    reason_code: str = ""
+    reason: str = ""
+
+
+class FeatureCheckResponse(BaseModel):
+    """功能服务范围判定响应：跨全部订单回答「这个功能能不能用」。
+
+    与 OrderScopeResponse 的区别：那个只判定一条订单（主订单或指定订单），
+    本模型按多订单汇总——任一在期订单覆盖该功能即判为在范围内，
+    covered_by 给出具体是哪条订单覆盖的；orders 是逐单明细，
+    供调用方解释「为什么不在范围内」（哪条到期、哪条退订）。
+    """
+
+    has_order: bool = False
+    feature: FeatureScopeResponse
+    in_scope: bool = False
+    covered_by: Optional[str] = None
+    order_count: int = 0
+    in_service_count: int = 0
+    reason_code: str = ""
+    reason: str = ""
+    message: str = ""
+    orders: list[FeatureScopeItemResponse] = Field(default_factory=list)
