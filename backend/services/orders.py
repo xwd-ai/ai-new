@@ -22,6 +22,16 @@ from typing import Optional
 
 from backend.database import SessionLocal
 from backend.models import Order, Product
+from backend.models.order import (
+    ORDER_STATUS_LABELS,
+    OrderNotFoundError,
+    OrderStatus,
+    as_status,
+    is_terminal,
+    next_statuses,
+    status_label,
+    validate_transition,
+)
 
 # 产品与订单持久化到 SQLite 数据库
 # 订单是「服务范围判定」的依据：确认用户购买的是不是专业版、是否在服务期内
@@ -651,3 +661,115 @@ def describe_order(
         "reason": scope["reason"],
         "message": _scope_message(scope),
     }
+
+
+# ============================ 六、订单状态流转 ============================
+
+# 状态变更后的提示文案：既要说明结果，也要说清下一步能做什么
+STATUS_CHANGE_MESSAGES = {
+    OrderStatus.ACTIVE: "订单已恢复有效，服务按服务期继续提供",
+    OrderStatus.EXPIRED: "订单已标记为过期，服务期结束后不再提供新服务，可提示用户续费",
+    OrderStatus.CANCELLED: "订单已退订，服务立即停止，如需继续使用请重新购买",
+}
+
+
+def describe_status_flow(order: Optional[dict]) -> dict:
+    """给出一条订单的状态流转说明：当前状态、是否终态、可流转到的状态。
+
+    面向管理侧展示与二次确认：把状态机允许的动作交出去，
+    调用方不必自己维护一份流转表，也就不会出现「界面给了按钮、接口却拒绝」。
+    """
+    if not order:
+        return {
+            "order_id": None,
+            "status": "",
+            "status_label": "未知状态",
+            "known": False,
+            "terminal": False,
+            "allowed_statuses": [],
+            "allowed_labels": [],
+        }
+
+    current = as_status(order.get("status"))
+    allowed = next_statuses(current)
+    return {
+        "order_id": order.get("id"),
+        "status": current.value if current else "",
+        "status_label": status_label(current),
+        "known": current is not None,
+        "terminal": is_terminal(current),
+        "allowed_statuses": allowed,
+        "allowed_labels": [ORDER_STATUS_LABELS[OrderStatus(value)] for value in allowed],
+    }
+
+
+def _change_message(from_status, to_status, unchanged: bool) -> str:
+    """拼状态变更结果说明，幂等命中时说清「没有改动」，避免被误读成变更失败。"""
+    if unchanged:
+        return f"订单已是{status_label(to_status)}状态，无需变更"
+    head = f"订单状态已由{status_label(from_status)}变更为{status_label(to_status)}"
+    return f"{head}。{STATUS_CHANGE_MESSAGES[OrderStatus(to_status)]}"
+
+
+def change_order_status(
+    order_id: str,
+    target,
+    *,
+    operator: str = "system",
+    user_id: Optional[str] = None,
+    reason: str = "",
+    now: Optional[float] = None,
+) -> dict:
+    """变更订单状态，写入前统一经过状态机校验。
+
+    校验先行、写库在后：非法流转与未知状态直接抛出异常，数据库里的状态
+    不会因为一次失败操作而被改坏，调用方也能拿到可分支的错误码。
+
+    user_id 传入时按归属过滤：他人订单与不存在的订单返回同一个错误，
+    避免用订单号试探别人的订单是否存在。
+
+    目标状态与当前状态相同时按幂等处理，不写库也不报错——订单状态常由
+    定时归档与人工操作并发触发，重复置为同一状态属于正常情况。
+
+    reason 与 operator 只回显给调用方用于日志与审计，不落订单表：
+    订单表记录的是当前状态，变更过程由业务侧的操作日志承载。
+    """
+    key = " ".join(str(order_id or "").split())
+    if not key:
+        raise OrderNotFoundError(order_id="", message="订单号不能为空")
+
+    db = SessionLocal()
+    try:
+        query = db.query(Order).filter(Order.id == key)
+        if user_id is not None:
+            query = query.filter(Order.user_id == user_id)
+        order = query.first()
+        if order is None:
+            raise OrderNotFoundError(order_id=key)
+
+        from_status = order.status
+        to_status = validate_transition(from_status, target)
+        unchanged = to_status.value == as_status(from_status).value
+        changed_at = time.time() if now is None else _as_timestamp(now)
+
+        if not unchanged:
+            order.status = to_status.value
+            db.commit()
+        else:
+            db.rollback()
+
+        return {
+            "order_id": order.id,
+            "user_id": order.user_id,
+            "from_status": from_status,
+            "to_status": to_status.value,
+            "status_label": ORDER_STATUS_LABELS[to_status],
+            "unchanged": unchanged,
+            "operator": " ".join(str(operator or "").split()) or "system",
+            "reason": " ".join(str(reason or "").split()),
+            "changed_at": changed_at,
+            "allowed_statuses": next_statuses(to_status),
+            "message": _change_message(from_status, to_status, unchanged),
+        }
+    finally:
+        db.close()

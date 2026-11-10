@@ -60,6 +60,168 @@ def status_label(value) -> str:
     return ORDER_STATUS_LABELS[status] if status is not None else "未知状态"
 
 
+# 合法状态流转表：key 为当前状态，value 为允许流转到的目标状态集合。
+# 未出现在映射中的流转一律视为非法，由状态校验统一拒绝。
+#
+# 业务口径：
+# - 有效 → 过期：服务期结束且未续费，业务侧归档；
+# - 有效 → 退订：用户主动退订，服务立即停止；
+# - 过期 → 有效：续费成功，原订单恢复服务（订单号不变，续费记录另行保存）；
+# - 过期 → 退订：过期后用户明确不再续费，归档为退订；
+# - 退订是终态：退订后重新购买应生成新订单，复活旧订单会让续费历史与
+#   服务期计算混在一起，也会让已退款的订单重新具备服务能力。
+ORDER_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
+    OrderStatus.ACTIVE: {OrderStatus.EXPIRED, OrderStatus.CANCELLED},
+    OrderStatus.EXPIRED: {OrderStatus.ACTIVE, OrderStatus.CANCELLED},
+    OrderStatus.CANCELLED: set(),
+}
+
+# 终态集合：进入后不再有任何允许的目标状态，供展示与二次校验复用
+TERMINAL_STATUSES: frozenset[OrderStatus] = frozenset(
+    status for status, targets in ORDER_TRANSITIONS.items() if not targets
+)
+
+
+class OrderErrorCode:
+    """订单业务错误码。
+
+    错误码是接口契约的一部分：文案可以调整，错误码保持不变，
+    调用方按错误码分支处理，不必解析中文说明。
+    """
+
+    NOT_FOUND = "ORDER_NOT_FOUND"
+    UNKNOWN_STATUS = "ORDER_UNKNOWN_STATUS"
+    INVALID_TRANSITION = "ORDER_INVALID_TRANSITION"
+
+
+class OrderBusinessError(ValueError):
+    """订单业务异常基类，同时继承 ValueError 以兼容按入参错误捕获的调用方。"""
+
+    code = OrderErrorCode.INVALID_TRANSITION
+    default_message = "订单状态操作失败"
+
+    def __init__(self, message: Optional[str] = None, *, code: Optional[str] = None, details: Optional[dict] = None):
+        self.code = code or type(self).code
+        self.message = message or type(self).default_message
+        self.details = dict(details or {})
+        super().__init__(self.message)
+
+    def to_payload(self) -> dict:
+        """转为统一的错误响应体，补充上下文只在有值时出现。"""
+        payload = {"error": self.message, "error_code": self.code}
+        if self.details:
+            payload["error_detail"] = self.details
+        return payload
+
+
+class OrderStatusTransitionError(OrderBusinessError):
+    """订单状态非法流转。
+
+    未知状态值与合法状态之间的非法流转分开给码：前者是入参或数据问题，
+    后者是业务规则拒绝，调用方需要区别对待。
+    """
+
+    def __init__(self, current, target, message: Optional[str] = None, *, code: Optional[str] = None):
+        self.current = "" if current is None else str(current)
+        self.target = "" if target is None else str(target)
+        super().__init__(
+            message or f"非法状态流转：{self.current} -> {self.target}",
+            code=code,
+            details={"from_status": self.current, "to_status": self.target},
+        )
+
+
+class OrderNotFoundError(OrderBusinessError):
+    """订单不存在或不属于当前用户。"""
+
+    code = OrderErrorCode.NOT_FOUND
+    default_message = "订单不存在"
+
+    def __init__(self, order_id: Optional[str] = None, message: Optional[str] = None):
+        details = {"order_id": order_id} if order_id else None
+        super().__init__(message, details=details)
+
+
+def can_transition(current, target) -> bool:
+    """判断订单能否从 current 流转到 target，任一状态不可识别均为否。"""
+    resolved_current = as_status(current)
+    resolved_target = as_status(target)
+    if resolved_current is None or resolved_target is None:
+        return False
+    return resolved_target in ORDER_TRANSITIONS[resolved_current]
+
+
+def next_statuses(value) -> list[str]:
+    """列出当前状态允许流转到的目标状态值，顺序与枚举声明一致。
+
+    未知状态返回空列表：给不出可选项时宁可不给，也不要凭猜测列出一串
+    实际上会被状态机拒绝的按钮。
+    """
+    current = as_status(value)
+    if current is None:
+        return []
+    allowed = ORDER_TRANSITIONS[current]
+    return [status.value for status in OrderStatus if status in allowed]
+
+
+def is_terminal(value) -> bool:
+    """判断状态是否为终态，未知状态按非终态处理（交由调用方另行核实）。"""
+    current = as_status(value)
+    return current in TERMINAL_STATUSES
+
+
+def validate_transition(current, target, *, allow_same: bool = True) -> OrderStatus:
+    """校验订单状态流转，合法时返回解析后的目标状态，非法时抛出异常。
+
+    入参同时接受枚举与字符串。先判状态值是否可识别，再判流转是否在表内，
+    让「空值 / 拼错的状态」与「业务上不允许的流转」得到不同的错误码。
+
+    allow_same 控制「当前状态与目标状态相同」是否算通过：订单状态常由
+    定时任务与人工操作并发写入，重复置为同一状态按幂等处理更稳妥，
+    由调用方据此跳过写库，而不是报错让任务整体失败。
+    """
+    resolved_current = as_status(current)
+    if resolved_current is None:
+        raise OrderStatusTransitionError(
+            current,
+            target,
+            f"未知的当前状态：{'' if current is None else current}",
+            code=OrderErrorCode.UNKNOWN_STATUS,
+        )
+
+    resolved_target = as_status(target)
+    if resolved_target is None:
+        raise OrderStatusTransitionError(
+            resolved_current.value,
+            target,
+            f"未知的目标状态：{'' if target is None else target}",
+            code=OrderErrorCode.UNKNOWN_STATUS,
+        )
+
+    if resolved_target == resolved_current:
+        if allow_same:
+            return resolved_target
+        raise OrderStatusTransitionError(
+            resolved_current.value,
+            resolved_target.value,
+            f"订单已是{ORDER_STATUS_LABELS[resolved_target]}状态",
+            code=OrderErrorCode.INVALID_TRANSITION,
+        )
+
+    if resolved_target not in ORDER_TRANSITIONS[resolved_current]:
+        allowed = "、".join(ORDER_STATUS_LABELS[OrderStatus(value)] for value in next_statuses(resolved_current))
+        hint = f"，当前状态只允许流转到{allowed}" if allowed else "，该状态已结束流转"
+        raise OrderStatusTransitionError(
+            resolved_current.value,
+            resolved_target.value,
+            f"订单不能从{ORDER_STATUS_LABELS[resolved_current]}变更为"
+            f"{ORDER_STATUS_LABELS[resolved_target]}{hint}",
+            code=OrderErrorCode.INVALID_TRANSITION,
+        )
+
+    return resolved_target
+
+
 class Product(Base):
     __tablename__ = "products"
 
