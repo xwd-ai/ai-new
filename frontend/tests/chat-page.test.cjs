@@ -87,6 +87,7 @@ test('actual scripts initialize all pages, manual sync replaces and preserves dr
 test('later page blocks send and preserves old display until all pages complete',async()=>{
   let release; const {elements:e,calls}=page(url=>url.includes('offset=100')?new Promise(r=>release=r):null,rows);
   await settle(); assert.equal(e.chatLog.textContent,'welcome'); assert.equal(e.sendBtn.disabled,true);
+  assert.match(e.connectionStatus.textContent,/已读取 100\/205 条/);
   e.msgInput.value='draft'; await e.sendBtn.emit('click');
   assert.equal(calls.some(x=>x.method==='POST'),false); assert.equal(e.msgInput.value,'draft');
   release(json({messages:rows.slice(100,200),total:205})); await settle();
@@ -103,12 +104,26 @@ test('online event synchronizes while offline event and offline reads preserve d
 });
 
 test('retry after a partial read restarts at zero and never paints the partial page',async()=>{
-  let failed=false;
-  const state=page(url=>{if(url.includes('offset=100')&&!failed){failed=true;throw Error('network');}},rows);
+  let failed=false,release;
+  const state=page(url=>{if(url.includes('offset=100')){
+    if(!failed){failed=true;throw Error('network');}
+    return new Promise(r=>release=r);
+  }},rows);
   await settle(); assert.equal(state.elements.chatLog.textContent,'welcome');
   await state.retry();
+  assert.match(state.elements.connectionStatus.textContent,/重试同步历史（2\/3）.*已读取 100\/205 条/);
+  release(json({messages:rows.slice(100,200),total:205})); await settle();
   assert.deepEqual(reads(state.calls).map(x=>new URLSearchParams(x.url.split('?')[1]).get('offset')),['0','100','0','100','200']);
   assert.equal(state.elements.chatLog.children.length,205);
+});
+
+test('last page progress waits for final identity before reporting success',async()=>{
+  let identities=0,release;
+  const {elements:e}=page(url=>url==='/api/me'&&++identities===2?new Promise(r=>release=r):null);
+  await settle(); assert.match(e.connectionStatus.textContent,/已读取 1\/1 条.*正在核对身份/);
+  assert.equal(e.chatLog.textContent,'welcome');
+  release(json({user:null}));await settle();
+  assert.match(e.connectionStatus.textContent,/重新登录/);assert.equal(e.chatLog.textContent,'welcome');
 });
 
 test('uncertain POST is never retried and its text survives full history sync',async()=>{

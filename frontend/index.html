@@ -604,9 +604,9 @@
 
     const syncBtn = document.getElementById('syncHistory');
     const recovery = new ChatRecovery({
-      fetchHistory: async () => {
+      fetchHistory: async onProgress => {
         const options = {headers: {'Authorization': 'Bearer ' + token}, signal: AbortSignal.timeout(10000)};
-        return fetchPagedHistory(path => fetch(path, options), me.id);
+        return fetchPagedHistory(path => fetch(path, options), me.id, onProgress);
       },
       onMessages: messages => {
         if (!messages.length) return; // 未落库时保留欢迎语或结果不确定的本地消息。

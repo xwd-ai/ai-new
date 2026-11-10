@@ -1,7 +1,7 @@
 /* HTTP 历史恢复只重试读取，绝不自动重发对话 POST。 */
 (function (root) {
   'use strict';
-  async function fetchPagedHistory(request, userId) {
+  async function fetchPagedHistory(request, userId, onProgress = () => {}) {
     const read = async path => {
       const response = await request(path);
       if (response.status === 401 || response.status === 403) {
@@ -28,6 +28,7 @@
       total = data.total;
       if (data.messages.length !== Math.min(100, total - messages.length)) throw new Error('历史分页不完整');
       messages.push(...data.messages);
+      onProgress(messages.length, total);
     } while (messages.length < total);
     await checkIdentity();
     return messages;
@@ -77,7 +78,10 @@
           if (!this.isOnline()) { this.onStatus('网络已断开，联网后将重新同步历史。'); return; }
           this.onStatus(attempt ? `正在重试同步历史（${attempt + 1}/3）…` : '正在同步历史…');
           try {
-            const messages = await this.fetchHistory();
+            const messages = await this.fetchHistory((loaded, total) => {
+              const action = attempt ? `正在重试同步历史（${attempt + 1}/3）` : '正在同步历史';
+              this.onStatus(`${action}：已读取 ${loaded}/${total} 条${loaded === total ? '，正在核对身份…' : '…'}`);
+            });
             this.onMessages(messages);
             this.onStatus(this.uncertain
               ? '已同步已保存消息；服务可能仍在处理，请稍后再同步，勿重复提交。'

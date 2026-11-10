@@ -126,7 +126,7 @@ test('concurrent history refreshes do not append duplicate messages', async () =
 const json = data => ({ok:true, json:async () => data});
 test('page history callback shares one ten second signal for identity and pages', async () => {
   const source = html.replace(/\r\n/g,'\n');
-  const start = source.indexOf('fetchHistory: async () => {');
+  const start = source.indexOf('fetchHistory: async onProgress => {');
   const end = source.indexOf('\n      },\n      onMessages:',start);
   const code = source.slice(start+'fetchHistory: '.length,end)+'\n      }';
   const options = [], timeouts = [], signal = {};
@@ -141,13 +141,14 @@ test('page history callback shares one ten second signal for identity and pages'
 });
 
 test('paged history reads in order and checks identity before and after', async () => {
-  const calls = [], rows = Array.from({length:205}, (_,i) => ({role:'user',content:String(i)}));
+  const calls = [], progress = [], rows = Array.from({length:205}, (_,i) => ({role:'user',content:String(i)}));
   const result = await fetchPagedHistory(async path => {
     calls.push(path);
     if (path === '/api/me') return json({user:{id:'u'}});
     const offset = Number(new URLSearchParams(path.split('?')[1]).get('offset'));
     return json({messages:rows.slice(offset,offset+100),total:205});
-  }, 'u');
+  }, 'u', (loaded,total)=>progress.push([loaded,total]));
+  assert.deepEqual(progress,[[100,205],[200,205],[205,205]]);
   assert.deepEqual(result,rows);
   assert.deepEqual(calls,['/api/me','/api/conversation?offset=0&limit=100',
     '/api/conversation?offset=100&limit=100','/api/conversation?offset=200&limit=100','/api/me']);
@@ -184,7 +185,8 @@ for (const data of [{messages:[],total:1},{messages:[],total:-1},{messages:[]},
 }
 
 test('changed total on a later page is rejected', async () => {
-  let page=0;
+  let page=0; const progress=[];
   await assert.rejects(fetchPagedHistory(async path => path === '/api/me' ? json({user:{id:'u'}})
-    : json({messages:Array(100).fill({}),total:++page===1 ? 101:102}),'u'),/变化/);
+    : json({messages:Array(100).fill({}),total:++page===1 ? 101:102}),'u',(loaded,total)=>progress.push([loaded,total])),/变化/);
+  assert.deepEqual(progress,[[100,101]]);
 });
