@@ -39,6 +39,32 @@ function setup(fetchHistory, options = {}) {
   return {recovery, messages, statuses, busy};
 }
 
+test('cancel releases sync immediately and late data cannot overwrite a newer sync', async () => {
+  let release,releaseNew,oldProgress,signal,calls=0;
+  const {recovery,messages,statuses,busy}=setup((progress,requestSignal)=>{
+    if(++calls===1){oldProgress=progress;signal=requestSignal;return new Promise(r=>release=r);}
+    return new Promise(r=>releaseNew=r);
+  });
+  const first=recovery.sync();assert.equal(recovery.cancelSync(),true);
+  assert.equal(signal.aborted,true);
+  assert.equal(recovery.syncing,false);assert.match(statuses.at(-1),/取消/);
+  const newer=recovery.sync();await first;
+  assert.equal(recovery.syncing,true);assert.equal(busy.at(-1),true);
+  const status=statuses.at(-1);
+  oldProgress(100,200);release([{role:'user',content:'old'}]);await new Promise(setImmediate);
+  assert.deepEqual(messages,[]);assert.equal(statuses.at(-1),status);assert.equal(recovery.syncing,true);
+  releaseNew([{role:'user',content:'new'}]);await newer;
+  assert.deepEqual(messages,[[{role:'user',content:'new'}]]);
+});
+
+test('cancel during retry delay stops all further reads and does not cancel a send',async()=>{
+  let reads=0;
+  const {recovery}=setup(async()=>{reads++;throw Error('network');},{sleep:()=>new Promise(()=>{})});
+  const work=recovery.sync();await new Promise(setImmediate);
+  recovery.cancelSync();await work;assert.equal(reads,1);
+  assert.equal(recovery.beginSend(),true);assert.equal(recovery.cancelSync(),false);assert.equal(recovery.sending,true);
+});
+
 test('network failure retries history reads and renders only once', async () => {
   let calls = 0;
   const {recovery, messages, busy} = setup(async () => {
@@ -126,10 +152,10 @@ test('concurrent history refreshes do not append duplicate messages', async () =
 const json = data => ({ok:true, json:async () => data});
 test('page history callback shares one ten second signal for identity and pages', async () => {
   const source = html.replace(/\r\n/g,'\n');
-  const start = source.indexOf('fetchHistory: async onProgress => {');
+  const start = source.indexOf('fetchHistory: async (onProgress, signal) => {');
   const end = source.indexOf('\n      },\n      onMessages:',start);
   const code = source.slice(start+'fetchHistory: '.length,end)+'\n      }';
-  const options = [], timeouts = [], signal = {};
+  const options = [], timeouts = [], signal = {throwIfAborted(){}};
   const callback = vm.runInNewContext('('+code+')', {
     token:'test', me:{id:'u'}, fetchPagedHistory,
     AbortSignal:{timeout:ms=>{timeouts.push(ms);return signal;}},

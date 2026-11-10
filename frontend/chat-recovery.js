@@ -43,6 +43,7 @@
       this.syncing = false;
       this.pendingSync = false;
       this.uncertain = false;
+      this.syncController = null;
     }
 
     beginSend() {
@@ -67,35 +68,56 @@
       }
     }
 
+    cancelSync() {
+      if (!this.syncing) return false;
+      const controller = this.syncController;
+      this.syncController = null;
+      this.syncing = false;
+      controller.abort();
+      this.onBusy(false);
+      this.onStatus('已取消历史同步，原展示和草稿已保留。');
+      return true;
+    }
+
     async sync() {
       if (this.sending) { this.pendingSync = true; return; }
       if (this.syncing) return;
       if (!this.isOnline()) { this.onStatus('网络已断开，联网后将重新同步历史。'); return; }
       this.syncing = true;
+      const controller = this.syncController = new AbortController();
+      const current = () => this.syncController === controller;
+      const cancelled = new Promise(resolve => controller.signal.addEventListener('abort', () => resolve(null), {once:true}));
       this.onBusy(true);
       try {
         for (let attempt = 0; attempt < 3; attempt++) {
+          if (!current()) return;
           if (!this.isOnline()) { this.onStatus('网络已断开，联网后将重新同步历史。'); return; }
           this.onStatus(attempt ? `正在重试同步历史（${attempt + 1}/3）…` : '正在同步历史…');
           try {
-            const messages = await this.fetchHistory((loaded, total) => {
+            const messages = await Promise.race([this.fetchHistory((loaded, total) => {
+              if (!current()) return;
               const action = attempt ? `正在重试同步历史（${attempt + 1}/3）` : '正在同步历史';
               this.onStatus(`${action}：已读取 ${loaded}/${total} 条${loaded === total ? '，正在核对身份…' : '…'}`);
-            });
+            }, controller.signal), cancelled]);
+            if (!current()) return;
             this.onMessages(messages);
             this.onStatus(this.uncertain
               ? '已同步已保存消息；服务可能仍在处理，请稍后再同步，勿重复提交。'
               : '历史已同步。');
             return;
           } catch (error) {
+            if (!current()) return;
             if (error.retryable === false) { this.onStatus(error.message); return; }
             if (attempt === 2) { this.onStatus('历史同步失败，请检查网络后点击「同步历史」。'); return; }
-            await this.sleep(1000 * (attempt + 1));
+            await Promise.race([this.sleep(1000 * (attempt + 1)), cancelled]);
           }
         }
       } finally {
-        this.syncing = false;
-        this.onBusy(false);
+        if (current()) {
+          this.syncController = null;
+          this.syncing = false;
+          this.onBusy(false);
+        }
       }
     }
   }

@@ -46,11 +46,11 @@ function page(handler=()=>null, rows=[{role:'user',content:'saved'}]) {
   ]);
   browser.location={href:'/'};
   const navigator={onLine:true};
-  const context=vm.createContext({console, navigator, window:browser,
+  const context=vm.createContext({console, navigator, AbortController, window:browser,
     document:{getElementById:id=>{assert.ok(elements[id],`missing ${id}`); return elements[id];},
       createElement:tag=>new Element(tag), querySelector:()=>new Element(), querySelectorAll:()=>[]},
     localStorage:{getItem:key=>storage.get(key),removeItem:key=>storage.delete(key)},
-    AbortSignal:{timeout:budget=>({budget})},
+    AbortSignal:{timeout:budget=>({budget,throwIfAborted(){}}),any:signals=>{signals[0].budget=signals[1].budget;return signals[0];}},
     setTimeout:fn=>{timers.push(fn);return timers.length;},
     fetch:async(url,options)=>{
       calls.push({url,...options}); const response=await handler(url,options); if(response) return response;
@@ -92,6 +92,34 @@ test('later page blocks send and preserves old display until all pages complete'
   assert.equal(calls.some(x=>x.method==='POST'),false); assert.equal(e.msgInput.value,'draft');
   release(json({messages:rows.slice(100,200),total:205})); await settle();
   assert.equal(e.chatLog.children.length,205); assert.equal(e.sendBtn.disabled,false);
+});
+
+test('cancel button aborts paging, preserves draft and ignores late page without more reads',async()=>{
+  let release,hold=true;
+  const {elements:e,calls}=page(url=>hold&&url.includes('offset=100')?new Promise(r=>release=r):null,rows);
+  await settle();assert.equal(e.cancelHistory.hidden,false);e.msgInput.value='draft';
+  const signal=reads(calls)[0].signal;
+  await e.cancelHistory.emit('click');assert.equal(signal.aborted,true);
+  assert.equal(e.cancelHistory.hidden,true);assert.equal(e.sendBtn.disabled,false);
+  assert.equal(e.msgInput.value,'draft');assert.equal(e.chatLog.textContent,'welcome');
+  const count=calls.length,status=e.connectionStatus.textContent;
+  release(json({messages:rows.slice(100,200),total:205}));await settle();
+  assert.equal(calls.length,count);assert.equal(e.connectionStatus.textContent,status);
+  hold=false;await e.syncHistory.emit('click');assert.equal(e.chatLog.children.length,205);
+});
+
+test('cancel during retry wait does not resume after the old timer fires',async()=>{
+  const state=page(url=>url.startsWith('/api/conversation?')?json({},503):null);
+  await settle();assert.equal(state.elements.cancelHistory.hidden,false);
+  await state.elements.cancelHistory.emit('click');const count=state.calls.length;
+  await state.retry();assert.equal(state.calls.length,count);assert.match(state.elements.connectionStatus.textContent,/已取消/);
+});
+
+test('cancel during final identity check prevents complete history from being displayed',async()=>{
+  let ids=0,release;const {elements:e}=page(url=>url==='/api/me'&&++ids===2?new Promise(r=>release=r):null);
+  await settle();await e.cancelHistory.emit('click');
+  release(json({user:{id:'u'}}));await settle();
+  assert.equal(e.chatLog.textContent,'welcome');assert.match(e.connectionStatus.textContent,/已取消/);
 });
 
 test('online event synchronizes while offline event and offline reads preserve draft',async()=>{
