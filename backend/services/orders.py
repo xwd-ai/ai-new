@@ -7,7 +7,9 @@
 2. 服务期：把起止时间戳收敛成有效 / 未开始 / 已过期三种状态，附带总天数、
    剩余天数与已用比例，供话术与续费提示直接使用；
 3. 综合判定：版本 + 服务期 + 具体功能，给出「能否按已购服务处理」的结论，
-   以及一条可直接展示给用户的原因。
+   以及一条可直接展示给用户的原因；
+4. 过期与续费：把服务期换算成续费提醒状态，并支持把服务期已结束、状态仍是
+   有效的订单归档为过期。
 
 判定函数一律保持纯函数：只读入参，不查库、不写库；需要订单数据时由
 query_order 取好后传入，便于单测、也便于对话链路按只读方式反复调用。
@@ -773,3 +775,303 @@ def change_order_status(
         }
     finally:
         db.close()
+
+
+# ============================ 七、过期归档与续费提示 ============================
+
+# 续费提醒状态。active 与 none 都不提醒，区别在于「有订单且还早」与「压根没有订单」；
+# due 与 upcoming 提醒，前者需要立即续费，后者是提前告知。
+RENEWAL_NONE = "none"
+RENEWAL_ACTIVE = "active"
+RENEWAL_UPCOMING = "upcoming"
+RENEWAL_DUE = "due"
+RENEWAL_NOT_STARTED = "not_started"
+RENEWAL_BLOCKED = "blocked"
+RENEWAL_UNKNOWN = "unknown"
+
+RENEWAL_LABELS = {
+    RENEWAL_NONE: "无订单",
+    RENEWAL_ACTIVE: "服务中",
+    RENEWAL_UPCOMING: "即将到期",
+    RENEWAL_DUE: "已到期",
+    RENEWAL_NOT_STARTED: "未开始",
+    RENEWAL_BLOCKED: "已退订",
+    RENEWAL_UNKNOWN: "无法判定",
+}
+
+# 默认提前 30 天提示续费：留出一次完整的续费沟通与付款周期
+RENEWAL_WINDOW_DAYS = 30
+
+# 剩余天数落在这个区间内按高优先级提示，提醒文案里会给出具体天数
+RENEWAL_URGENT_DAYS = 7
+
+# 提醒级别，供前端决定用什么颜色与是否弹窗
+URGENCY_NONE = "none"
+URGENCY_INFO = "info"
+URGENCY_WARNING = "warning"
+URGENCY_CRITICAL = "critical"
+
+# 建议动作：调用方按它决定引导用户去续费、等待生效还是重新下单
+ACTION_RENEW = "renew"
+ACTION_WAIT = "wait"
+ACTION_BUY_NEW = "buy_new"
+ACTION_VERIFY = "verify"
+ACTION_NONE = "none"
+
+
+def _normalize_window(days) -> int:
+    """把提醒窗口收敛成 0–365 的整数天数，非法入参回落到默认窗口。
+
+    窗口是展示口径而非业务规则，传错不值得报错中断一次查询；
+    但也不能无限放大，否则「提前三年提醒续费」等同于每次都在提醒。
+    """
+    if isinstance(days, bool) or not isinstance(days, int):
+        return RENEWAL_WINDOW_DAYS
+    return max(0, min(days, 365))
+
+
+def evaluate_renewal(
+    order: Optional[dict],
+    now: Optional[float] = None,
+    window_days: Optional[int] = None,
+) -> dict:
+    """判断一条订单的续费提醒状态。
+
+    入参是订单记录（Order.to_dict 的形态），订单为 None 时按「无订单」处理。
+    判定顺序与业务处理顺序一致：退订订单不再提示续费 → 订单状态已归档为过期
+    → 服务期无法判定 → 未开始 → 已到期 → 即将到期 → 还早。
+
+    退订放在最前面判断：用户已经明确不要了，继续提醒续费只会造成骚扰，
+    这类订单要引导的是重新购买而不是续费。
+    """
+    window = _normalize_window(window_days)
+    hint = {
+        "order_id": order.get("id") if order else None,
+        "product_tier": order.get("product_tier") if order else "",
+        "tier_label": "未知版本",
+        "order_status": "",
+        "state": RENEWAL_NONE,
+        "state_label": RENEWAL_LABELS[RENEWAL_NONE],
+        "remind": False,
+        "urgency": URGENCY_NONE,
+        "suggested_action": ACTION_NONE,
+        "window_days": window,
+        "days_remaining": 0,
+        "days_overdue": 0,
+        "expires_text": "",
+        "message": "未查询到订单记录",
+    }
+    if not order:
+        return hint
+
+    scope = evaluate_service_scope(order, now=now)
+    period = scope["period"] or {}
+    status = as_status(order.get("status"))
+    hint.update(
+        {
+            "tier_label": scope["tier_label"],
+            "order_status": scope["order_status"],
+            "expires_text": period.get("expires_text", ""),
+            "days_remaining": period.get("days_remaining", 0),
+        }
+    )
+
+    def settle(state: str, urgency: str, action: str, message: str) -> dict:
+        hint.update(
+            {
+                "state": state,
+                "state_label": RENEWAL_LABELS[state],
+                "remind": state in (RENEWAL_UPCOMING, RENEWAL_DUE),
+                "urgency": urgency,
+                "suggested_action": action,
+                "message": message,
+            }
+        )
+        return hint
+
+    if status == OrderStatus.CANCELLED:
+        return settle(
+            RENEWAL_BLOCKED,
+            URGENCY_NONE,
+            ACTION_BUY_NEW,
+            "订单已退订，不再提供服务，如需继续使用请重新购买",
+        )
+
+    if status == OrderStatus.EXPIRED:
+        return settle(
+            RENEWAL_DUE,
+            URGENCY_CRITICAL,
+            ACTION_RENEW,
+            f"订单已标记为过期，续费后恢复服务（原到期时间 {period['expires_text']}）"
+            if period.get("expires_text")
+            else "订单已标记为过期，续费后恢复服务",
+        )
+
+    if period.get("status") == SERVICE_UNKNOWN:
+        return settle(
+            RENEWAL_UNKNOWN,
+            URGENCY_NONE,
+            ACTION_VERIFY,
+            "订单起止时间不完整，无法判断续费时间，需要人工核实",
+        )
+
+    if period["not_started"]:
+        return settle(
+            RENEWAL_NOT_STARTED,
+            URGENCY_NONE,
+            ACTION_WAIT,
+            f"服务将于 {period['started_text']} 开始，暂无需续费",
+        )
+
+    if period["expired"]:
+        current = time.time() if now is None else _as_timestamp(now)
+        current = time.time() if current is None else current
+        hint["days_overdue"] = max(0, int((current - period["expires_at"]) // DAY_SECONDS))
+        return settle(
+            RENEWAL_DUE,
+            URGENCY_CRITICAL,
+            ACTION_RENEW,
+            f"服务已于 {period['expires_text']} 到期"
+            f"（已过期 {hint['days_overdue']} 天），续费后可继续使用",
+        )
+
+    remaining = period["days_remaining"]
+    if remaining <= RENEWAL_URGENT_DAYS:
+        return settle(
+            RENEWAL_UPCOMING,
+            URGENCY_CRITICAL,
+            ACTION_RENEW,
+            f"服务将于 {period['expires_text']} 到期，仅剩 {remaining} 天，请尽快续费",
+        )
+    if remaining <= window:
+        return settle(
+            RENEWAL_UPCOMING,
+            URGENCY_WARNING,
+            ACTION_RENEW,
+            f"服务将于 {period['expires_text']} 到期（剩余 {remaining} 天），建议提前续费",
+        )
+    return settle(
+        RENEWAL_ACTIVE,
+        URGENCY_NONE,
+        ACTION_NONE,
+        f"服务中，服务期至 {period['expires_text']}（剩余 {remaining} 天）",
+    )
+
+
+def list_renewal_hints(
+    user_id: str,
+    now: Optional[float] = None,
+    window_days: Optional[int] = None,
+) -> dict:
+    """列出用户全部订单的续费提醒，并给出需要处理的订单数量。
+
+    顺序沿用 list_orders（到期时间从晚到早），同一批数据每次返回一致；
+    due 与 upcoming 分开计数，前端可以只弹「已到期」这一类，
+    把「即将到期」留在列表里提示，避免一进页面就被弹窗拦住。
+    """
+    rows = list_orders(user_id)
+    hints = [evaluate_renewal(order, now, window_days) for order in rows]
+    due = [hint for hint in hints if hint["state"] == RENEWAL_DUE]
+    upcoming = [hint for hint in hints if hint["state"] == RENEWAL_UPCOMING]
+    window = _normalize_window(window_days)
+
+    if not rows:
+        message = "未查询到订单记录，暂无续费提示"
+    elif due and upcoming:
+        message = f"{len(due)} 个订单已到期，另有 {len(upcoming)} 个将在 {window} 天内到期"
+    elif due:
+        message = f"{len(due)} 个订单已到期，请及时续费"
+    elif upcoming:
+        message = f"{len(upcoming)} 个订单将在 {window} 天内到期，建议提前续费"
+    else:
+        message = f"共 {len(rows)} 个订单，暂无需续费"
+
+    return {
+        "has_order": bool(rows),
+        "order_count": len(rows),
+        "remind_count": len(due) + len(upcoming),
+        "due_count": len(due),
+        "upcoming_count": len(upcoming),
+        "window_days": window,
+        "hints": hints,
+        "message": message,
+    }
+
+
+def expire_overdue_orders(
+    user_id: Optional[str] = None,
+    now: Optional[float] = None,
+    limit: int = 100,
+) -> dict:
+    """把服务期已结束、状态仍是有效的订单归档为过期。
+
+    先按条件查出候选订单号再逐条流转，不在同一次查询里批量 UPDATE：
+    每条都要过状态机校验，归档动作与人工改状态走同一条路径，
+    不会出现「定时任务写进去的状态状态机不认」这种分叉。
+
+    单次最多处理 limit 条，把执行时间控制在一次请求内；
+    剩下的订单留给下一次调用，调用方按 remaining 决定是否继续。
+
+    归档只改订单状态，不动服务期时间：到期时间属于合同事实，
+    续费是写入新订单或延长服务期，两者不能混在一次操作里。
+    """
+    size = max(1, min(int(limit or 100), 500))
+    current = time.time() if now is None else _as_timestamp(now)
+    if current is None:
+        current = time.time()
+
+    db = SessionLocal()
+    try:
+        query = db.query(Order).filter(
+            Order.status == ORDER_STATUS_ACTIVE,
+            Order.expires_at <= current,
+        )
+        if user_id is not None:
+            query = query.filter(Order.user_id == user_id)
+        candidates = [
+            row.id
+            for row in query.order_by(Order.expires_at.asc(), Order.id.asc())
+            .limit(size + 1)
+            .all()
+        ]
+    finally:
+        db.close()
+
+    batch = candidates[:size]
+    archived: list[str] = []
+    skipped: list[str] = []
+    for order_id in batch:
+        try:
+            result = change_order_status(
+                order_id,
+                OrderStatus.EXPIRED,
+                operator="system",
+                user_id=user_id,
+                reason="服务期结束自动归档",
+                now=current,
+            )
+        except OrderStatusTransitionError:
+            skipped.append(order_id)
+            continue
+        if result["unchanged"]:
+            skipped.append(order_id)
+        else:
+            archived.append(order_id)
+
+    remaining = max(0, len(candidates) - len(batch))
+    if archived:
+        message = f"已归档 {len(archived)} 个到期订单"
+        if skipped:
+            message += f"，{len(skipped)} 个无需变更"
+    else:
+        message = "没有需要归档的到期订单"
+
+    return {
+        "limit": size,
+        "scanned": len(batch),
+        "remaining": remaining,
+        "has_more": remaining > 0,
+        "archived": archived,
+        "skipped": skipped,
+        "message": message,
+    }

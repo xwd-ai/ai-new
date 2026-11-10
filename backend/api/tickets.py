@@ -32,9 +32,11 @@ from backend.models.ticket import (
 )
 from backend.schemas import CreateTicketRequest, ReplyRequest
 from backend.schemas.order import (
+    ExpireResultResponse,
     OrderListView,
     OrderQueryRequest,
     OrderScopeResponse,
+    RenewalListView,
 )
 from backend.schemas.ticket import (
     BatchCloseRequest,
@@ -322,6 +324,39 @@ def order_scope(
     return orders.describe_order(
         user["id"], feature=params.feature, order_id=params.order_id or None
     )
+
+
+@tickets_router.get("/order/renewal", response_model=RenewalListView)
+def order_renewal(
+    window_days: int | None = Query(
+        default=None, ge=0, le=365, description="提前多少天开始提示续费，默认 30"
+    ),
+    user: dict = Depends(require_login),
+):
+    """列出当前用户各订单的续费提醒。
+
+    与 /order/scope 的分工：那个接口回答「现在能不能用」，本接口回答
+    「什么时候该续费」——服务期换算成提醒状态、级别与建议动作，
+    前端据此决定是弹窗、列表标记，还是什么都不做。
+
+    已退订订单不提醒续费，只提示重新购买；服务期还没开始的订单也不提醒，
+    提前催一个用都用不上的服务只会让人以为系统算错了时间。
+    """
+    return orders.list_renewal_hints(user["id"], window_days=window_days)
+
+
+@tickets_router.post("/order/expire", response_model=ExpireResultResponse)
+def expire_orders(
+    limit: int = Query(default=100, ge=1, le=500, description="单次最多归档的订单数"),
+    user: dict = Depends(require_admin),
+):
+    """把服务期已结束、状态仍是有效的订单归档为过期。
+
+    管理员触发的批量收敛：候选订单按到期时间从早到晚处理，每条都走订单状态机，
+    因此退订订单与已过期订单不会被重复改动。单次处理条数有上限，
+    返回 has_more 供调用方决定是否继续，避免一次请求跑太久。
+    """
+    return orders.expire_overdue_orders(limit=limit)
 
 
 # ---------------------------------------------------------------------------

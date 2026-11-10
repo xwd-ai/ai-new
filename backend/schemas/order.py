@@ -117,3 +117,59 @@ class OrderListView(BaseModel):
     orders: list[OrderSummaryResponse] = Field(default_factory=list)
     features: list[str] = Field(default_factory=list, description="在期订单的能力并集")
     message: str = ""
+
+
+class RenewalHintResponse(BaseModel):
+    """一条订单的续费提醒：状态、级别与一句可展示的说明。
+
+    state 是稳定标识（none / active / upcoming / due / not_started / blocked /
+    unknown），remind 直接给出「要不要打扰用户」，前端不必自己按状态枚举判断；
+    urgency 决定展示样式，suggested_action 给出下一步动作。
+    """
+
+    order_id: Optional[str] = None
+    product_tier: str = ""
+    tier_label: str = "未知版本"
+    order_status: str = ""
+    state: str = "none"
+    state_label: str = "无订单"
+    remind: bool = False
+    urgency: str = "none"
+    suggested_action: str = "none"
+    window_days: int = 0
+    days_remaining: int = 0
+    days_overdue: int = 0
+    expires_text: str = ""
+    message: str = ""
+
+
+class RenewalListView(BaseModel):
+    """用户的续费提醒视图：逐单提醒 + 需处理的数量。
+
+    due_count 与 upcoming_count 分开给：已到期需要立即处理，
+    即将到期只需在列表里提示，两者混在一起会让用户每进一次页面就被弹窗。
+    """
+
+    has_order: bool = False
+    order_count: int = 0
+    remind_count: int = 0
+    due_count: int = 0
+    upcoming_count: int = 0
+    window_days: int = 0
+    hints: list[RenewalHintResponse] = Field(default_factory=list)
+    message: str = ""
+
+
+class ExpireResultResponse(BaseModel):
+    """到期订单归档结果：本次处理了哪些、还剩多少。
+
+    has_more 为真时调用方可再次调用，不必自己按 limit 推算剩余数量。
+    """
+
+    limit: int = 0
+    scanned: int = 0
+    remaining: int = 0
+    has_more: bool = False
+    archived: list[str] = Field(default_factory=list, description="本次归档为过期的订单号")
+    skipped: list[str] = Field(default_factory=list, description="无需变更或不满足归档条件的订单号")
+    message: str = ""
