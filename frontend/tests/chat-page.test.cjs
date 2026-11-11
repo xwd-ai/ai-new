@@ -17,7 +17,7 @@ class Element {
   get textContent() { return this.text+this.children.map(x=>x.textContent).join(''); }
   set innerHTML(value) {
     this.replaceChildren();
-    for (const match of value.matchAll(/<div class="([^"]+)"/g)) {
+    for (const match of value.matchAll(/<(?:div|button) class="([^"]+)"/g)) {
       const child=new Element(); child.className=match[1]; this.appendChild(child);
     }
   }
@@ -45,6 +45,8 @@ function page(handler=()=>null, rows=[{role:'user',content:'saved'}]) {
     ['token','test-token'],['user',JSON.stringify({id:'u',name:'客户',role:'customer'})],
   ]);
   browser.location={href:'/'};
+  let reloads=0;
+  browser.location.reload=()=>{reloads++;};
   const navigator={onLine:true};
   const context=vm.createContext({console, navigator, AbortController, window:browser,
     document:{getElementById:id=>{assert.ok(elements[id],`missing ${id}`); return elements[id];},
@@ -67,12 +69,50 @@ function page(handler=()=>null, rows=[{role:'user',content:'saved'}]) {
   const scripts=[...html.matchAll(/<script(?: src="([^"]+)")?>([\s\S]*?)<\/script>/g)];
   assert.deepEqual(scripts.filter(x=>x[1]).map(x=>x[1]),['/assets/chat-recovery.js']);
   for (const [,src,inline] of scripts) vm.runInContext(src?fs.readFileSync(path.join(root,src.replace('/assets/','')),'utf8'):inline,context,{filename:src||'index-inline.js'});
-  return {elements,calls,browser,navigator,timers,
+  return {elements,calls,browser,navigator,timers,storage,get reloads(){return reloads;},
     async retry(){assert.ok(timers.length);timers.shift()();await settle();}};
 }
 const reads = calls => calls.filter(x=>x.url.startsWith('/api/conversation?'));
 const contents = log => log.children.map(x=>x.querySelector('.bubble').textContent);
 const rows = Array.from({length:205},(_,i)=>({role:i%2?'assistant':'user',content:`saved-${i}`}));
+
+test('pagehide cancels paging and cached return synchronizes without losing the draft',async()=>{
+  let release,hold=true;
+  const {elements:e,calls,browser}=page(url=>hold&&url.includes('offset=100')?new Promise(r=>release=r):null,rows);
+  await settle();e.msgInput.value='draft';const oldSignal=reads(calls)[0].signal;
+  await browser.emit('pagehide',{persisted:true});assert.equal(oldSignal.aborted,true);
+  const count=calls.length;await browser.emit('online');assert.equal(calls.length,count);
+  hold=false;await browser.emit('pageshow',{persisted:true});
+  assert.equal(e.chatLog.children.length,205);assert.equal(e.msgInput.value,'draft');
+  release(json({messages:rows.slice(100,200),total:205}));await settle();
+  assert.equal(e.chatLog.children.length,205);assert.equal(reads(calls).length,5);
+});
+
+test('ordinary pageshow does not duplicate initial synchronization',async()=>{
+  const {calls,browser}=page();await settle();await browser.emit('pageshow',{persisted:false});
+  assert.equal(reads(calls).length,1);
+});
+
+test('queued history waits for cached return when a send finishes off-page',async()=>{
+  let reply;const {elements:e,calls,browser}=page(url=>url==='/api/chat'?new Promise(r=>reply=r):null);
+  await settle();e.msgInput.value='question';await e.sendBtn.emit('click');await browser.emit('online');
+  await browser.emit('pagehide',{persisted:true});reply(json({reply:'answer'}));await settle();
+  assert.equal(reads(calls).length,1);
+  await browser.emit('pageshow',{persisted:true});assert.equal(reads(calls).length,2);
+  assert.equal(calls.filter(x=>x.method==='POST').length,1);
+});
+
+test('cached return reloads after credentials change before reading history',async()=>{
+  const state=page(url=>url==='/api/chat'?json({reply:'answer',suggest_ticket:true}):null);
+  await settle();state.elements.msgInput.value='initial';await state.elements.sendBtn.emit('click');
+  const confirm=state.elements.chatLog.querySelector('.ct-btn');assert.ok(confirm);
+  await state.browser.emit('pagehide',{persisted:true});
+  state.storage.set('token','changed');await state.browser.emit('pageshow',{persisted:true});
+  assert.equal(state.reloads,1);assert.equal(reads(state.calls).length,1);
+  state.elements.msgInput.value='draft';await state.elements.sendBtn.emit('click');await confirm.emit('click');
+  assert.equal(state.calls.filter(x=>x.method==='POST').length,1);
+  assert.equal(state.elements.msgInput.value,'draft');
+});
 
 test('actual scripts initialize all pages, manual sync replaces and preserves draft',async()=>{
   const {elements:e,calls}=page(()=>null,rows); await settle();

@@ -37,8 +37,8 @@
   class ChatRecovery {
     constructor({fetchHistory, onMessages, onStatus, onBusy,
       sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
-      isOnline = () => navigator.onLine}) {
-      Object.assign(this, {fetchHistory, onMessages, onStatus, onBusy, sleep, isOnline});
+      isOnline = () => navigator.onLine, isActive = () => true}) {
+      Object.assign(this, {fetchHistory, onMessages, onStatus, onBusy, sleep, isOnline, isActive});
       this.sending = false;
       this.syncing = false;
       this.pendingSync = false;
@@ -47,6 +47,7 @@
     }
 
     beginSend() {
+      if (!this.isActive()) return false;
       if (this.sending || this.syncing) return false;
       if (!this.isOnline()) {
         this.onStatus('网络已断开，输入内容已保留，联网后再发送。');
@@ -80,6 +81,7 @@
     }
 
     async sync() {
+      if (!this.isActive()) return;
       if (this.sending) { this.pendingSync = true; return; }
       if (this.syncing) return;
       if (!this.isOnline()) { this.onStatus('网络已断开，联网后将重新同步历史。'); return; }

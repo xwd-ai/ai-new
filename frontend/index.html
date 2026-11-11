@@ -497,6 +497,7 @@
 
       const [confirmBtn, cancelBtn] = wrap.querySelectorAll('.ct-btn');
       confirmBtn.addEventListener('click', async () => {
+        if (!pageActive) return;
         confirmBtn.disabled = true;
         confirmBtn.textContent = '创建中…';
         try {
@@ -604,7 +605,9 @@
     let currentSources = [];
 
     const syncBtn = document.getElementById('syncHistory');
+    let pageActive = true;
     const recovery = new ChatRecovery({
+      isActive: () => pageActive,
       fetchHistory: async (onProgress, signal) => {
         const timeout = AbortSignal.timeout(10000);
         const options = {headers: {'Authorization': 'Bearer ' + token}, signal: signal ? AbortSignal.any([signal, timeout]) : timeout};
@@ -628,6 +631,19 @@
     });
     syncBtn.addEventListener('click', () => recovery.sync());
     document.getElementById('cancelHistory').addEventListener('click', () => recovery.cancelSync());
+    window.addEventListener('pagehide', () => {
+      pageActive = false;
+      recovery.cancelSync();
+    });
+    window.addEventListener('pageshow', event => {
+      if (!event.persisted) return;
+      if (localStorage.getItem('token') !== token) {
+        window.location.reload();
+        return;
+      }
+      pageActive = true;
+      recovery.sync();
+    });
     window.addEventListener('online', () => recovery.sync());
     window.addEventListener('offline', () => {
       document.getElementById('connectionStatus').textContent = '网络已断开，联网后将同步历史；不会自动重发消息。';
