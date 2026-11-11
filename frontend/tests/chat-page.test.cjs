@@ -24,7 +24,7 @@ class Element {
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
   querySelectorAll(selector) {
     return this.children.flatMap(child=>[
-      ...(child.className.split(' ').includes(selector.slice(1))?[child]:[]), ...child.querySelectorAll(selector),
+      ...(selector.slice(1).split('.').every(name=>child.className.split(' ').includes(name))?[child]:[]), ...child.querySelectorAll(selector),
     ]);
   }
   addEventListener(name, fn) { (this.listeners[name] ||= []).push(fn); }
@@ -69,7 +69,7 @@ function page(handler=()=>null, rows=[{role:'user',content:'saved'}]) {
   const scripts=[...html.matchAll(/<script(?: src="([^"]+)")?>([\s\S]*?)<\/script>/g)];
   assert.deepEqual(scripts.filter(x=>x[1]).map(x=>x[1]),['/assets/chat-recovery.js']);
   for (const [,src,inline] of scripts) vm.runInContext(src?fs.readFileSync(path.join(root,src.replace('/assets/','')),'utf8'):inline,context,{filename:src||'index-inline.js'});
-  return {elements,calls,browser,navigator,timers,storage,get reloads(){return reloads;},
+  return {elements,calls,browser,navigator,timers,storage,fillAndSend:context.fillAndSend,get reloads(){return reloads;},
     async retry(){assert.ok(timers.length);timers.shift()();await settle();}};
 }
 const reads = calls => calls.filter(x=>x.url.startsWith('/api/conversation?'));
@@ -215,16 +215,68 @@ test('online sync during a write is deferred and send cannot duplicate',async()=
 test('final identity mismatch cannot repaint history and is not retried',async()=>{
   let identities=0; const {elements:e,calls,timers}=page(url=>url==='/api/me'?json({user:{id:++identities===1?'u':'other'}}):null);
   await settle(); assert.equal(e.chatLog.textContent,'welcome'); assert.match(e.connectionStatus.textContent,/重新登录/);
-  assert.equal(timers.length,0); assert.equal(reads(calls).length,1); assert.equal(e.sendBtn.disabled,false);
+  assert.equal(timers.length,0); assert.equal(reads(calls).length,1); assert.equal(e.sendBtn.disabled,true);
+  assert.equal(e.reloginLink.hidden,false);
 });
 
 for (const status of [401,403]) {
   test('HTTP '+status+' during paging stops retries and keeps display',async()=>{
     const {elements:e,calls,timers}=page(url=>url.startsWith('/api/conversation?')?json({},status):null);
     await settle(); assert.equal(e.chatLog.textContent,'welcome'); assert.match(e.connectionStatus.textContent,/重新登录/);
-    assert.equal(reads(calls).length,1); assert.equal(timers.length,0); assert.equal(e.syncHistory.disabled,false);
+    assert.equal(reads(calls).length,1); assert.equal(timers.length,0); assert.equal(e.syncHistory.disabled,true);
+    assert.equal(e.reloginLink.hidden,false);
   });
 }
+
+test('expired identity keeps existing display, draft and uncertain text and locks existing writes',async()=>{
+  let expired=false, sends=0;
+  const {elements:e,calls,browser,fillAndSend}=page(url=>{
+    if(url==='/api/me'&&expired)return json({user:null});
+    if(url==='/api/chat')return ++sends===1?json({reply:'answer',suggest_ticket:true}):json({},503);
+  });
+  await settle();assert.equal(e.reloginLink.hidden,true);
+  e.msgInput.value='first';await e.sendBtn.emit('click');const confirm=e.chatLog.querySelector('.ct-btn.primary');assert.ok(confirm);
+  e.msgInput.value='unconfirmed';await e.sendBtn.emit('click');
+  e.msgInput.value='draft';const before=e.chatLog.textContent;expired=true;
+  await e.syncHistory.emit('click');
+  assert.equal(e.reloginLink.hidden,false);assert.equal(e.sendBtn.disabled,true);assert.equal(confirm.disabled,true);
+  const count=calls.length;await e.sendBtn.emit('click');await confirm.emit('click');await browser.emit('online');await browser.emit('offline');
+  fillAndSend('suggested question');await settle();
+  assert.equal(calls.length,count);assert.match(e.connectionStatus.textContent,/重新登录/);
+  assert.equal(e.chatLog.textContent,before);assert.equal(e.msgInput.value,'draft');assert.match(e.uncertainTexts.textContent,/unconfirmed/);
+});
+
+test('ticket 401 locks identity and cancels a history request already in flight',async()=>{
+  let hold=false,release;
+  const {elements:e,calls}=page(url=>{
+    if(url==='/api/chat')return json({reply:'answer',suggest_ticket:true});
+    if(url==='/api/tickets')return json({},401);
+    if(hold&&url.startsWith('/api/conversation?'))return new Promise(r=>release=r);
+  });
+  await settle();e.msgInput.value='question';await e.sendBtn.emit('click');
+  const confirm=e.chatLog.querySelector('.ct-btn.primary');hold=true;await e.syncHistory.emit('click');
+  const request=reads(calls).at(-1);await confirm.emit('click');
+  assert.equal(request.signal.aborted,true);assert.equal(e.reloginLink.hidden,false);assert.equal(confirm.disabled,true);
+  release(json({messages:[{role:'user',content:'late'}],total:1}));await settle();
+  assert.doesNotMatch(e.chatLog.textContent,/late/);assert.match(e.connectionStatus.textContent,/重新登录/);
+});
+
+test('chat 401 keeps the question and leaves send disabled after the request finishes',async()=>{
+  const {elements:e,calls}=page(url=>url==='/api/chat'?json({},401):null);
+  await settle();e.msgInput.value='question';await e.sendBtn.emit('click');
+  assert.equal(e.reloginLink.hidden,false);assert.equal(e.sendBtn.disabled,true);
+  assert.match(e.uncertainTexts.textContent,/question/);assert.match(e.connectionStatus.textContent,/重新登录/);
+  e.msgInput.value='draft';await e.sendBtn.emit('click');
+  assert.equal(calls.filter(x=>x.method==='POST').length,1);assert.equal(e.msgInput.value,'draft');
+});
+
+test('ticket 403 retains the confirmation without classifying it as session expiry',async()=>{
+  const {elements:e}=page(url=>url==='/api/chat'?json({reply:'answer',suggest_ticket:true}):url==='/api/tickets'?json({},403):null);
+  await settle();e.msgInput.value='question';await e.sendBtn.emit('click');
+  const confirm=e.chatLog.querySelector('.ct-btn.primary');await confirm.emit('click');
+  assert.equal(e.reloginLink.hidden,true);assert.equal(e.sendBtn.disabled,false);
+  assert.equal(confirm.disabled,false);assert.equal(e.chatLog.querySelector('.ct-btn.primary'),confirm);
+});
 
 test('exhausted page failures preserve old messages and permit manual sync',async()=>{
   let fail=false; const state=page(url=>fail&&url.startsWith('/api/conversation?')?json({},503):null);

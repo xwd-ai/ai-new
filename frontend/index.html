@@ -369,6 +369,7 @@
         <span id="connectionStatus" role="status" aria-live="polite">正在同步历史…</span>
         <button id="syncHistory" type="button" style="margin-left:auto;white-space:nowrap">同步历史</button>
         <button id="cancelHistory" type="button" hidden style="white-space:nowrap">取消同步</button>
+        <a id="reloginLink" href="/login" hidden style="white-space:nowrap">重新登录</a>
       </div>
       <div class="chat-scroll">
         <details id="uncertainQuestions" hidden style="max-width:760px;margin:0 auto 16px;color:var(--muted)">
@@ -496,8 +497,9 @@
       scrollBottom();
 
       const [confirmBtn, cancelBtn] = wrap.querySelectorAll('.ct-btn');
+      confirmBtn.disabled = loginRequired;
       confirmBtn.addEventListener('click', async () => {
-        if (!pageActive) return;
+        if (!canUseSession()) return;
         confirmBtn.disabled = true;
         confirmBtn.textContent = '创建中…';
         try {
@@ -513,12 +515,14 @@
               evidence: evidence,
             }),
           });
+          if (res.status === 401) requireRelogin('登录已失效，请重新登录。');
+          if (!res.ok) throw new Error('工单创建失败');
           const data = await res.json();
           const t = data.ticket;
           wrap.innerHTML = '';
           addTicketCard(body, t);
         } catch (e) {
-          confirmBtn.disabled = false;
+          confirmBtn.disabled = loginRequired;
           confirmBtn.textContent = '确认创建工单';
         }
       });
@@ -605,9 +609,34 @@
     let currentSources = [];
 
     const syncBtn = document.getElementById('syncHistory');
+    const connectionStatus = document.getElementById('connectionStatus');
     let pageActive = true;
+    let loginRequired = false;
+    const canUseSession = () => pageActive && !loginRequired;
+
+    function showStatus(text) {
+      if (!loginRequired) connectionStatus.textContent = text;
+    }
+
+    function updateControls(busy) {
+      sendBtn.disabled = busy || loginRequired;
+      syncBtn.disabled = busy || loginRequired;
+      document.getElementById('cancelHistory').hidden = !recovery.syncing;
+    }
+
+    function requireRelogin(message) {
+      if (loginRequired) return;
+      loginRequired = true;
+      recovery.cancelSync();
+      updateControls(false);
+      for (const button of log.querySelectorAll('.ct-btn.primary')) button.disabled = true;
+      document.getElementById('reloginLink').hidden = false;
+      connectionStatus.textContent = message;
+    }
+
     const recovery = new ChatRecovery({
-      isActive: () => pageActive,
+      isActive: canUseSession,
+      onAuthExpired: requireRelogin,
       fetchHistory: async (onProgress, signal) => {
         const timeout = AbortSignal.timeout(10000);
         const options = {headers: {'Authorization': 'Bearer ' + token}, signal: signal ? AbortSignal.any([signal, timeout]) : timeout};
@@ -623,11 +652,8 @@
         });
         scrollBottom();
       },
-      onStatus: text => { document.getElementById('connectionStatus').textContent = text; },
-      onBusy: busy => {
-        sendBtn.disabled = busy; syncBtn.disabled = busy;
-        document.getElementById('cancelHistory').hidden = !recovery.syncing;
-      },
+      onStatus: showStatus,
+      onBusy: updateControls,
     });
     syncBtn.addEventListener('click', () => recovery.sync());
     document.getElementById('cancelHistory').addEventListener('click', () => recovery.cancelSync());
@@ -646,7 +672,7 @@
     });
     window.addEventListener('online', () => recovery.sync());
     window.addEventListener('offline', () => {
-      document.getElementById('connectionStatus').textContent = '网络已断开，联网后将同步历史；不会自动重发消息。';
+      showStatus('网络已断开，联网后将同步历史；不会自动重发消息。');
     });
 
     async function handleSend() {
@@ -667,6 +693,7 @@
       let uncertain = false;
       try {
         const res = await fetch('/api/chat', { method: 'POST', signal: AbortSignal.timeout(60000), headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify({ message: text }) });
+        if (res.status === 401) requireRelogin('登录已失效，请重新登录。');
         if (!res.ok) throw new Error('对话请求失败');
         const data = await res.json();
         if (typeof data.reply !== 'string') throw new Error('对话响应格式错误');
@@ -709,7 +736,11 @@
     input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } });
     sendBtn.addEventListener('click', handleSend);
 
-    function fillAndSend(t) { input.value = t; handleSend(); }
+    function fillAndSend(t) {
+      if (!canUseSession()) return;
+      input.value = t;
+      handleSend();
+    }
     function newChat() { if (recovery.sending || recovery.syncing) return; log.innerHTML = ''; currentSources = []; input.focus(); }
     function switchConv(el) { document.querySelectorAll('.conv').forEach(c => c.classList.remove('active')); el.classList.add('active'); }
     function goTickets() { alert('工单管理页（后续实现）'); }

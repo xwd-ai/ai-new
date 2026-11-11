@@ -5,7 +5,7 @@
     const read = async path => {
       const response = await request(path);
       if (response.status === 401 || response.status === 403) {
-        throw Object.assign(new Error('登录已失效，请重新登录。'), {retryable:false});
+        throw Object.assign(new Error('登录已失效，请重新登录。'), {retryable:false, authExpired:true});
       }
       if (!response.ok) throw new Error('历史读取失败');
       return response.json();
@@ -13,7 +13,7 @@
     const checkIdentity = async () => {
       const identity = await read('/api/me');
       if (!identity.user || identity.user.id !== userId) {
-        throw Object.assign(new Error('登录已失效或账号已改变，请重新登录。'), {retryable:false});
+        throw Object.assign(new Error('登录已失效或账号已改变，请重新登录。'), {retryable:false, authExpired:true});
       }
     };
     await checkIdentity();
@@ -37,8 +37,8 @@
   class ChatRecovery {
     constructor({fetchHistory, onMessages, onStatus, onBusy,
       sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
-      isOnline = () => navigator.onLine, isActive = () => true}) {
-      Object.assign(this, {fetchHistory, onMessages, onStatus, onBusy, sleep, isOnline, isActive});
+      isOnline = () => navigator.onLine, isActive = () => true, onAuthExpired = () => {}}) {
+      Object.assign(this, {fetchHistory, onMessages, onStatus, onBusy, sleep, isOnline, isActive, onAuthExpired});
       this.sending = false;
       this.syncing = false;
       this.pendingSync = false;
@@ -109,6 +109,7 @@
             return;
           } catch (error) {
             if (!current()) return;
+            if (error.authExpired) this.onAuthExpired(error.message);
             if (error.retryable === false) { this.onStatus(error.message); return; }
             if (attempt === 2) { this.onStatus('历史同步失败，请检查网络后点击「同步历史」。'); return; }
             await Promise.race([this.sleep(1000 * (attempt + 1)), cancelled]);
