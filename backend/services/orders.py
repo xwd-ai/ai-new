@@ -11,7 +11,9 @@
 4. 过期与续费：把服务期换算成续费提醒状态，并支持把服务期已结束、状态仍是
    有效的订单归档为过期；
 5. 功能服务范围判定：跨全部订单回答「某个功能能不能用」——任一在期订单的
-   版本覆盖该功能即判为在范围内，与多订单能力并集的口径一致。
+   版本覆盖该功能即判为在范围内，与多订单能力并集的口径一致；
+6. 只读查询工具：把上面几条查询包装成对话链路可直接调用的工具，
+   给出名字、说明与参数定义，以及一次调用对应的结果形态。
 
 判定函数一律保持纯函数：只读入参，不查库、不写库；需要订单数据时由
 query_order 取好后传入，便于单测、也便于对话链路按只读方式反复调用。
@@ -19,6 +21,7 @@ query_order 取好后传入，便于单测、也便于对话链路按只读方�
 
 from __future__ import annotations
 
+import copy
 import math
 import time
 from dataclasses import dataclass
@@ -26,6 +29,7 @@ from typing import Optional
 
 from backend.database import SessionLocal
 from backend.models import Order, Product
+from backend.services import tools
 from backend.models.order import (
     ORDER_STATUS_LABELS,
     OrderNotFoundError,
@@ -1214,3 +1218,132 @@ def describe_feature_scope(
     取数与判定分离：判定逻辑在纯函数里，可脱离数据库单测。
     """
     return evaluate_feature_scope(list_orders(user_id), feature, now)
+
+
+# ============================ 九、只读查询工具 ============================
+
+# 工具名与工具白名单里的名字必须一致：白名单是并发判定的唯一依据，
+# 名字对不上就会被当成有副作用的工具，只读查询白白退化成串行执行。
+ORDER_TOOL_NAME = "query_order"
+
+ORDER_TOOL_DESCRIPTION = (
+    "查询当前登录用户的订单信息：购买的版本、服务期状态与可用功能。"
+    "需要确认某个功能能不能使用时，把功能名称放在 feature 里。"
+)
+
+# 参数只留两个可选项。用户身份由调用方从登录态注入，刻意不做成参数：
+# 一旦出现在参数里，模型就能自己指定要查谁的订单。
+ORDER_TOOL_PARAMETERS = {
+    "type": "object",
+    "properties": {
+        "order_id": {
+            "type": "string",
+            "description": "订单号，留空则查询主订单（当前在用的那一条）",
+        },
+        "feature": {
+            "type": "string",
+            "description": "要确认的功能名称，留空则只判断整体服务状态",
+        },
+    },
+    "required": [],
+    "additionalProperties": False,
+}
+
+# 入参长度上限与接口层 schema 保持一致，超长按无效参数直接拒绝，
+# 不带着明显不合法的输入去数据库里白跑一次。
+ORDER_TOOL_ID_MAX = 64
+ORDER_TOOL_FEATURE_MAX = 50
+
+# 匿名身份没有可查的订单，按未登录处理
+ORDER_TOOL_ANONYMOUS = "anonymous"
+
+ORDER_TOOL_ERROR_NO_USER = "order_tool_no_user"
+ORDER_TOOL_ERROR_INVALID = "order_tool_invalid_parameter"
+
+# 定义与白名单的一致性在导入时算好，调用方不必自己比对
+ORDER_TOOL_CONCURRENT = tools.can_run_concurrently(ORDER_TOOL_NAME)
+
+
+def _tool_text(value, limit: int) -> Optional[str]:
+    """把工具入参压成单行文本，超过长度上限返回 None。
+
+    空白归一与接口层同口径：模型偶尔会把用户原话带上换行或多余空格，
+    这类输入不该被当成另一个查询条件。
+    """
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else None
+
+
+def order_tool_definition() -> dict:
+    """订单查询工具的对外定义，供工具注册与提示词拼装共用。
+
+    只描述「叫什么、干什么、收什么参数」，不绑定具体用户：
+    用户身份在执行时才注入，定义本身可以跨会话复用，也就不必为每次对话
+    重新生成一份描述。返回值是副本，调用方改它不会污染模块常量。
+    """
+    return {
+        "name": ORDER_TOOL_NAME,
+        "description": ORDER_TOOL_DESCRIPTION,
+        "parameters": copy.deepcopy(ORDER_TOOL_PARAMETERS),
+        "read_only": True,
+        "concurrent": ORDER_TOOL_CONCURRENT,
+    }
+
+
+def run_order_tool(user_id: str, **params) -> tools.ToolResult:
+    """执行一次订单查询，把结论包装成工具结果。
+
+    三种查询形态按入参自动分派，返回的 mode 说明走了哪一条：
+
+    - 给了功能名：跨全部订单判断该功能是否在服务范围内，
+      多产品用户不会被主订单的版本误判；
+    - 给了订单号：只判定那一条订单，别人的订单号按查不到处理；
+    - 都没给：返回多订单视图，主订单与在期能力并集都在里面。
+
+    失败只用于参数不可用（未登录、超长入参）。查不到订单不算失败，
+    而是有效的观察结果——模型需要知道「这个人没有订单」才能继续回答，
+    把它当异常抛回去只会让对话在一句无关工具错误上停住。
+    未识别的参数一律忽略，工具协议演进时旧实现不会因为多传字段就报错。
+    """
+    uid = _tool_text(user_id, ORDER_TOOL_ID_MAX)
+    if not uid or uid.lower() == ORDER_TOOL_ANONYMOUS:
+        return tools.ToolResult(
+            success=False,
+            error="未登录，无法查询订单",
+            error_code=ORDER_TOOL_ERROR_NO_USER,
+        )
+
+    feature = _tool_text(params.get("feature"), ORDER_TOOL_FEATURE_MAX)
+    order_id = _tool_text(params.get("order_id"), ORDER_TOOL_ID_MAX)
+    if feature is None:
+        return tools.ToolResult(
+            success=False,
+            error=f"功能名称不能超过 {ORDER_TOOL_FEATURE_MAX} 个字符",
+            error_code=ORDER_TOOL_ERROR_INVALID,
+        )
+    if order_id is None:
+        return tools.ToolResult(
+            success=False,
+            error=f"订单号不能超过 {ORDER_TOOL_ID_MAX} 个字符",
+            error_code=ORDER_TOOL_ERROR_INVALID,
+        )
+
+    if feature:
+        result = describe_feature_scope(uid, feature)
+        mode = "feature"
+    elif order_id:
+        result = describe_order(uid, order_id=order_id)
+        mode = "order"
+    else:
+        result = query_orders(uid)
+        mode = "list"
+
+    return tools.ToolResult(
+        success=True,
+        output=str(result.get("message") or ""),
+        data={
+            "tool": ORDER_TOOL_NAME,
+            "mode": mode,
+            "order": result,
+        },
+    )
