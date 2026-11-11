@@ -13,7 +13,8 @@
 5. 功能服务范围判定：跨全部订单回答「某个功能能不能用」——任一在期订单的
    版本覆盖该功能即判为在范围内，与多订单能力并集的口径一致；
 6. 只读查询工具：把上面几条查询包装成对话链路可直接调用的工具，
-   给出名字、说明与参数定义，以及一次调用对应的结果形态。
+   给出名字、说明与参数定义、一次调用对应的结果形态，以及供对话
+   链路装配用的注册入口与调用约定。
 
 判定函数一律保持纯函数：只读入参，不查库、不写库；需要订单数据时由
 query_order 取好后传入，便于单测、也便于对话链路按只读方式反复调用。
@@ -25,7 +26,7 @@ import copy
 import math
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 from backend.database import SessionLocal
 from backend.models import Order, Product
@@ -1347,3 +1348,59 @@ def run_order_tool(user_id: str, **params) -> tools.ToolResult:
             "order": result,
         },
     )
+
+
+# ============================ 十、工具注册与调用约定 ============================
+
+# 执行参数里出现这些键时直接丢弃：身份只能来自注册时绑定的登录态。
+# 模型输出夹带的身份键既不该生效，也不该让处理器撞上参数重复而报错。
+ORDER_TOOL_IDENTITY_KEYS = frozenset({"user_id", "user"})
+
+
+def make_order_tool_handler(user_id: str) -> Callable[..., tools.ToolResult]:
+    """构造绑定登录身份的订单工具处理函数。
+
+    身份在构造时定死，处理器只收工具自己的查询参数（order_id / feature）。
+    对话链路把它注册进工具注册表后，执行环节传进来的身份键会被丢弃——
+    模型没有指定查谁的订单的通道。
+    """
+
+    def _handle(**params) -> tools.ToolResult:
+        arguments = {
+            key: value
+            for key, value in params.items()
+            if key not in ORDER_TOOL_IDENTITY_KEYS
+        }
+        return run_order_tool(user_id, **arguments)
+
+    return _handle
+
+
+def register_order_tool(
+    registry: tools.ToolRegistry, user_id: str
+) -> Optional[tools.ToolSpec]:
+    """把订单查询工具注册进工具注册表，返回注册后的工具定义。
+
+    对话链路装配工具时的统一入口：不再各自手写 query_order 处理器，
+    调用本函数一次即可对齐名字、说明与执行体。调用约定：
+
+    - 注册时机：每轮对话构建 ToolRegistry 时调用一次，登录身份此刻
+      定死；匿名会话也可以注册，执行时返回「未登录」的失败结果；
+    - 执行方式：registry.execute(ORDER_TOOL_NAME, **arguments)，arguments
+      按 ORDER_TOOL_PARAMETERS 收 order_id / feature，未识别字段忽略，
+      user_id / user 这类身份键直接丢弃；
+    - 结果形态：ToolResult.success 表示查询是否可执行，output 是单行
+      摘要，data 带 tool / mode / order 三段，可直接序列化进事件流；
+    - 定义复用：提示词拼装用 order_tool_definition()，与注册项同名同描述；
+    - 并发：工具名在只读白名单内，plan_execution 会把它与其它只读工具
+      编进同一批并发执行。
+
+    注册表同名先注册者胜：若表里已有 query_order（比如对话侧的旧实现），
+    本调用不会覆盖它，接入时应先撤掉旧注册再调用本函数。
+    """
+    registry.register(
+        ORDER_TOOL_NAME,
+        ORDER_TOOL_DESCRIPTION,
+        make_order_tool_handler(user_id),
+    )
+    return registry.get(ORDER_TOOL_NAME)
