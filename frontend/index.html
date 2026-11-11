@@ -365,11 +365,16 @@
         <span class="tag">工单 #T-1024</span>
       </div>
 
-      <div style="padding:8px 22px;display:flex;align-items:center;gap:12px;font-size:13px;color:var(--muted)">
+      <div style="padding:8px 22px;display:flex;flex-wrap:wrap;align-items:center;gap:12px;font-size:13px;color:var(--muted)">
         <span id="connectionStatus" role="status" aria-live="polite">正在同步历史…</span>
         <button id="syncHistory" type="button" style="margin-left:auto;white-space:nowrap">同步历史</button>
         <button id="cancelHistory" type="button" hidden style="white-space:nowrap">取消同步</button>
+        <button id="copyUnsaved" type="button" hidden>复制未保存内容</button>
         <a id="reloginLink" href="/login" hidden style="white-space:nowrap">重新登录</a>
+      </div>
+      <div style="margin:0 22px;font-size:13px;color:var(--muted)">
+        <div id="copyUnsavedStatus" role="status"></div>
+        <textarea id="copyUnsavedText" aria-label="可手动复制的未保存内容" rows="4" readonly hidden style="width:100%;box-sizing:border-box"></textarea>
       </div>
       <div class="chat-scroll">
         <details id="uncertainQuestions" hidden style="max-width:760px;margin:0 auto 16px;color:var(--muted)">
@@ -610,6 +615,7 @@
 
     const syncBtn = document.getElementById('syncHistory');
     const connectionStatus = document.getElementById('connectionStatus');
+    const copyUnsaved = document.getElementById('copyUnsaved');
     let pageActive = true;
     let loginRequired = false;
     const canUseSession = () => pageActive && !loginRequired;
@@ -630,9 +636,44 @@
       recovery.cancelSync();
       updateControls(false);
       for (const button of log.querySelectorAll('.ct-btn.primary')) button.disabled = true;
+      copyUnsaved.hidden = false;
       document.getElementById('reloginLink').hidden = false;
       connectionStatus.textContent = message;
     }
+
+    copyUnsaved.addEventListener('click', async () => {
+      if (!pageActive || !loginRequired || copyUnsaved.disabled) return;
+      const status = document.getElementById('copyUnsavedStatus');
+      const manualCopy = document.getElementById('copyUnsavedText');
+      const uncertainTexts = document.getElementById('uncertainTexts');
+      manualCopy.hidden = true;
+      manualCopy.value = '';
+      const sections = [];
+      if (input.value.trim()) sections.push('未发送草稿\n' + input.value);
+      if (uncertainTexts.children.length) {
+        const questions = Array.from(uncertainTexts.children, item => item.textContent);
+        sections.push('发送结果待核对\n' + questions.join('\n\n'));
+      }
+      if (!sections.length) {
+        status.textContent = '没有可复制的未保存内容。';
+        return;
+      }
+      const text = sections.join('\n\n');
+      status.textContent = '';
+      copyUnsaved.disabled = true;
+      try {
+        await navigator.clipboard.writeText(text);
+        status.textContent = '已复制未保存内容。';
+      } catch {
+        status.textContent = '无法访问剪贴板，请手动复制下方选中的文本。';
+        manualCopy.value = text;
+        manualCopy.hidden = false;
+        manualCopy.focus();
+        manualCopy.select();
+      } finally {
+        copyUnsaved.disabled = false;
+      }
+    });
 
     const recovery = new ChatRecovery({
       isActive: canUseSession,

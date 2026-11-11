@@ -33,6 +33,7 @@ class Element {
     await settle();
   }
   focus() { this.focused=true; }
+  select() { this.selected=true; }
 }
 
 function page(handler=()=>null, rows=[{role:'user',content:'saved'}]) {
@@ -244,6 +245,61 @@ test('expired identity keeps existing display, draft and uncertain text and lock
   fillAndSend('suggested question');await settle();
   assert.equal(calls.length,count);assert.match(e.connectionStatus.textContent,/重新登录/);
   assert.equal(e.chatLog.textContent,before);assert.equal(e.msgInput.value,'draft');assert.match(e.uncertainTexts.textContent,/unconfirmed/);
+});
+
+test('expired page copies the current draft and each uncertain question without navigation or requests',async()=>{
+  let expired=false;
+  const {elements:e,calls,browser,navigator}=page(url=>{
+    if(url==='/api/me'&&expired)return json({user:null});
+    if(url==='/api/chat')return json({},503);
+  });
+  const copied=[];
+  navigator.clipboard={writeText:async text=>copied.push(text)};
+  await settle();
+  assert.equal(e.copyUnsaved.hidden,true);
+  for(const question of ['问题一\n第二行','问题二']){
+    e.msgInput.value=question;
+    await e.sendBtn.emit('click');
+  }
+  expired=true;
+  await e.syncHistory.emit('click');
+  e.msgInput.value='  最新草稿\n保留换行  ';
+  assert.equal(e.copyUnsaved.hidden,false);
+  const count=calls.length;
+  await e.copyUnsaved.emit('click');
+  assert.deepEqual(copied,['未发送草稿\n  最新草稿\n保留换行  \n\n发送结果待核对\n问题一\n第二行\n\n问题二']);
+  assert.match(e.copyUnsavedStatus.textContent,/已复制/);
+  assert.equal(e.msgInput.value,'  最新草稿\n保留换行  ');
+  assert.equal(e.uncertainTexts.children.length,2);
+  assert.equal(calls.length,count);
+  assert.equal(browser.location.href,'/');
+});
+
+test('expired page selects a manual copy fallback when clipboard access is denied or unavailable',async()=>{
+  for(const clipboard of [undefined,{writeText:async()=>{throw Error('denied');}}]){
+    const {elements:e,navigator}=page(url=>url==='/api/me'?json({user:null}):null);
+    navigator.clipboard=clipboard;
+    await settle();
+    e.msgInput.value='草稿';
+    await e.copyUnsaved.emit('click');
+    assert.equal(e.copyUnsavedText.hidden,false);
+    assert.equal(e.copyUnsavedText.value,'未发送草稿\n草稿');
+    assert.equal(e.copyUnsavedText.selected,true);
+    assert.match(e.copyUnsavedStatus.textContent,/手动复制/);
+    assert.match(e.connectionStatus.textContent,/重新登录/);
+  }
+});
+
+test('expired page with only whitespace does not write to the clipboard',async()=>{
+  const {elements:e,navigator}=page(url=>url==='/api/me'?json({user:null}):null);
+  let writes=0;
+  navigator.clipboard={writeText:async()=>{writes++;}};
+  await settle();
+  e.msgInput.value=' \n ';
+  await e.copyUnsaved.emit('click');
+  assert.equal(writes,0);
+  assert.equal(e.copyUnsavedText.hidden,true);
+  assert.match(e.copyUnsavedStatus.textContent,/没有可复制/);
 });
 
 test('ticket 401 locks identity and cancels a history request already in flight',async()=>{
