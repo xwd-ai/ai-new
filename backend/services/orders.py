@@ -340,7 +340,10 @@ def evaluate_service_scope(
     capabilities = tier_capabilities(order.get("product_tier"))
     period = evaluate_service_period(order.get("started_at"), order.get("expires_at"), now)
     order_status = str(order.get("status") or "").strip().lower()
-    status_blocked = bool(order_status) and order_status != ORDER_STATUS_ACTIVE
+    # 只有明确的 active 才放行：状态为空或取值为历史脏数据时，订单究竟能不能用
+    # 无法确认，按「不是有效状态」处理。空值当成不限制，等于让一条状态缺失的
+    # 订单直接拿到全部权益。
+    status_blocked = as_status(order_status) != OrderStatus.ACTIVE
 
     scope.update(
         {
@@ -841,7 +844,7 @@ def evaluate_renewal(
 
     入参是订单记录（Order.to_dict 的形态），订单为 None 时按「无订单」处理。
     判定顺序与业务处理顺序一致：退订订单不再提示续费 → 订单状态已归档为过期
-    → 服务期无法判定 → 未开始 → 已到期 → 即将到期 → 还早。
+    → 状态无法识别 → 服务期无法判定 → 未开始 → 已到期 → 即将到期 → 还早。
 
     退订放在最前面判断：用户已经明确不要了，继续提醒续费只会造成骚扰，
     这类订单要引导的是重新购买而不是续费。
@@ -907,6 +910,17 @@ def evaluate_renewal(
             f"订单已标记为过期，续费后恢复服务（原到期时间 {period['expires_text']}）"
             if period.get("expires_text")
             else "订单已标记为过期，续费后恢复服务",
+        )
+
+    # 状态值缺失或无法识别时不催续费：这类订单在服务范围判定里已按不可用处理，
+    # 再提示「即将到期、建议续费」会让用户以为付费就能解决，
+    # 实际要先核实订单处于什么状态。
+    if status is None:
+        return settle(
+            RENEWAL_UNKNOWN,
+            URGENCY_NONE,
+            ACTION_VERIFY,
+            "订单状态无法识别，无法判断续费时间，需要人工核实",
         )
 
     if period.get("status") == SERVICE_UNKNOWN:
