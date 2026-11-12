@@ -302,6 +302,71 @@ test('expired page with only whitespace does not write to the clipboard',async()
   assert.match(e.copyUnsavedStatus.textContent,/没有可复制/);
 });
 
+test('editing an expired draft clears the previous copy feedback and manual text',async()=>{
+  const {elements:e,navigator}=page(url=>url==='/api/me'?json({user:null}):null);
+  const writes=[];
+  navigator.clipboard={writeText:async text=>{writes.push(text);throw Error('denied');}};
+  await settle();
+  e.msgInput.value='旧草稿';
+  await e.copyUnsaved.emit('click');
+  assert.equal(e.copyUnsavedText.hidden,false);
+  e.msgInput.value='新草稿';
+  await e.msgInput.emit('input');
+  assert.equal(e.copyUnsavedStatus.textContent,'');
+  assert.equal(e.copyUnsavedText.hidden,true);
+  assert.equal(e.copyUnsavedText.value,'');
+  await e.copyUnsaved.emit('click');
+  assert.deepEqual(writes,['未发送草稿\n旧草稿','未发送草稿\n新草稿']);
+  assert.equal(e.copyUnsavedText.value,'未发送草稿\n新草稿');
+});
+
+test('late clipboard completion cannot show feedback for an edited draft',async()=>{
+  for (const denied of [false,true]) {
+    const {elements:e,navigator}=page(url=>url==='/api/me'?json({user:null}):null);
+    let complete;
+    navigator.clipboard={writeText:()=>new Promise((resolve,reject)=>{
+      complete=denied?()=>reject(Error('denied')):resolve;
+    })};
+    await settle();
+    e.msgInput.value='旧草稿';
+    await e.copyUnsaved.emit('click');
+    assert.equal(e.copyUnsaved.disabled,true);
+    e.msgInput.value='新草稿';
+    await e.msgInput.emit('input');
+    complete();
+    await settle();
+    assert.equal(e.copyUnsavedStatus.textContent,'');
+    assert.equal(e.copyUnsavedText.hidden,true);
+    assert.equal(e.copyUnsavedText.focused,undefined);
+    assert.equal(e.copyUnsaved.disabled,false);
+  }
+});
+
+test('a late uncertain question invalidates the expired page copy feedback',async()=>{
+  let sends=0, reply;
+  const {elements:e,navigator}=page(url=>{
+    if(url==='/api/chat')return ++sends===1?json({reply:'answer',suggest_ticket:true}):new Promise(resolve=>reply=resolve);
+    if(url==='/api/tickets')return json({},401);
+  });
+  const copied=[];
+  navigator.clipboard={writeText:async text=>copied.push(text)};
+  await settle();
+  e.msgInput.value='first';
+  await e.sendBtn.emit('click');
+  const confirm=e.chatLog.querySelector('.ct-btn.primary');
+  e.msgInput.value='待核对原文';
+  await e.sendBtn.emit('click');
+  await confirm.emit('click');
+  e.msgInput.value='草稿';
+  await e.copyUnsaved.emit('click');
+  assert.match(e.copyUnsavedStatus.textContent,/已复制/);
+  reply(json({},503));
+  await settle();
+  assert.equal(e.copyUnsavedStatus.textContent,'');
+  await e.copyUnsaved.emit('click');
+  assert.deepEqual(copied,['未发送草稿\n草稿','未发送草稿\n草稿\n\n发送结果待核对\n待核对原文']);
+});
+
 test('ticket 401 locks identity and cancels a history request already in flight',async()=>{
   let hold=false,release;
   const {elements:e,calls}=page(url=>{

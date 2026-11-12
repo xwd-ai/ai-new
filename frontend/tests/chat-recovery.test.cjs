@@ -14,7 +14,7 @@ test('page send timeout releases controls and preserves uncertain question outsi
   const context = {
     input: {value:'尚未确认保存的问题', style:{}}, recovery, sendBtn:{}, token:'test',
     addUserMsg() {}, addAiContainer: () => ({}), addTyping: () => ({style:{}}),
-    addTrace() {}, addSources() {}, addConfirmTicket() {}, scrollBottom() {},
+    addTrace() {}, addSources() {}, addConfirmTicket() {}, scrollBottom() {}, clearCopyFeedback() {},
     AbortSignal: {timeout: ms => {timeout = ms; return 'bounded-signal';}},
     fetch: async (url, options) => {requestOptions=options; throw new Error('timeout');},
     document: {createElement: () => ({}), getElementById: id => id === 'uncertainTexts'

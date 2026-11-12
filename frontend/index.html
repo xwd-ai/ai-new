@@ -616,6 +616,9 @@
     const syncBtn = document.getElementById('syncHistory');
     const connectionStatus = document.getElementById('connectionStatus');
     const copyUnsaved = document.getElementById('copyUnsaved');
+    const copyStatus = document.getElementById('copyUnsavedStatus');
+    const manualCopy = document.getElementById('copyUnsavedText');
+    let copyRevision = 0;
     let pageActive = true;
     let loginRequired = false;
     const canUseSession = () => pageActive && !loginRequired;
@@ -641,13 +644,19 @@
       connectionStatus.textContent = message;
     }
 
-    copyUnsaved.addEventListener('click', async () => {
-      if (!pageActive || !loginRequired || copyUnsaved.disabled) return;
-      const status = document.getElementById('copyUnsavedStatus');
-      const manualCopy = document.getElementById('copyUnsavedText');
-      const uncertainTexts = document.getElementById('uncertainTexts');
+    function clearCopyFeedback() {
+      if (!loginRequired) return;
+      copyRevision++;
+      copyStatus.textContent = '';
       manualCopy.hidden = true;
       manualCopy.value = '';
+    }
+
+    copyUnsaved.addEventListener('click', async () => {
+      if (!pageActive || !loginRequired || copyUnsaved.disabled) return;
+      clearCopyFeedback();
+      const revision = copyRevision;
+      const uncertainTexts = document.getElementById('uncertainTexts');
       const sections = [];
       if (input.value.trim()) sections.push('未发送草稿\n' + input.value);
       if (uncertainTexts.children.length) {
@@ -655,17 +664,17 @@
         sections.push('发送结果待核对\n' + questions.join('\n\n'));
       }
       if (!sections.length) {
-        status.textContent = '没有可复制的未保存内容。';
+        copyStatus.textContent = '没有可复制的未保存内容。';
         return;
       }
       const text = sections.join('\n\n');
-      status.textContent = '';
       copyUnsaved.disabled = true;
       try {
         await navigator.clipboard.writeText(text);
-        status.textContent = '已复制未保存内容。';
+        if (revision === copyRevision) copyStatus.textContent = '已复制未保存内容。';
       } catch {
-        status.textContent = '无法访问剪贴板，请手动复制下方选中的文本。';
+        if (revision !== copyRevision) return;
+        copyStatus.textContent = '无法访问剪贴板，请手动复制下方选中的文本。';
         manualCopy.value = text;
         manualCopy.hidden = false;
         manualCopy.focus();
@@ -748,6 +757,7 @@
         retained.textContent = text;
         document.getElementById('uncertainTexts').appendChild(retained);
         document.getElementById('uncertainQuestions').hidden = false;
+        clearCopyFeedback();
         reply = '发送结果不确定，服务可能仍在处理。请点击「同步历史」查看已保存的回答，避免重复发送。';
       }
 
@@ -774,6 +784,7 @@
       input.style.height = Math.min(input.scrollHeight, 120) + 'px';
     }
     input.addEventListener('input', autoResize);
+    input.addEventListener('input', clearCopyFeedback);
     input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } });
     sendBtn.addEventListener('click', handleSend);
 
