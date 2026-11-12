@@ -176,6 +176,50 @@ test('online event synchronizes while offline event and offline reads preserve d
   assert.equal(reads(calls).length,count+1); assert.equal(e.msgInput.value,'draft');
 });
 
+test('quick reconnect aborts an old page read and starts fresh without waiting for it',async()=>{
+  let release;
+  const state=page(url=>{
+    if (url.includes('offset=100') && !release) return new Promise(resolve=>release=resolve);
+  },rows);
+  const {elements:e,calls,browser,navigator}=state;
+  await settle();
+  const signal=reads(calls).at(-1).signal;
+  e.msgInput.value='draft';
+  navigator.onLine=false;
+  await browser.emit('offline');
+  assert.equal(signal.aborted,true);
+  assert.equal(e.cancelHistory.hidden,true);
+  assert.match(e.connectionStatus.textContent,/网络已断开/);
+  navigator.onLine=true;
+  await browser.emit('online');
+  assert.deepEqual(reads(calls).map(call=>new URLSearchParams(call.url.split('?')[1]).get('offset')),['0','100','0','100','200']);
+  release(json({},401));
+  await settle();
+  assert.equal(e.reloginLink.hidden,true);
+  assert.deepEqual(contents(e.chatLog),rows.map(row=>row.content));
+  assert.equal(e.msgInput.value,'draft');
+  assert.match(e.connectionStatus.textContent,/历史已同步/);
+});
+
+test('quick reconnect bypasses the old retry timer and never repeats its read',async()=>{
+  let fail=true;
+  const state=page(url=>fail&&url.startsWith('/api/conversation?')?json({},503):null);
+  const {elements:e,calls,browser,navigator,timers}=state;
+  await settle();
+  assert.equal(timers.length,1);
+  navigator.onLine=false;
+  await browser.emit('offline');
+  fail=false;
+  navigator.onLine=true;
+  await browser.emit('online');
+  assert.equal(reads(calls).length,2);
+  assert.match(e.connectionStatus.textContent,/历史已同步/);
+  const count=calls.length;
+  await state.retry();
+  assert.equal(calls.length,count);
+  assert.match(e.connectionStatus.textContent,/历史已同步/);
+});
+
 test('retry after a partial read restarts at zero and never paints the partial page',async()=>{
   let failed=false,release;
   const state=page(url=>{if(url.includes('offset=100')){

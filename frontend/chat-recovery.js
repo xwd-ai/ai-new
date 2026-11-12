@@ -71,14 +71,14 @@
       }
     }
 
-    cancelSync() {
+    cancelSync(message = '已取消历史同步，原展示和草稿已保留。') {
       if (!this.syncing) return false;
       const controller = this.syncController;
       this.syncController = null;
       this.syncing = false;
       controller.abort();
       this.onBusy(false);
-      this.onStatus('已取消历史同步，原展示和草稿已保留。');
+      this.onStatus(message);
       return true;
     }
 

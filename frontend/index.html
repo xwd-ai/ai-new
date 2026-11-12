@@ -728,7 +728,8 @@
     });
     window.addEventListener('online', () => recovery.sync());
     window.addEventListener('offline', () => {
-      showStatus('网络已断开，联网后将同步历史；不会自动重发消息。');
+      const message = '网络已断开，联网后将同步历史；不会自动重发消息。';
+      if (!recovery.cancelSync(message)) showStatus(message);
     });
 
     async function handleSend() {
