@@ -33,6 +33,7 @@ from backend.models.ticket import (
 )
 from backend.schemas import CreateTicketRequest, ReplyRequest
 from backend.schemas.order import (
+    AdminOrderDetailResponse,
     AdminOrderListView,
     ExpireResultResponse,
     FeatureCheckResponse,
@@ -407,6 +408,23 @@ def admin_orders(
         page_size=page_size,
         order=order,
     )
+
+
+@tickets_router.get("/order/admin/{order_id}", response_model=AdminOrderDetailResponse)
+def admin_order_detail(
+    order_id: str,
+    user: dict = Depends(require_admin),
+):
+    """管理侧订单详情：按订单号查看任意客户的单条订单完整信息。
+
+    与 /order/admin 的分工：列表按筛选条件给一屏摘要，本接口给单条全量——
+    产品能力、服务范围结论、状态流转去向、续费提示与该客户的订单总数，
+    客服从列表点进一条订单即可完成核对，不必再按接口逐个拼。
+
+    要求管理员身份：详情跨客户取数，普通用户只能从 /order 系列看自己的订单。
+    订单不存在返回 404（ORDER_NOT_FOUND），空路径参数同样按查不到处理。
+    """
+    return orders.describe_order_detail(order_id)
 
 
 @tickets_router.post("/order/expire", response_model=ExpireResultResponse)

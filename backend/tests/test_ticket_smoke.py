@@ -55,6 +55,7 @@ ROUTES = ENDPOINTS + [
     ("get", "/api/order/feature-scope", {}),
     ("get", "/api/order/renewal", {}),
     ("get", "/api/order/admin", {}),
+    ("get", "/api/order/admin/{order_id}", {}),
     ("post", "/api/order/expire", {}),
     ("post", "/api/tickets/batch-close", {}),
     ("post", "/api/tickets/batch-transfer", {}),

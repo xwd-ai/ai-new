@@ -269,3 +269,52 @@ class AdminOrderListView(BaseModel):
     by_tier: list[AdminOrderCountResponse] = Field(default_factory=list)
     message: str = ""
 
+
+class OrderStatusFlowResponse(BaseModel):
+    """订单状态流转说明：当前状态、是否终态与可流转到的目标状态。
+
+    与 models.order 的状态机同源：allowed_statuses 直接取合法流转表，
+    前端据此渲染操作按钮，不必自己再维护一份流转表。
+    known 为假表示存量数据里的状态值无法识别，此时不给任何可流转项。
+    """
+
+    order_id: Optional[str] = None
+    status: str = ""
+    status_label: str = "未知状态"
+    known: bool = False
+    terminal: bool = False
+    allowed_statuses: list[str] = Field(default_factory=list)
+    allowed_labels: list[str] = Field(default_factory=list)
+
+
+class AdminOrderDetailResponse(BaseModel):
+    """管理侧订单详情：一条订单的完整视图。
+
+    与 AdminOrderItemResponse 的区别是把列表摘要展开为单条全量信息：
+    产品能力、服务范围结论、状态流转去向、续费提示与该客户的订单总数，
+    客服打开一条订单即可完成核对，不必再按接口逐个拼。
+    allowed / reason_code / reason 是不带功能入参的整体服务结论，
+    与 /order/scope 的口径一致。
+    """
+
+    order_id: str
+    user_id: str = ""
+    product_tier: str = ""
+    tier: Optional[str] = Field(default=None, description="归一后的版本：basic / pro")
+    tier_label: str = "未知版本"
+    product_name: str = ""
+    status: str = ""
+    status_label: str = "未知状态"
+    period: Optional[ServicePeriodResponse] = None
+    in_service: bool = False
+    expires_text: str = ""
+    days_remaining: int = 0
+    allowed: bool = False
+    reason_code: str = ""
+    reason: str = ""
+    features: list[str] = Field(default_factory=list, description="该版本包含的功能名")
+    user_order_count: int = Field(default=0, description="该客户名下的订单总数")
+    status_flow: OrderStatusFlowResponse
+    renewal: RenewalHintResponse
+    message: str = ""
+

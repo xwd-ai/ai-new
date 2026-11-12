@@ -16,7 +16,8 @@
    给出名字、说明与参数定义、一次调用对应的结果形态，以及供对话
    链路装配用的注册入口与调用约定；
 7. 管理侧订单视图：按状态、版本、客户与关键词筛选，分页返回并附带
-   分组计数，供客服按客户排查订单。
+   分组计数，供客服按客户排查订单；单条订单的详情把服务期、能力、
+   状态流转与续费提示一次给全。
 
 判定函数一律保持纯函数：只读入参，不查库、不写库；需要订单数据时由
 query_order 取好后传入，便于单测、也便于对话链路按只读方式反复调用。
@@ -1753,4 +1754,84 @@ def list_all_orders(
         "by_status": by_status,
         "by_tier": by_tier,
         "message": _admin_message(total, by_status, current, pages, conditions),
+    }
+
+
+def get_order_by_id(order_id) -> Optional[dict]:
+    """按订单号取一条订单，不做归属校验。
+
+    管理侧详情用：客服要能按订单号查任意客户的订单，归属限制由接口层的
+    管理员权限依赖负责，取数函数只回答「查不查得到」。入参压缩空白后
+    精确匹配，查不到返回 None，由调用方按「订单不存在」处理。
+    """
+    value = " ".join(str(order_id or "").split())
+    if not value:
+        return None
+    db = SessionLocal()
+    try:
+        row = db.query(Order).filter(Order.id == value).first()
+        return row.to_dict() if row else None
+    finally:
+        db.close()
+
+
+def _detail_message(item: dict, scope: dict, flow: dict) -> str:
+    """拼一句订单详情摘要：归属、服务范围结论与状态流转去向。
+
+    服务结论复用 _scope_message 的口径，与 /order/scope 的说法保持一致；
+    流转去向直接取状态机给的可选项，客服据此决定下一步能做什么操作。
+    """
+    parts = [
+        f"订单 {item['order_id']}（客户 {item['user_id'] or '未知'}）：{_scope_message(scope)}"
+    ]
+    if flow["known"]:
+        target = "、".join(flow["allowed_labels"]) if flow["allowed_labels"] else "无，已结束流转"
+        parts.append(f"当前状态{flow['status_label']}，可流转到{target}")
+    return "；".join(parts)
+
+
+def describe_order_detail(
+    order_id,
+    now: Optional[float] = None,
+    window_days: Optional[int] = None,
+) -> dict:
+    """管理侧订单详情：一条订单的归属、服务期、能力、状态流转与续费提示。
+
+    与 list_all_orders 的分工：列表按筛选条件给一屏记录，逐条只有摘要；
+    本函数给单条订单的完整视图——服务范围结论、版本能力、可流转的状态
+    与续费提醒一次给全，客服打开一条订单即可完成核对，不必再调别的接口拼。
+
+    组装全部复用既有纯函数（服务期、范围判定、状态流转、续费提醒），
+    本函数只负责取数与拼装，不在这里重新解释任何一条业务规则。
+    订单不存在时抛 404：管理侧按订单号精确查询，查不到就是查不到，
+    不返回一份空详情让调用方猜是「没有这条」还是「取数失败」。
+    """
+    order = get_order_by_id(order_id)
+    if not order:
+        raise OrderNotFoundError(order_id)
+
+    item = admin_order_item(order, now)
+    scope = evaluate_service_scope(order, now=now)
+
+    db = SessionLocal()
+    try:
+        product = _get_product(db, item["tier"] or order.get("product_tier") or "")
+        user_order_count = (
+            db.query(Order).filter(Order.user_id == order.get("user_id")).count()
+        )
+    finally:
+        db.close()
+
+    flow = describe_status_flow(order)
+    return {
+        **item,
+        "product_name": product["name"] if product else item["tier_label"],
+        "allowed": scope["allowed"],
+        "reason_code": scope["reason_code"],
+        "reason": scope["reason"],
+        "features": product["features"] if product else list(scope["features"]),
+        "user_order_count": user_order_count,
+        "status_flow": flow,
+        "renewal": evaluate_renewal(order, now, window_days),
+        "message": _detail_message(item, scope, flow),
     }
