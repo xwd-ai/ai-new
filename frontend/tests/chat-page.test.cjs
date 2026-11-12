@@ -42,7 +42,7 @@ function page(handler=()=>null, rows=[{role:'user',content:'saved'}]) {
     const element=elements[match[2]]=new Element(match[1]); element.hidden=/\bhidden\b/.test(match[0]);
   }
   elements.chatLog.textContent='welcome';
-  const calls=[], timers=[], browser=new Element(), storage=new Map([
+  const calls=[], timers=[], timeouts=[], browser=new Element(), storage=new Map([
     ['token','test-token'],['user',JSON.stringify({id:'u',name:'客户',role:'customer'})],
   ]);
   browser.location={href:'/'};
@@ -53,7 +53,11 @@ function page(handler=()=>null, rows=[{role:'user',content:'saved'}]) {
     document:{getElementById:id=>{assert.ok(elements[id],`missing ${id}`); return elements[id];},
       createElement:tag=>new Element(tag), querySelector:()=>new Element(), querySelectorAll:()=>[]},
     localStorage:{getItem:key=>storage.get(key),removeItem:key=>storage.delete(key)},
-    AbortSignal:{timeout:budget=>({budget,throwIfAborted(){}}),any:signals=>{signals[0].budget=signals[1].budget;return signals[0];}},
+    AbortSignal:{timeout:budget=>{
+      const signal={budget,throwIfAborted(){}};
+      timeouts.push(signal);
+      return signal;
+    },any:signals=>{signals[0].budget=signals[1].budget;return signals[0];}},
     setTimeout:fn=>{timers.push(fn);return timers.length;},
     fetch:async(url,options)=>{
       calls.push({url,...options}); const response=await handler(url,options); if(response) return response;
@@ -70,7 +74,7 @@ function page(handler=()=>null, rows=[{role:'user',content:'saved'}]) {
   const scripts=[...html.matchAll(/<script(?: src="([^"]+)")?>([\s\S]*?)<\/script>/g)];
   assert.deepEqual(scripts.filter(x=>x[1]).map(x=>x[1]),['/assets/chat-recovery.js']);
   for (const [,src,inline] of scripts) vm.runInContext(src?fs.readFileSync(path.join(root,src.replace('/assets/','')),'utf8'):inline,context,{filename:src||'index-inline.js'});
-  return {elements,calls,browser,navigator,timers,storage,fillAndSend:context.fillAndSend,get reloads(){return reloads;},
+  return {elements,calls,browser,navigator,timers,timeouts,storage,fillAndSend:context.fillAndSend,get reloads(){return reloads;},
     async retry(){assert.ok(timers.length);timers.shift()();await settle();}};
 }
 const reads = calls => calls.filter(x=>x.url.startsWith('/api/conversation?'));
@@ -184,6 +188,59 @@ test('retry after a partial read restarts at zero and never paints the partial p
   release(json({messages:rows.slice(100,200),total:205})); await settle();
   assert.deepEqual(reads(state.calls).map(x=>new URLSearchParams(x.url.split('?')[1]).get('offset')),['0','100','0','100','200']);
   assert.equal(state.elements.chatLog.children.length,205);
+});
+
+test('final history failure describes the last attempt and preserves display and draft',async()=>{
+  const timeout=Object.assign(new Error('private timeout detail'),{name:'TimeoutError'});
+  const service=json({detail:'private service detail'},503);
+  const cases=[
+    {failures:[service,service,timeout],message:/同步超时/},
+    {failures:[timeout,timeout,service],message:/服务暂时异常/},
+    {failures:[service,service,json({},422)],message:/历史同步失败/},
+  ];
+  for (const {failures,message} of cases) {
+    let fail=false, attempt=0;
+    const state=page(url=>{
+      if (!fail || !url.startsWith('/api/conversation?')) return null;
+      const result=failures[attempt++];
+      if (result instanceof Error) throw result;
+      return result;
+    });
+    const e=state.elements;
+    await settle();
+    const before=e.chatLog.textContent;
+    e.msgInput.value='draft';
+    fail=true;
+    await e.syncHistory.emit('click');
+    await state.retry();
+    await state.retry();
+    assert.equal(attempt,3);
+    assert.match(e.connectionStatus.textContent,message);
+    assert.doesNotMatch(e.connectionStatus.textContent,/private|重新登录/);
+    assert.equal(e.chatLog.textContent,before);
+    assert.equal(e.msgInput.value,'draft');
+    assert.equal(e.syncHistory.disabled,false);
+    fail=false;
+    await e.syncHistory.emit('click');
+    assert.match(e.connectionStatus.textContent,/历史已同步/);
+  }
+});
+
+test('history body abort uses the active attempt timeout reason',async()=>{
+  let fail=false;
+  const state=page(url=>{
+    if (!fail || !url.startsWith('/api/conversation?')) return null;
+    return {ok:true,json:async()=>{
+      Object.assign(state.timeouts.at(-1),{aborted:true,reason:{name:'TimeoutError'}});
+      throw Object.assign(new Error('body aborted'),{name:'AbortError'});
+    }};
+  });
+  await settle();
+  fail=true;
+  await state.elements.syncHistory.emit('click');
+  await state.retry();
+  await state.retry();
+  assert.match(state.elements.connectionStatus.textContent,/同步超时/);
 });
 
 test('last page progress waits for final identity before reporting success',async()=>{

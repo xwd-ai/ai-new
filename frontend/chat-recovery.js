@@ -7,7 +7,9 @@
       if (response.status === 401 || response.status === 403) {
         throw Object.assign(new Error('登录已失效，请重新登录。'), {retryable:false, authExpired:true});
       }
-      if (!response.ok) throw new Error('历史读取失败');
+      if (!response.ok) {
+        throw Object.assign(new Error('历史读取失败'), {httpStatus: response.status});
+      }
       return response.json();
     };
     const checkIdentity = async () => {
@@ -111,7 +113,16 @@
             if (!current()) return;
             if (error.authExpired) this.onAuthExpired(error.message);
             if (error.retryable === false) { this.onStatus(error.message); return; }
-            if (attempt === 2) { this.onStatus('历史同步失败，请检查网络后点击「同步历史」。'); return; }
+            if (attempt === 2) {
+              let message = '历史同步失败，请点击「同步历史」重试。';
+              if (error.name === 'TimeoutError') {
+                message = '历史同步超时，请点击「同步历史」重试。';
+              } else if (error.httpStatus >= 500 && error.httpStatus < 600) {
+                message = '历史同步失败，服务暂时异常，请稍后点击「同步历史」重试。';
+              }
+              this.onStatus(message);
+              return;
+            }
             await Promise.race([this.sleep(1000 * (attempt + 1)), cancelled]);
           }
         }

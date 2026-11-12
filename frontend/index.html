@@ -690,7 +690,13 @@
       fetchHistory: async (onProgress, signal) => {
         const timeout = AbortSignal.timeout(10000);
         const options = {headers: {'Authorization': 'Bearer ' + token}, signal: signal ? AbortSignal.any([signal, timeout]) : timeout};
-        return fetchPagedHistory(path => { options.signal.throwIfAborted(); return fetch(path, options); }, me.id, onProgress);
+        try {
+          return await fetchPagedHistory(path => { options.signal.throwIfAborted(); return fetch(path, options); }, me.id, onProgress);
+        } catch (error) {
+          // 读取响应体时，浏览器可能只报告 AbortError。
+          if (error.name === 'AbortError' && timeout.aborted) throw timeout.reason;
+          throw error;
+        }
       },
       onMessages: messages => {
         if (!messages.length) return; // 未落库时保留欢迎语或结果不确定的本地消息。
