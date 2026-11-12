@@ -92,12 +92,18 @@ class OrderErrorCode:
     NOT_FOUND = "ORDER_NOT_FOUND"
     UNKNOWN_STATUS = "ORDER_UNKNOWN_STATUS"
     INVALID_TRANSITION = "ORDER_INVALID_TRANSITION"
+    INVALID_FILTER = "ORDER_INVALID_FILTER"
 
 
 class OrderBusinessError(ValueError):
-    """订单业务异常基类，同时继承 ValueError 以兼容按入参错误捕获的调用方。"""
+    """订单业务异常基类，同时继承 ValueError 以兼容按入参错误捕获的调用方。
+
+    http_status 与工单模块的异常保持同一套约定，接口层据此直接转成响应码：
+    业务规则拒绝按 409，入参或取数问题按 400 / 404，避免所有失败都落成 500。
+    """
 
     code = OrderErrorCode.INVALID_TRANSITION
+    http_status = 409
     default_message = "订单状态操作失败"
 
     def __init__(self, message: Optional[str] = None, *, code: Optional[str] = None, details: Optional[dict] = None):
@@ -135,11 +141,24 @@ class OrderNotFoundError(OrderBusinessError):
     """订单不存在或不属于当前用户。"""
 
     code = OrderErrorCode.NOT_FOUND
+    http_status = 404
     default_message = "订单不存在"
 
     def __init__(self, order_id: Optional[str] = None, message: Optional[str] = None):
         details = {"order_id": order_id} if order_id else None
         super().__init__(message, details=details)
+
+
+class OrderQueryError(OrderBusinessError):
+    """订单查询入参不可用：未知状态、未知版本、非法分页或排序等。
+
+    与状态流转错误分开给码：这类是查询条件的问题，调用方改了入参即可重试，
+    不需要按业务规则判断能不能继续。
+    """
+
+    code = OrderErrorCode.INVALID_FILTER
+    http_status = 400
+    default_message = "订单查询条件不可用"
 
 
 def can_transition(current, target) -> bool:

@@ -14,7 +14,9 @@
    版本覆盖该功能即判为在范围内，与多订单能力并集的口径一致；
 6. 只读查询工具：把上面几条查询包装成对话链路可直接调用的工具，
    给出名字、说明与参数定义、一次调用对应的结果形态，以及供对话
-   链路装配用的注册入口与调用约定。
+   链路装配用的注册入口与调用约定；
+7. 管理侧订单视图：按状态、版本、客户与关键词筛选，分页返回并附带
+   分组计数，供客服按客户排查订单。
 
 判定函数一律保持纯函数：只读入参，不查库、不写库；需要订单数据时由
 query_order 取好后传入，便于单测、也便于对话链路按只读方式反复调用。
@@ -28,13 +30,18 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from sqlalchemy import func, or_
+
 from backend.database import SessionLocal
 from backend.models import Order, Product
 from backend.services import tools
 from backend.models.order import (
     ORDER_STATUS_LABELS,
+    VALID_STATUS_VALUES,
     OrderNotFoundError,
+    OrderQueryError,
     OrderStatus,
+    OrderStatusTransitionError,
     as_status,
     is_terminal,
     next_statuses,
@@ -1404,3 +1411,346 @@ def register_order_tool(
         make_order_tool_handler(user_id),
     )
     return registry.get(ORDER_TOOL_NAME)
+
+
+# ============================ 十一、管理侧订单视图 ============================
+
+# 默认每页条数与工单列表一致；上限取 100，订单行要逐条算服务期，
+# 一次取太多会让单次请求的组装成本明显上升。
+ADMIN_ORDER_DEFAULT_PAGE_SIZE = 20
+ADMIN_ORDER_MAX_PAGE_SIZE = 100
+
+# 关键词只匹配订单号与所属客户，与「按编号或客户找记录」的用法一致；
+# 版本、状态、时间这些条件都有专门的精确筛选项，不必挤进关键词里。
+ADMIN_ORDER_KEYWORD_MAX = 64
+
+# 客户编号长度上限与其它接口的标识长度保持一致
+ADMIN_ORDER_USER_ID_MAX = 64
+
+_LIKE_ESCAPE = "\\"
+
+
+def admin_split_values(values) -> list[str]:
+    """把单值、逗号分隔、重复传参三种写法摊平成去空白的取值列表。
+
+    与工单列表的筛选口径一致：调用方用哪种写法都不必关心，
+    空值与 all 视为不筛选，避免前端清空筛选时传一个空字符串就把结果清空。
+    """
+    if not values:
+        return []
+    if isinstance(values, str):
+        values = [values]
+
+    parts: list[str] = []
+    for raw in values:
+        for part in str(raw or "").split(","):
+            text = part.strip()
+            if text and text.lower() != "all":
+                parts.append(text)
+    return parts
+
+
+def normalize_admin_status(value) -> str:
+    """把单个状态入参收敛成标准取值，无法识别时抛查询错误。
+
+    状态值只认枚举内的三个取值：拼错的、留空的都直接拒绝，
+    静默回退成「不筛选」会让调用方以为筛过了、实际拿到的是全量。
+    """
+    status = as_status(" ".join(str(value or "").split()).lower())
+    if status is None:
+        raise OrderQueryError(
+            f"未知的订单状态：{value}",
+            details={"field": "status", "value": str(value or "")},
+        )
+    return status.value
+
+
+def normalize_admin_statuses(values) -> Optional[list[str]]:
+    """把多状态筛选入参归一化为去重后的状态列表，空列表表示不筛选。"""
+    selected: list[str] = []
+    for item in admin_split_values(values):
+        status = normalize_admin_status(item)
+        if status not in selected:
+            selected.append(status)
+    return selected or None
+
+
+def normalize_admin_tiers(values) -> Optional[list[str]]:
+    """把多版本筛选入参归一化为 basic / pro 列表，未知版本直接拒绝。
+
+    版本别名（专业版、pro、premium 等）与订单里存的取值不同，
+    这里统一按别名表收敛，查询才不必为每种写法各写一条分支。
+    """
+    selected: list[str] = []
+    for item in admin_split_values(values):
+        tier = normalize_tier(item)
+        if tier is None:
+            raise OrderQueryError(
+                f"未知的产品版本：{item}",
+                details={"field": "tier", "value": item},
+            )
+        if tier not in selected:
+            selected.append(tier)
+    return selected or None
+
+
+def normalize_admin_user_id(user_id) -> Optional[str]:
+    """归一化客户编号筛选：压缩空白，空值表示不按客户过滤，超长直接拒绝。"""
+    if user_id is None:
+        return None
+    value = " ".join(str(user_id).split())
+    if not value:
+        return None
+    if len(value) > ADMIN_ORDER_USER_ID_MAX:
+        raise OrderQueryError(
+            f"客户编号不能超过 {ADMIN_ORDER_USER_ID_MAX} 个字符",
+            details={"field": "user_id"},
+        )
+    return value
+
+
+def normalize_admin_keyword(keyword) -> Optional[str]:
+    """归一化关键词：压缩空白、限制长度，空值表示不搜索。
+
+    关键词按字面量匹配，其中的 % 与 _ 不当通配符，避免一个下划线就把
+    全部订单捞出来——管理侧的列表本来就能看全量，误命中只会让人误判。
+    """
+    if keyword is None:
+        return None
+    value = " ".join(str(keyword).split())
+    if not value:
+        return None
+    if len(value) > ADMIN_ORDER_KEYWORD_MAX:
+        raise OrderQueryError(
+            f"关键词不能超过 {ADMIN_ORDER_KEYWORD_MAX} 个字符",
+            details={"field": "keyword"},
+        )
+    return value
+
+
+def normalize_admin_pagination(page, page_size) -> tuple[int, int]:
+    """校验分页入参，返回 (页码, 每页条数)。
+
+    页码从 1 开始；每页条数超上限时拒绝而不是静默截断，
+    否则调用方按自己传的值算出的页数会与响应对不上。
+    """
+    current = 1 if page is None else int(page)
+    if current < 1:
+        raise OrderQueryError("页码必须大于等于 1", details={"field": "page"})
+    size = ADMIN_ORDER_DEFAULT_PAGE_SIZE if page_size is None else int(page_size)
+    if size < 1:
+        raise OrderQueryError("每页条数必须大于等于 1", details={"field": "page_size"})
+    if size > ADMIN_ORDER_MAX_PAGE_SIZE:
+        raise OrderQueryError(
+            f"每页条数不能超过 {ADMIN_ORDER_MAX_PAGE_SIZE}",
+            details={"field": "page_size"},
+        )
+    return current, size
+
+
+def normalize_admin_order(order) -> str:
+    """归一化排序方向：按到期时间正序或逆序，默认逆序（最近到期的在前）。"""
+    if not order:
+        return "desc"
+    value = str(order).strip().lower()
+    if value in ("asc", "ascending"):
+        return "asc"
+    if value in ("desc", "descending"):
+        return "desc"
+    raise OrderQueryError("排序方向只支持 asc 或 desc", details={"field": "order"})
+
+
+def _escape_like(value: str) -> str:
+    """转义 LIKE 通配符，让关键词里的 % _ \\ 按普通字符匹配。"""
+    return (
+        value.replace(_LIKE_ESCAPE, _LIKE_ESCAPE * 2)
+        .replace("%", _LIKE_ESCAPE + "%")
+        .replace("_", _LIKE_ESCAPE + "_")
+    )
+
+
+def admin_order_item(order: dict, now: Optional[float] = None) -> dict:
+    """把一条订单转成管理侧列表项：归属、版本、订单状态与服务期结论。
+
+    订单状态与 in_service 分开给：状态有效但服务期已过的订单在列表里很常见，
+    只按状态判断展示会让人误以为还能用，所以这里同时算一遍服务期。
+    """
+    scope = evaluate_service_scope(order, now=now)
+    period = scope["period"] or {}
+    return {
+        "order_id": str(order.get("id") or ""),
+        "user_id": order.get("user_id") or "",
+        "product_tier": order.get("product_tier") or "",
+        "tier": scope["tier"],
+        "tier_label": scope["tier_label"],
+        "status": scope["order_status"],
+        "status_label": status_label(order.get("status")),
+        "period": period,
+        "in_service": scope["in_service"],
+        "expires_text": period.get("expires_text", ""),
+        "days_remaining": period.get("days_remaining", 0),
+    }
+
+
+def _status_counts(query) -> list[dict]:
+    """按订单状态分组计数，未知取值单独成桶排在末尾。
+
+    已知状态即使一条都没有也返回 0，前端分组标签的位置才稳定；
+    历史脏数据里的未知状态照原值列出，便于发现数据问题而不是被悄悄丢掉。
+    """
+    rows = (
+        query.with_entities(Order.status, func.count(Order.id))
+        .group_by(Order.status)
+        .all()
+    )
+    counts = {value: 0 for value in VALID_STATUS_VALUES}
+    extra: dict[str, int] = {}
+    for value, count in rows:
+        key = str(value or "")
+        if key in counts:
+            counts[key] = count
+        else:
+            extra[key] = count
+
+    items = [
+        {"key": status.value, "label": ORDER_STATUS_LABELS[status], "count": counts[status.value]}
+        for status in OrderStatus
+    ]
+    items.extend(
+        {"key": key, "label": "未知状态", "count": extra[key]} for key in sorted(extra)
+    )
+    return items
+
+
+def _tier_counts(query) -> list[dict]:
+    """按产品版本分组计数，未知版本同样单独成桶。"""
+    rows = (
+        query.with_entities(Order.product_tier, func.count(Order.id))
+        .group_by(Order.product_tier)
+        .all()
+    )
+    counts: dict[str, int] = {}
+    for value, count in rows:
+        counts[str(value or "")] = count
+
+    items = [
+        {"key": tier, "label": TIER_LABELS[tier], "count": counts.get(tier, 0)}
+        for tier in (TIER_BASIC, TIER_PRO)
+    ]
+    known = {TIER_BASIC, TIER_PRO}
+    items.extend(
+        {"key": key, "label": TIER_LABELS.get(normalize_tier(key), "未知版本") or "未知版本", "count": counts[key]}
+        for key in sorted(counts)
+        if normalize_tier(key) not in known
+    )
+    return items
+
+
+def _admin_message(
+    total: int,
+    by_status: list[dict],
+    page: int,
+    pages: int,
+    conditions: list[str],
+) -> str:
+    """拼一句管理侧列表摘要：筛选条件、总数、状态分布与页码。
+
+    条件为空时说「共 N 个订单」，有筛选时说「按 X 筛选到 N 个订单」，
+    调用方一眼能看出这次结果是在什么条件下得到的。
+    """
+    scope = f"按 {' + '.join(conditions)} 筛选到" if conditions else "共"
+    message = f"{scope} {total} 个订单"
+    parts = [f"{item['label']} {item['count']} 个" for item in by_status if item["count"]]
+    if parts:
+        message += "：" + "、".join(parts)
+    if pages > 1:
+        message += f"，当前第 {page}/{pages} 页"
+    return message
+
+
+def list_all_orders(
+    statuses=None,
+    tiers=None,
+    user_id=None,
+    keyword=None,
+    page=None,
+    page_size=None,
+    order=None,
+    now: Optional[float] = None,
+) -> dict:
+    """管理侧订单列表：按状态、版本、客户与关键词筛选，分页返回并附带分组计数。
+
+    与面向用户的 list_orders 的分工：那个接口固定查一个用户的全部订单，
+    用于页面展示与判定；本函数跨客户查询，供客服按状态找待处理订单、
+    按客户查历史购买、按版本核对权益范围。
+
+    筛选条件一律下推到查询层，不在取回后于内存里过滤：
+    全量订单随客户增长而增长，先全取再筛会让翻页也变慢。
+    分组计数覆盖全部命中筛选的订单，不受分页影响，翻页时标签不会跳动。
+    """
+    status_filter = normalize_admin_statuses(statuses)
+    tier_filter = normalize_admin_tiers(tiers)
+    uid = normalize_admin_user_id(user_id)
+    search = normalize_admin_keyword(keyword)
+    current, size = normalize_admin_pagination(page, page_size)
+    direction = normalize_admin_order(order)
+
+    db = SessionLocal()
+    try:
+        query = db.query(Order)
+        if status_filter:
+            query = query.filter(Order.status.in_(status_filter))
+        if tier_filter:
+            query = query.filter(Order.product_tier.in_(tier_filter))
+        if uid:
+            query = query.filter(Order.user_id == uid)
+        if search:
+            pattern = f"%{_escape_like(search)}%"
+            query = query.filter(
+                or_(
+                    Order.id.ilike(pattern, escape=_LIKE_ESCAPE),
+                    Order.user_id.ilike(pattern, escape=_LIKE_ESCAPE),
+                )
+            )
+
+        total = query.count()
+        column = Order.expires_at.asc() if direction == "asc" else Order.expires_at.desc()
+        rows = (
+            query.order_by(column, Order.id.asc())
+            .offset((current - 1) * size)
+            .limit(size)
+            .all()
+        )
+        items = [admin_order_item(row.to_dict(), now) for row in rows]
+        by_status = _status_counts(query)
+        by_tier = _tier_counts(query)
+    finally:
+        db.close()
+
+    pages = (total + size - 1) // size
+    conditions: list[str] = []
+    if status_filter:
+        conditions.append(f"状态 {'/'.join(status_label(value) for value in status_filter)}")
+    if tier_filter:
+        conditions.append(f"版本 {'/'.join(TIER_LABELS[value] for value in tier_filter)}")
+    if uid:
+        conditions.append(f"客户 {uid}")
+    if search:
+        conditions.append(f"关键词「{search}」")
+
+    return {
+        "items": items,
+        "total": total,
+        "page": current,
+        "page_size": size,
+        "pages": pages,
+        "has_more": current * size < total,
+        "order": direction,
+        "statuses": status_filter or [],
+        "tiers": tier_filter or [],
+        "user_id": uid or "",
+        "keyword": search or "",
+        "by_status": by_status,
+        "by_tier": by_tier,
+        "message": _admin_message(total, by_status, current, pages, conditions),
+    }

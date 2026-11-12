@@ -23,6 +23,7 @@ from fastapi.routing import APIRoute
 from backend.api.auth import current_user, require_admin, require_login
 from backend.database import SessionLocal
 from backend.models import TriedStep
+from backend.models.order import OrderBusinessError
 from backend.models.ticket import (
     TicketAuthRequiredError,
     TicketBusinessError,
@@ -32,6 +33,7 @@ from backend.models.ticket import (
 )
 from backend.schemas import CreateTicketRequest, ReplyRequest
 from backend.schemas.order import (
+    AdminOrderListView,
     ExpireResultResponse,
     FeatureCheckResponse,
     OrderListView,
@@ -72,7 +74,8 @@ class TicketErrorRoute(APIRoute):
     {"error": 文案, "error_code": 错误码, "error_detail": 补充上下文（可选）}。
     新增接口不必再各写一遍 try/except，错误结构也不会随接口各自漂移。
     权限依赖抛出的认证异常也在这里收口，路由签名只声明「需要什么身份」，
-    不必为了对齐错误码在每个接口里再包一层转换。
+    不必为了对齐错误码在每个接口里再包一层转换。订单接口挂在本路由下，
+    订单业务异常沿用同一套响应结构，避免同一模块里出现两种错误契约。
     """
 
     def get_route_handler(self):
@@ -81,7 +84,7 @@ class TicketErrorRoute(APIRoute):
         async def dispatch(request: Request):
             try:
                 return await handler(request)
-            except TicketBusinessError as exc:
+            except (TicketBusinessError, OrderBusinessError) as exc:
                 return JSONResponse(status_code=exc.http_status, content=exc.to_payload())
             except auth.AuthError as exc:
                 translated = _as_ticket_error(exc)
@@ -363,6 +366,47 @@ def order_renewal(
     提前催一个用都用不上的服务只会让人以为系统算错了时间。
     """
     return orders.list_renewal_hints(user["id"], window_days=window_days)
+
+
+@tickets_router.get("/order/admin", response_model=AdminOrderListView)
+def admin_orders(
+    status: list[str] | None = Query(
+        default=None,
+        description="按订单状态筛选，支持单状态、逗号分隔多状态与重复传参，传 all 不筛选",
+    ),
+    tier: list[str] | None = Query(
+        default=None,
+        description="按产品版本筛选，支持 basic / pro 及中文别名，可多选",
+    ),
+    user_id: str | None = Query(default=None, description="按客户编号精确筛选"),
+    keyword: str | None = Query(default=None, description="关键词，模糊匹配订单号/客户编号"),
+    page: int | None = Query(default=None, ge=1, description="页码，从 1 开始"),
+    page_size: int | None = Query(default=None, ge=1, le=100, description="每页条数，默认 20，上限 100"),
+    order: str | None = Query(default=None, description="按到期时间排序，asc 正序 / desc 逆序（默认）"),
+    user: dict = Depends(require_admin),
+):
+    """管理侧订单列表：跨客户查询订单，支持按状态、版本、客户与关键词筛选并分页。
+
+    与 /order/list 的分工：那个接口只返回当前登录用户自己的订单，供页面展示；
+    本接口面向客服，用来「按状态找到期订单」「按客户查历史购买」
+    「按版本核对权益范围」，因此要求管理员身份。
+
+    status / tier 都支持单值、逗号分隔与重复传参三种写法，不传或传 all 表示不筛选；
+    未知状态或未知版本直接返回 400，不静默给空列表——空列表说明不了是「真没有」
+    还是「条件写错了」。keyword（订单号或客户编号）与各筛选项之间是「与」关系。
+    响应附带 by_status / by_tier 分组计数，覆盖全部命中筛选的订单而不只是当前页，
+    翻页时分组标签不会跟着变。排序按到期时间，订单号作为次序兜底，
+    保证同一到期时间的记录翻页时不重不漏。
+    """
+    return orders.list_all_orders(
+        statuses=status,
+        tiers=tier,
+        user_id=user_id,
+        keyword=keyword,
+        page=page,
+        page_size=page_size,
+        order=order,
+    )
 
 
 @tickets_router.post("/order/expire", response_model=ExpireResultResponse)

@@ -210,3 +210,62 @@ class FeatureCheckResponse(BaseModel):
     reason: str = ""
     message: str = ""
     orders: list[FeatureScopeItemResponse] = Field(default_factory=list)
+
+
+class AdminOrderItemResponse(BaseModel):
+    """管理侧订单列表里的一条记录：归属、版本、状态与服务期。
+
+    与 OrderSummaryResponse 的区别是带上 user_id——管理侧要按客户排查，
+    只给订单号无法回答「这个订单是谁的」。status_label 是订单状态中文名，
+    in_service 才是叠加服务期后的「现在能不能用」，两者分开给，
+    避免把「状态有效但已到期」的订单读成可用。
+    """
+
+    order_id: str
+    user_id: str = ""
+    product_tier: str = ""
+    tier: Optional[str] = Field(default=None, description="归一后的版本：basic / pro")
+    tier_label: str = "未知版本"
+    status: str = ""
+    status_label: str = "未知状态"
+    period: Optional[ServicePeriodResponse] = None
+    in_service: bool = False
+    expires_text: str = ""
+    days_remaining: int = 0
+
+
+class AdminOrderCountResponse(BaseModel):
+    """筛选项下的一组计数：状态或版本的取值、中文名与条数。
+
+    计数覆盖全部命中筛选的订单，不受分页影响，前端据此展示分组标签；
+    key 为原始取值（含未知兜底桶），label 可直接展示。
+    """
+
+    key: str
+    label: str = ""
+    count: int = 0
+
+
+class AdminOrderListView(BaseModel):
+    """管理侧订单列表：分页结果、生效的筛选条件与分组计数。
+
+    筛选条件在响应里原样回显，调用方不必自己记录「这次查的是哪些条件」；
+    by_status / by_tier 是全量计数，items 只是当前页，两者口径不同，
+    前端翻页时分组标签不会跟着页码跳动。
+    """
+
+    items: list[AdminOrderItemResponse] = Field(default_factory=list)
+    total: int = 0
+    page: int = 1
+    page_size: int = 0
+    pages: int = 0
+    has_more: bool = False
+    order: str = "desc"
+    statuses: list[str] = Field(default_factory=list, description="生效的状态筛选")
+    tiers: list[str] = Field(default_factory=list, description="生效的版本筛选")
+    user_id: str = ""
+    keyword: str = ""
+    by_status: list[AdminOrderCountResponse] = Field(default_factory=list)
+    by_tier: list[AdminOrderCountResponse] = Field(default_factory=list)
+    message: str = ""
+
