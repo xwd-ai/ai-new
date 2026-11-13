@@ -1,26 +1,29 @@
 """订单与服务范围判定。
 
-三层递进，后一层复用前一层的结论：
+文件按「纯计算」到「读写数据库」再到「对外装配」的顺序分层，上层只依赖下层：
 
-1. 版本能力矩阵：把「买的是哪个版本」翻译成一组能力编码。编码用「域.动作」
-   的形式，改中文文案不影响判定，日志与落库也不会因为换个说法就对不上；
-2. 服务期：把起止时间戳收敛成有效 / 未开始 / 已过期三种状态，附带总天数、
-   剩余天数与已用比例，供话术与续费提示直接使用；
-3. 综合判定：版本 + 服务期 + 具体功能，给出「能否按已购服务处理」的结论，
-   以及一条可直接展示给用户的原因；
-4. 过期与续费：把服务期换算成续费提醒状态，并支持把服务期已结束、状态仍是
-   有效的订单归档为过期；
-5. 功能服务范围判定：跨全部订单回答「某个功能能不能用」——任一在期订单的
-   版本覆盖该功能即判为在范围内，与多订单能力并集的口径一致；
-6. 只读查询工具：把上面几条查询包装成对话链路可直接调用的工具，
-   给出名字、说明与参数定义、一次调用对应的结果形态，以及供对话
-   链路装配用的注册入口与调用约定；
-7. 管理侧订单视图：按状态、版本、客户与关键词筛选，分页返回并附带
-   分组计数，供客服按客户排查订单；单条订单的详情把服务期、能力、
-   状态流转与续费提示一次给全。
+零、公共辅助：文本归一、会话生命周期、时间口径——各层共用的少量原语；
+一、版本与能力映射：把「买的是哪个版本」翻译成一组能力编码。编码用「域.动作」
+    的形式，改中文文案不影响判定，日志与落库也不会因为换个说法就对不上；
+二、服务期判定：把起止时间戳收敛成有效 / 未开始 / 已过期三种状态，附带总天数、
+    剩余天数与已用比例，供话术与续费提示直接使用；
+三、服务范围综合判定：版本 + 服务期 + 具体功能，给出「能否按已购服务处理」的
+    结论，以及一条可直接展示给用户的原因；
+四、订单取数：按用户取全部订单、按订单号取单条、选主订单，以及产品行的读取；
+五、查询结论：面向用户的三个入口，query_order 供页面展示、query_orders 给多订单
+    视图、describe_order 给出完整判定过程；
+六、订单状态流转：状态机校验 + 写库，供人工改状态与定时归档共用；
+七、续费提示：把服务期换算成续费提醒状态、紧迫级别与建议动作；
+八、过期归档：把服务期已结束、状态仍是有效的订单批量收敛为过期；
+九、功能服务范围判定：跨全部订单回答「某个功能能不能用」——任一在期订单的
+    版本覆盖该功能即判为在范围内，与多订单能力并集的口径一致；
+十、管理侧订单视图：按状态、版本、客户与关键词筛选，分页返回并附带分组计数；
+    单条订单的详情把服务期、能力、状态流转与续费提示一次给全；
+十一、只读查询工具：把上面几条查询包装成对话链路可直接调用的工具；
+十二、工具注册与调用约定：把工具装进注册表，身份在执行时注入。
 
-判定函数一律保持纯函数：只读入参，不查库、不写库；需要订单数据时由
-query_order 取好后传入，便于单测、也便于对话链路按只读方式反复调用。
+一至三、九的判定函数一律保持纯函数：只读入参，不查库、不写库；需要订单数据时
+由取数层取好后传入，便于单测、也便于对话链路按只读方式反复调用。
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from __future__ import annotations
 import copy
 import math
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -53,6 +57,58 @@ from backend.models.order import (
 # 产品与订单持久化到 SQLite 数据库
 # 订单是「服务范围判定」的依据：确认用户购买的是不是专业版、是否在服务期内
 # 预置产品与订单逻辑收敛到 backend.seed 模块
+
+
+# ============================ 零、公共辅助 ============================
+
+DAY_SECONDS = 86400.0
+
+
+def _compact(value) -> str:
+    """把任意入参压成单行文本，None 收敛为空串。
+
+    入参里的换行与连续空格会被折成一个空格：从对话或表单里带过来的文本
+    常常夹着多余空白，不归一就会出现「同一个订单号两种写法」。
+    """
+    if value is None:
+        return ""
+    return " ".join(str(value).split())
+
+
+@contextmanager
+def _session():
+    """提供一次会话，退出时必定关闭。
+
+    服务层的读写都是一次性短事务，不需要跨函数共享会话；
+    统一在这里管关闭，取数函数里就只剩查询本身。
+    """
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def _as_timestamp(value) -> Optional[float]:
+    """把时间入参收敛成浮点时间戳，非数值或布尔值返回 None。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _current_timestamp(now=None) -> float:
+    """当前时间戳：入参合法就用它，否则取系统时间。
+
+    判定函数允许外部注入时间以便构造边界场景，注入值不可用时回落到系统时间，
+    免得一次参数写错就让整条判定路径算出 None。
+    """
+    current = time.time() if now is None else _as_timestamp(now)
+    return time.time() if current is None else current
+
+
+def _format_day(timestamp: float) -> str:
+    """时间戳转本地日期，仅用于展示。"""
+    return time.strftime("%Y-%m-%d", time.localtime(timestamp))
 
 
 # ============================ 一、版本与能力映射 ============================
@@ -151,7 +207,7 @@ def resolve_feature(text) -> Optional[Feature]:
     而不是退化成基础导出。只做单向包含（能力名出现在描述里），
     否则一句「导出」会被更长的「批量导出」抢走，基础版用户反而被判为超范围。
     """
-    value = " ".join(str(text or "").split()).lower()
+    value = _compact(text).lower()
     if not value:
         return None
 
@@ -199,6 +255,24 @@ def has_capability(tier, feature) -> bool:
     return target in TIER_FEATURES[key]
 
 
+def _product_view(db, tier) -> dict:
+    """某版本的展示名与能力列表，供对外响应装配。
+
+    能力优先取产品表中的配置（运营可改），产品行缺失时退回内置能力矩阵，
+    这样即使产品表为空，判定也不会退化成「没有任何功能」。
+    """
+    key = normalize_tier(tier) or tier
+    product = (
+        db.query(Product).filter(Product.id == key).first() if key else None
+    )
+    if product:
+        data = product.to_dict()
+        return {"name": data["name"], "features": list(data["features"])}
+
+    capabilities = tier_capabilities(tier)
+    return {"name": capabilities["label"], "features": list(capabilities["features"])}
+
+
 # ============================ 二、服务期判定 ============================
 
 SERVICE_ACTIVE = "active"
@@ -213,22 +287,8 @@ SERVICE_STATUS_LABELS = {
     SERVICE_UNKNOWN: "无法判定",
 }
 
-DAY_SECONDS = 86400.0
-
 # 订单状态只有 active 视为有效；退订、退款等由业务侧写入，一律不提供服务
 ORDER_STATUS_ACTIVE = "active"
-
-
-def _as_timestamp(value) -> Optional[float]:
-    """把时间入参收敛成浮点时间戳，非数值或布尔值返回 None。"""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return float(value)
-
-
-def _format_day(timestamp: float) -> str:
-    """时间戳转本地日期，仅用于展示。"""
-    return time.strftime("%Y-%m-%d", time.localtime(timestamp))
 
 
 def evaluate_service_period(started_at, expires_at, now: Optional[float] = None) -> dict:
@@ -243,7 +303,7 @@ def evaluate_service_period(started_at, expires_at, now: Optional[float] = None)
     """
     start = _as_timestamp(started_at)
     end = _as_timestamp(expires_at)
-    current = time.time() if now is None else _as_timestamp(now)
+    current = _as_timestamp(now) if now is not None else time.time()
 
     if start is None or end is None or current is None or end <= start:
         return {
@@ -352,7 +412,7 @@ def evaluate_service_scope(
 
     capabilities = tier_capabilities(order.get("product_tier"))
     period = evaluate_service_period(order.get("started_at"), order.get("expires_at"), now)
-    order_status = str(order.get("status") or "").strip().lower()
+    order_status = _compact(order.get("status")).lower()
     # 只有明确的 active 才放行：状态为空或取值为历史脏数据时，订单究竟能不能用
     # 无法确认，按「不是有效状态」处理。空值当成不限制，等于让一条状态缺失的
     # 订单直接拿到全部权益。
@@ -375,7 +435,7 @@ def evaluate_service_scope(
 
     # 功能入参统一压空白后保存原文：解析失败时也要把用户问的内容回显出来，
     # 否则「无法识别」这条结论看不出是针对哪句话给的
-    query = " ".join(str(feature or "").split())
+    query = _compact(feature)
     target = resolve_feature(query) if query else None
     if query:
         included = (
@@ -435,12 +495,7 @@ def _scope_reason_text(code: str, scope: dict, target: Optional[Feature]) -> str
     return text
 
 
-# ============================ 四、订单取数与挑选 ============================
-
-
-def _get_product(db, tier: str) -> Optional[dict]:
-    product = db.query(Product).filter(Product.id == tier).first()
-    return product.to_dict() if product else None
+# ============================ 四、订单取数 ============================
 
 
 def list_orders(user_id: str) -> list[dict]:
@@ -449,8 +504,7 @@ def list_orders(user_id: str) -> list[dict]:
     一个用户可以买多个产品，也可以续费多次，订单与用户因此是一对多关系。
     把确定的口径放在取数这一层，上层挑选与展示都不必再依赖数据库返回顺序。
     """
-    db = SessionLocal()
-    try:
+    with _session() as db:
         rows = (
             db.query(Order)
             .filter(Order.user_id == user_id)
@@ -458,8 +512,21 @@ def list_orders(user_id: str) -> list[dict]:
             .all()
         )
         return [row.to_dict() for row in rows]
-    finally:
-        db.close()
+
+
+def get_order_by_id(order_id) -> Optional[dict]:
+    """按订单号取一条订单，不做归属校验。
+
+    管理侧详情用：客服要能按订单号查任意客户的订单，归属限制由接口层的
+    管理员权限依赖负责，取数函数只回答「查不查得到」。入参压缩空白后
+    精确匹配，查不到返回 None，由调用方按「订单不存在」处理。
+    """
+    value = _compact(order_id)
+    if not value:
+        return None
+    with _session() as db:
+        row = db.query(Order).filter(Order.id == value).first()
+        return row.to_dict() if row else None
 
 
 def _order_rank(order: dict, now: Optional[float] = None) -> tuple:
@@ -527,15 +594,40 @@ def list_order_scopes(user_id: str, now: Optional[float] = None) -> list[dict]:
     return [_order_scope(order, now) for order in list_orders(user_id)]
 
 
+# ============================ 五、查询结论 ============================
+
+
+def _scope_message(scope: dict) -> str:
+    """把判定结论拼成一句可展示的中文说明。
+
+    判定原因已经带了版本名与时间，正常情况下直接沿用；
+    只有「在服务范围内」需要额外补上到期时间与剩余天数——
+    这是用户最关心的信息，也是后续续费提示的落点。
+    """
+    if not scope["has_order"]:
+        return scope["reason"]
+
+    if scope["reason_code"] != "in_service":
+        return scope["reason"]
+
+    period = scope["period"] or {}
+    target = scope["feature"]
+    if target and target["included"]:
+        head = f"{scope['tier_label']}包含「{target['name']}」"
+    else:
+        head = f"{scope['tier_label']}服务中"
+    return (
+        f"{head}，服务期至 {period['expires_text']}"
+        f"（剩余 {period['days_remaining']} 天）"
+    )
+
+
 def query_order(user_id: str) -> dict:
     """查询某用户的订单与服务范围，返回给 Agent 作为决策依据。
 
     返回字段保持既有契约不变，只把 in_service 的判断交给
     evaluate_service_scope：服务期的起止时间与订单状态一起看，
     服务期尚未开始的订单不再被当成在服务中。
-
-    版本能力优先取产品表中的配置（运营可改），产品行缺失时退回内置能力矩阵，
-    这样即使产品表为空，判定也不会退化成「没有任何功能」。
     """
     order = get_order(user_id)
     if not order:
@@ -544,20 +636,17 @@ def query_order(user_id: str) -> dict:
             "message": "未查询到该用户的订单记录",
         }
 
-    db = SessionLocal()
-    try:
-        product = _get_product(db, normalize_tier(order["product_tier"]) or order["product_tier"])
-    finally:
-        db.close()
-
     scope = evaluate_service_scope(order)
+    with _session() as db:
+        view = _product_view(db, order["product_tier"])
+
     return {
         "has_order": True,
         "order_id": order["id"],
         "product_tier": order["product_tier"],
-        "product_name": product["name"] if product else scope["tier_label"],
+        "product_name": view["name"],
         "in_service": scope["in_service"],
-        "features": product["features"] if product else scope["features"],
+        "features": view["features"],
         "expires_at": order["expires_at"],
     }
 
@@ -586,21 +675,12 @@ def query_orders(user_id: str, now: Optional[float] = None) -> dict:
     active = [item for item in items if item["in_service"]]
 
     features: list[str] = []
-    db = SessionLocal()
-    try:
+    with _session() as db:
         for item in active:
-            tier = item["tier"] or item["product_tier"]
-            product = _get_product(db, tier)
-            names = (
-                product["features"]
-                if product
-                else tier_capabilities(item["product_tier"])["features"]
-            )
-            for name in names:
+            view = _product_view(db, item["tier"] or item["product_tier"])
+            for name in view["features"]:
                 if name not in features:
                     features.append(name)
-    finally:
-        db.close()
 
     if not active:
         message = f"共 {len(orders)} 个订单，当前均不在服务期内"
@@ -618,34 +698,6 @@ def query_orders(user_id: str, now: Optional[float] = None) -> dict:
         "features": features,
         "message": message,
     }
-
-
-# ============================ 五、查询结论 ============================
-
-
-def _scope_message(scope: dict) -> str:
-    """把判定结论拼成一句可展示的中文说明。
-
-    判定原因已经带了版本名与时间，正常情况下直接沿用；
-    只有「在服务范围内」需要额外补上到期时间与剩余天数——
-    这是用户最关心的信息，也是后续续费提示的落点。
-    """
-    if not scope["has_order"]:
-        return scope["reason"]
-
-    if scope["reason_code"] != "in_service":
-        return scope["reason"]
-
-    period = scope["period"] or {}
-    target = scope["feature"]
-    if target and target["included"]:
-        head = f"{scope['tier_label']}包含「{target['name']}」"
-    else:
-        head = f"{scope['tier_label']}服务中"
-    return (
-        f"{head}，服务期至 {period['expires_text']}"
-        f"（剩余 {period['days_remaining']} 天）"
-    )
 
 
 def describe_order(
@@ -754,12 +806,11 @@ def change_order_status(
     reason 与 operator 只回显给调用方用于日志与审计，不落订单表：
     订单表记录的是当前状态，变更过程由业务侧的操作日志承载。
     """
-    key = " ".join(str(order_id or "").split())
+    key = _compact(order_id)
     if not key:
         raise OrderNotFoundError(order_id="", message="订单号不能为空")
 
-    db = SessionLocal()
-    try:
+    with _session() as db:
         query = db.query(Order).filter(Order.id == key)
         if user_id is not None:
             query = query.filter(Order.user_id == user_id)
@@ -770,7 +821,7 @@ def change_order_status(
         from_status = order.status
         to_status = validate_transition(from_status, target)
         unchanged = to_status.value == as_status(from_status).value
-        changed_at = time.time() if now is None else _as_timestamp(now)
+        changed_at = _current_timestamp(now)
 
         if not unchanged:
             order.status = to_status.value
@@ -785,17 +836,15 @@ def change_order_status(
             "to_status": to_status.value,
             "status_label": ORDER_STATUS_LABELS[to_status],
             "unchanged": unchanged,
-            "operator": " ".join(str(operator or "").split()) or "system",
-            "reason": " ".join(str(reason or "").split()),
+            "operator": _compact(operator) or "system",
+            "reason": _compact(reason),
             "changed_at": changed_at,
             "allowed_statuses": next_statuses(to_status),
             "message": _change_message(from_status, to_status, unchanged),
         }
-    finally:
-        db.close()
 
 
-# ============================ 七、过期归档与续费提示 ============================
+# ============================ 七、续费提示 ============================
 
 # 续费提醒状态。active 与 none 都不提醒，区别在于「有订单且还早」与「压根没有订单」；
 # due 与 upcoming 提醒，前者需要立即续费，后者是提前告知。
@@ -953,8 +1002,7 @@ def evaluate_renewal(
         )
 
     if period["expired"]:
-        current = time.time() if now is None else _as_timestamp(now)
-        current = time.time() if current is None else current
+        current = _current_timestamp(now)
         hint["days_overdue"] = max(0, int((current - period["expires_at"]) // DAY_SECONDS))
         return settle(
             RENEWAL_DUE,
@@ -1027,6 +1075,9 @@ def list_renewal_hints(
     }
 
 
+# ============================ 八、过期归档 ============================
+
+
 def expire_overdue_orders(
     user_id: Optional[str] = None,
     now: Optional[float] = None,
@@ -1045,12 +1096,9 @@ def expire_overdue_orders(
     续费是写入新订单或延长服务期，两者不能混在一次操作里。
     """
     size = max(1, min(int(limit or 100), 500))
-    current = time.time() if now is None else _as_timestamp(now)
-    if current is None:
-        current = time.time()
+    current = _current_timestamp(now)
 
-    db = SessionLocal()
-    try:
+    with _session() as db:
         query = db.query(Order).filter(
             Order.status == ORDER_STATUS_ACTIVE,
             Order.expires_at <= current,
@@ -1063,8 +1111,6 @@ def expire_overdue_orders(
             .limit(size + 1)
             .all()
         ]
-    finally:
-        db.close()
 
     batch = candidates[:size]
     archived: list[str] = []
@@ -1106,7 +1152,7 @@ def expire_overdue_orders(
     }
 
 
-# ============================ 八、功能服务范围判定 ============================
+# ============================ 九、功能服务范围判定 ============================
 
 FEATURE_SCOPE_REASONS = {
     "feature_required": "请提供要确认的功能名称",
@@ -1141,7 +1187,7 @@ def evaluate_feature_scope(
     的原因，版本不可识别也落在这里）→ 没有在期订单（取主订单的服务态原因）。
     逐单明细照常返回，个别订单的到期或退订情况由调用方按明细展示。
     """
-    query = " ".join(str(feature or "").split())
+    query = _compact(feature)
     rows = [
         (order, evaluate_service_scope(order, query or None, now))
         for order in (orders or [])
@@ -1229,192 +1275,7 @@ def describe_feature_scope(
     return evaluate_feature_scope(list_orders(user_id), feature, now)
 
 
-# ============================ 九、只读查询工具 ============================
-
-# 工具名与工具白名单里的名字必须一致：白名单是并发判定的唯一依据，
-# 名字对不上就会被当成有副作用的工具，只读查询白白退化成串行执行。
-ORDER_TOOL_NAME = "query_order"
-
-ORDER_TOOL_DESCRIPTION = (
-    "查询当前登录用户的订单信息：购买的版本、服务期状态与可用功能。"
-    "需要确认某个功能能不能使用时，把功能名称放在 feature 里。"
-)
-
-# 参数只留两个可选项。用户身份由调用方从登录态注入，刻意不做成参数：
-# 一旦出现在参数里，模型就能自己指定要查谁的订单。
-ORDER_TOOL_PARAMETERS = {
-    "type": "object",
-    "properties": {
-        "order_id": {
-            "type": "string",
-            "description": "订单号，留空则查询主订单（当前在用的那一条）",
-        },
-        "feature": {
-            "type": "string",
-            "description": "要确认的功能名称，留空则只判断整体服务状态",
-        },
-    },
-    "required": [],
-    "additionalProperties": False,
-}
-
-# 入参长度上限与接口层 schema 保持一致，超长按无效参数直接拒绝，
-# 不带着明显不合法的输入去数据库里白跑一次。
-ORDER_TOOL_ID_MAX = 64
-ORDER_TOOL_FEATURE_MAX = 50
-
-# 匿名身份没有可查的订单，按未登录处理
-ORDER_TOOL_ANONYMOUS = "anonymous"
-
-ORDER_TOOL_ERROR_NO_USER = "order_tool_no_user"
-ORDER_TOOL_ERROR_INVALID = "order_tool_invalid_parameter"
-
-# 定义与白名单的一致性在导入时算好，调用方不必自己比对
-ORDER_TOOL_CONCURRENT = tools.can_run_concurrently(ORDER_TOOL_NAME)
-
-
-def _tool_text(value, limit: int) -> Optional[str]:
-    """把工具入参压成单行文本，超过长度上限返回 None。
-
-    空白归一与接口层同口径：模型偶尔会把用户原话带上换行或多余空格，
-    这类输入不该被当成另一个查询条件。
-    """
-    text = " ".join(str(value or "").split())
-    return text if len(text) <= limit else None
-
-
-def order_tool_definition() -> dict:
-    """订单查询工具的对外定义，供工具注册与提示词拼装共用。
-
-    只描述「叫什么、干什么、收什么参数」，不绑定具体用户：
-    用户身份在执行时才注入，定义本身可以跨会话复用，也就不必为每次对话
-    重新生成一份描述。返回值是副本，调用方改它不会污染模块常量。
-    """
-    return {
-        "name": ORDER_TOOL_NAME,
-        "description": ORDER_TOOL_DESCRIPTION,
-        "parameters": copy.deepcopy(ORDER_TOOL_PARAMETERS),
-        "read_only": True,
-        "concurrent": ORDER_TOOL_CONCURRENT,
-    }
-
-
-def run_order_tool(user_id: str, **params) -> tools.ToolResult:
-    """执行一次订单查询，把结论包装成工具结果。
-
-    三种查询形态按入参自动分派，返回的 mode 说明走了哪一条：
-
-    - 给了功能名：跨全部订单判断该功能是否在服务范围内，
-      多产品用户不会被主订单的版本误判；
-    - 给了订单号：只判定那一条订单，别人的订单号按查不到处理；
-    - 都没给：返回多订单视图，主订单与在期能力并集都在里面。
-
-    失败只用于参数不可用（未登录、超长入参）。查不到订单不算失败，
-    而是有效的观察结果——模型需要知道「这个人没有订单」才能继续回答，
-    把它当异常抛回去只会让对话在一句无关工具错误上停住。
-    未识别的参数一律忽略，工具协议演进时旧实现不会因为多传字段就报错。
-    """
-    uid = _tool_text(user_id, ORDER_TOOL_ID_MAX)
-    if not uid or uid.lower() == ORDER_TOOL_ANONYMOUS:
-        return tools.ToolResult(
-            success=False,
-            error="未登录，无法查询订单",
-            error_code=ORDER_TOOL_ERROR_NO_USER,
-        )
-
-    feature = _tool_text(params.get("feature"), ORDER_TOOL_FEATURE_MAX)
-    order_id = _tool_text(params.get("order_id"), ORDER_TOOL_ID_MAX)
-    if feature is None:
-        return tools.ToolResult(
-            success=False,
-            error=f"功能名称不能超过 {ORDER_TOOL_FEATURE_MAX} 个字符",
-            error_code=ORDER_TOOL_ERROR_INVALID,
-        )
-    if order_id is None:
-        return tools.ToolResult(
-            success=False,
-            error=f"订单号不能超过 {ORDER_TOOL_ID_MAX} 个字符",
-            error_code=ORDER_TOOL_ERROR_INVALID,
-        )
-
-    if feature:
-        result = describe_feature_scope(uid, feature)
-        mode = "feature"
-    elif order_id:
-        result = describe_order(uid, order_id=order_id)
-        mode = "order"
-    else:
-        result = query_orders(uid)
-        mode = "list"
-
-    return tools.ToolResult(
-        success=True,
-        output=str(result.get("message") or ""),
-        data={
-            "tool": ORDER_TOOL_NAME,
-            "mode": mode,
-            "order": result,
-        },
-    )
-
-
-# ============================ 十、工具注册与调用约定 ============================
-
-# 执行参数里出现这些键时直接丢弃：身份只能来自注册时绑定的登录态。
-# 模型输出夹带的身份键既不该生效，也不该让处理器撞上参数重复而报错。
-ORDER_TOOL_IDENTITY_KEYS = frozenset({"user_id", "user"})
-
-
-def make_order_tool_handler(user_id: str) -> Callable[..., tools.ToolResult]:
-    """构造绑定登录身份的订单工具处理函数。
-
-    身份在构造时定死，处理器只收工具自己的查询参数（order_id / feature）。
-    对话链路把它注册进工具注册表后，执行环节传进来的身份键会被丢弃——
-    模型没有指定查谁的订单的通道。
-    """
-
-    def _handle(**params) -> tools.ToolResult:
-        arguments = {
-            key: value
-            for key, value in params.items()
-            if key not in ORDER_TOOL_IDENTITY_KEYS
-        }
-        return run_order_tool(user_id, **arguments)
-
-    return _handle
-
-
-def register_order_tool(
-    registry: tools.ToolRegistry, user_id: str
-) -> Optional[tools.ToolSpec]:
-    """把订单查询工具注册进工具注册表，返回注册后的工具定义。
-
-    对话链路装配工具时的统一入口：不再各自手写 query_order 处理器，
-    调用本函数一次即可对齐名字、说明与执行体。调用约定：
-
-    - 注册时机：每轮对话构建 ToolRegistry 时调用一次，登录身份此刻
-      定死；匿名会话也可以注册，执行时返回「未登录」的失败结果；
-    - 执行方式：registry.execute(ORDER_TOOL_NAME, **arguments)，arguments
-      按 ORDER_TOOL_PARAMETERS 收 order_id / feature，未识别字段忽略，
-      user_id / user 这类身份键直接丢弃；
-    - 结果形态：ToolResult.success 表示查询是否可执行，output 是单行
-      摘要，data 带 tool / mode / order 三段，可直接序列化进事件流；
-    - 定义复用：提示词拼装用 order_tool_definition()，与注册项同名同描述；
-    - 并发：工具名在只读白名单内，plan_execution 会把它与其它只读工具
-      编进同一批并发执行。
-
-    注册表同名先注册者胜：若表里已有 query_order（比如对话侧的旧实现），
-    本调用不会覆盖它，接入时应先撤掉旧注册再调用本函数。
-    """
-    registry.register(
-        ORDER_TOOL_NAME,
-        ORDER_TOOL_DESCRIPTION,
-        make_order_tool_handler(user_id),
-    )
-    return registry.get(ORDER_TOOL_NAME)
-
-
-# ============================ 十一、管理侧订单视图 ============================
+# ============================ 十、管理侧订单视图 ============================
 
 # 默认每页条数与工单列表一致；上限取 100，订单行要逐条算服务期，
 # 一次取太多会让单次请求的组装成本明显上升。
@@ -1444,7 +1305,7 @@ def admin_split_values(values) -> list[str]:
 
     parts: list[str] = []
     for raw in values:
-        for part in str(raw or "").split(","):
+        for part in _compact(raw).split(","):
             text = part.strip()
             if text and text.lower() != "all":
                 parts.append(text)
@@ -1457,7 +1318,7 @@ def normalize_admin_status(value) -> str:
     状态值只认枚举内的三个取值：拼错的、留空的都直接拒绝，
     静默回退成「不筛选」会让调用方以为筛过了、实际拿到的是全量。
     """
-    status = as_status(" ".join(str(value or "").split()).lower())
+    status = as_status(_compact(value).lower())
     if status is None:
         raise OrderQueryError(
             f"未知的订单状态：{value}",
@@ -1499,7 +1360,7 @@ def normalize_admin_user_id(user_id) -> Optional[str]:
     """归一化客户编号筛选：压缩空白，空值表示不按客户过滤，超长直接拒绝。"""
     if user_id is None:
         return None
-    value = " ".join(str(user_id).split())
+    value = _compact(user_id)
     if not value:
         return None
     if len(value) > ADMIN_ORDER_USER_ID_MAX:
@@ -1518,7 +1379,7 @@ def normalize_admin_keyword(keyword) -> Optional[str]:
     """
     if keyword is None:
         return None
-    value = " ".join(str(keyword).split())
+    value = _compact(keyword)
     if not value:
         return None
     if len(value) > ADMIN_ORDER_KEYWORD_MAX:
@@ -1696,8 +1557,7 @@ def list_all_orders(
     current, size = normalize_admin_pagination(page, page_size)
     direction = normalize_admin_order(order)
 
-    db = SessionLocal()
-    try:
+    with _session() as db:
         query = db.query(Order)
         if status_filter:
             query = query.filter(Order.status.in_(status_filter))
@@ -1725,8 +1585,6 @@ def list_all_orders(
         items = [admin_order_item(row.to_dict(), now) for row in rows]
         by_status = _status_counts(query)
         by_tier = _tier_counts(query)
-    finally:
-        db.close()
 
     pages = (total + size - 1) // size
     conditions: list[str] = []
@@ -1755,24 +1613,6 @@ def list_all_orders(
         "by_tier": by_tier,
         "message": _admin_message(total, by_status, current, pages, conditions),
     }
-
-
-def get_order_by_id(order_id) -> Optional[dict]:
-    """按订单号取一条订单，不做归属校验。
-
-    管理侧详情用：客服要能按订单号查任意客户的订单，归属限制由接口层的
-    管理员权限依赖负责，取数函数只回答「查不查得到」。入参压缩空白后
-    精确匹配，查不到返回 None，由调用方按「订单不存在」处理。
-    """
-    value = " ".join(str(order_id or "").split())
-    if not value:
-        return None
-    db = SessionLocal()
-    try:
-        row = db.query(Order).filter(Order.id == value).first()
-        return row.to_dict() if row else None
-    finally:
-        db.close()
 
 
 def _detail_message(item: dict, scope: dict, flow: dict) -> str:
@@ -1812,26 +1652,208 @@ def describe_order_detail(
 
     item = admin_order_item(order, now)
     scope = evaluate_service_scope(order, now=now)
+    flow = describe_status_flow(order)
 
-    db = SessionLocal()
-    try:
-        product = _get_product(db, item["tier"] or order.get("product_tier") or "")
+    with _session() as db:
+        view = _product_view(db, item["tier"] or order.get("product_tier") or "")
         user_order_count = (
             db.query(Order).filter(Order.user_id == order.get("user_id")).count()
         )
-    finally:
-        db.close()
 
-    flow = describe_status_flow(order)
     return {
         **item,
-        "product_name": product["name"] if product else item["tier_label"],
+        "product_name": view["name"],
         "allowed": scope["allowed"],
         "reason_code": scope["reason_code"],
         "reason": scope["reason"],
-        "features": product["features"] if product else list(scope["features"]),
+        "features": view["features"],
         "user_order_count": user_order_count,
         "status_flow": flow,
         "renewal": evaluate_renewal(order, now, window_days),
         "message": _detail_message(item, scope, flow),
     }
+
+
+# ============================ 十一、只读查询工具 ============================
+
+# 工具名与工具白名单里的名字必须一致：白名单是并发判定的唯一依据，
+# 名字对不上就会被当成有副作用的工具，只读查询白白退化成串行执行。
+ORDER_TOOL_NAME = "query_order"
+
+ORDER_TOOL_DESCRIPTION = (
+    "查询当前登录用户的订单信息：购买的版本、服务期状态与可用功能。"
+    "需要确认某个功能能不能使用时，把功能名称放在 feature 里。"
+)
+
+# 参数只留两个可选项。用户身份由调用方从登录态注入，刻意不做成参数：
+# 一旦出现在参数里，模型就能自己指定要查谁的订单。
+ORDER_TOOL_PARAMETERS = {
+    "type": "object",
+    "properties": {
+        "order_id": {
+            "type": "string",
+            "description": "订单号，留空则查询主订单（当前在用的那一条）",
+        },
+        "feature": {
+            "type": "string",
+            "description": "要确认的功能名称，留空则只判断整体服务状态",
+        },
+    },
+    "required": [],
+    "additionalProperties": False,
+}
+
+# 入参长度上限与接口层 schema 保持一致，超长按无效参数直接拒绝，
+# 不带着明显不合法的输入去数据库里白跑一次。
+ORDER_TOOL_ID_MAX = 64
+ORDER_TOOL_FEATURE_MAX = 50
+
+# 匿名身份没有可查的订单，按未登录处理
+ORDER_TOOL_ANONYMOUS = "anonymous"
+
+ORDER_TOOL_ERROR_NO_USER = "order_tool_no_user"
+ORDER_TOOL_ERROR_INVALID = "order_tool_invalid_parameter"
+
+# 定义与白名单的一致性在导入时算好，调用方不必自己比对
+ORDER_TOOL_CONCURRENT = tools.can_run_concurrently(ORDER_TOOL_NAME)
+
+
+def _tool_text(value, limit: int) -> Optional[str]:
+    """把工具入参压成单行文本，超过长度上限返回 None。
+
+    空白归一与接口层同口径：模型偶尔会把用户原话带上换行或多余空格，
+    这类输入不该被当成另一个查询条件。
+    """
+    text = _compact(value)
+    return text if len(text) <= limit else None
+
+
+def order_tool_definition() -> dict:
+    """订单查询工具的对外定义，供工具注册与提示词拼装共用。
+
+    只描述「叫什么、干什么、收什么参数」，不绑定具体用户：
+    用户身份在执行时才注入，定义本身可以跨会话复用，也就不必为每次对话
+    重新生成一份描述。返回值是副本，调用方改它不会污染模块常量。
+    """
+    return {
+        "name": ORDER_TOOL_NAME,
+        "description": ORDER_TOOL_DESCRIPTION,
+        "parameters": copy.deepcopy(ORDER_TOOL_PARAMETERS),
+        "read_only": True,
+        "concurrent": ORDER_TOOL_CONCURRENT,
+    }
+
+
+def run_order_tool(user_id: str, **params) -> tools.ToolResult:
+    """执行一次订单查询，把结论包装成工具结果。
+
+    三种查询形态按入参自动分派，返回的 mode 说明走了哪一条：
+
+    - 给了功能名：跨全部订单判断该功能是否在服务范围内，
+      多产品用户不会被主订单的版本误判；
+    - 给了订单号：只判定那一条订单，别人的订单号按查不到处理；
+    - 都没给：返回多订单视图，主订单与在期能力并集都在里面。
+
+    失败只用于参数不可用（未登录、超长入参）。查不到订单不算失败，
+    而是有效的观察结果——模型需要知道「这个人没有订单」才能继续回答，
+    把它当异常抛回去只会让对话在一句无关工具错误上停住。
+    未识别的参数一律忽略，工具协议演进时旧实现不会因为多传字段就报错。
+    """
+    uid = _tool_text(user_id, ORDER_TOOL_ID_MAX)
+    if not uid or uid.lower() == ORDER_TOOL_ANONYMOUS:
+        return tools.ToolResult(
+            success=False,
+            error="未登录，无法查询订单",
+            error_code=ORDER_TOOL_ERROR_NO_USER,
+        )
+
+    feature = _tool_text(params.get("feature"), ORDER_TOOL_FEATURE_MAX)
+    order_id = _tool_text(params.get("order_id"), ORDER_TOOL_ID_MAX)
+    if feature is None:
+        return tools.ToolResult(
+            success=False,
+            error=f"功能名称不能超过 {ORDER_TOOL_FEATURE_MAX} 个字符",
+            error_code=ORDER_TOOL_ERROR_INVALID,
+        )
+    if order_id is None:
+        return tools.ToolResult(
+            success=False,
+            error=f"订单号不能超过 {ORDER_TOOL_ID_MAX} 个字符",
+            error_code=ORDER_TOOL_ERROR_INVALID,
+        )
+
+    if feature:
+        result = describe_feature_scope(uid, feature)
+        mode = "feature"
+    elif order_id:
+        result = describe_order(uid, order_id=order_id)
+        mode = "order"
+    else:
+        result = query_orders(uid)
+        mode = "list"
+
+    return tools.ToolResult(
+        success=True,
+        output=str(result.get("message") or ""),
+        data={
+            "tool": ORDER_TOOL_NAME,
+            "mode": mode,
+            "order": result,
+        },
+    )
+
+
+# ============================ 十二、工具注册与调用约定 ============================
+
+# 执行参数里出现这些键时直接丢弃：身份只能来自注册时绑定的登录态。
+# 模型输出夹带的身份键既不该生效，也不该让处理器撞上参数重复而报错。
+ORDER_TOOL_IDENTITY_KEYS = frozenset({"user_id", "user"})
+
+
+def make_order_tool_handler(user_id: str) -> Callable[..., tools.ToolResult]:
+    """构造绑定登录身份的订单工具处理函数。
+
+    身份在构造时定死，处理器只收工具自己的查询参数（order_id / feature）。
+    对话链路把它注册进工具注册表后，执行环节传进来的身份键会被丢弃——
+    模型没有指定查谁的订单的通道。
+    """
+
+    def _handle(**params) -> tools.ToolResult:
+        arguments = {
+            key: value
+            for key, value in params.items()
+            if key not in ORDER_TOOL_IDENTITY_KEYS
+        }
+        return run_order_tool(user_id, **arguments)
+
+    return _handle
+
+
+def register_order_tool(
+    registry: tools.ToolRegistry, user_id: str
+) -> Optional[tools.ToolSpec]:
+    """把订单查询工具注册进工具注册表，返回注册后的工具定义。
+
+    对话链路装配工具时的统一入口：不再各自手写 query_order 处理器，
+    调用本函数一次即可对齐名字、说明与执行体。调用约定：
+
+    - 注册时机：每轮对话构建 ToolRegistry 时调用一次，登录身份此刻
+      定死；匿名会话也可以注册，执行时返回「未登录」的失败结果；
+    - 执行方式：registry.execute(ORDER_TOOL_NAME, **arguments)，arguments
+      按 ORDER_TOOL_PARAMETERS 收 order_id / feature，未识别字段忽略，
+      user_id / user 这类身份键直接丢弃；
+    - 结果形态：ToolResult.success 表示查询是否可执行，output 是单行
+      摘要，data 带 tool / mode / order 三段，可直接序列化进事件流；
+    - 定义复用：提示词拼装用 order_tool_definition()，与注册项同名同描述；
+    - 并发：工具名在只读白名单内，plan_execution 会把它与其它只读工具
+      编进同一批并发执行。
+
+    注册表同名先注册者胜：若表里已有 query_order（比如对话侧的旧实现），
+    本调用不会覆盖它，接入时应先撤掉旧注册再调用本函数。
+    """
+    registry.register(
+        ORDER_TOOL_NAME,
+        ORDER_TOOL_DESCRIPTION,
+        make_order_tool_handler(user_id),
+    )
+    return registry.get(ORDER_TOOL_NAME)
