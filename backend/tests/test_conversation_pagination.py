@@ -35,9 +35,28 @@ def test_legacy_and_paged_history_keep_stable_order_and_count(history):
         assert [m['content'] for m in response.json()['messages']] == expected
     assert len(client.get('/api/conversation', params={'offset': 0}).json()['messages']) == 100
     for offset in (105, 2**63):
-        assert client.get('/api/conversation', params={'offset': offset}).json() == {
-            'messages': [], 'total': 105, 'conversation_id': 'active',
-        }
+        page = client.get('/api/conversation', params={'offset': offset}).json()
+        assert page['messages'] == []
+        assert page['total'] == 105
+        assert page['conversation_id'] == 'active'
+
+
+def test_history_revision_is_shared_across_pages_and_changes_for_equal_count_edit(history):
+    factory, client = history
+    first = client.get('/api/conversation', params={'limit': 100}).json()
+    with factory() as db:
+        db.query(Message).filter_by(id='private').update({'content': 'edited elsewhere'})
+        db.commit()
+    second = client.get('/api/conversation', params={'offset': 100}).json()
+    assert first['history_revision'] == second['history_revision']
+    with factory() as db:
+        db.query(Message).filter_by(id='m-000').update({'content': 'edited in the first page'})
+        db.commit()
+    after = client.get('/api/conversation', params={'offset': 100}).json()
+    assert after['messages'] == second['messages']
+    assert after['total'] == second['total']
+    assert after['conversation_id'] == second['conversation_id']
+    assert after['history_revision'] != second['history_revision']
 
 
 def test_equal_counts_still_identify_a_change_in_latest_conversation(history):
@@ -75,12 +94,14 @@ def test_existing_empty_conversation_returns_zero(selection_store):
         db.add(Conversation(id='empty', user_id='user', title='', created_at=1, updated_at=1))
         db.commit()
     assert client.get('/api/conversation').json() == {'messages': []}
-    assert client.get('/api/conversation', params={'offset': 1}).json() == {
-        'messages': [], 'total': 0, 'conversation_id': 'empty',
-    }
+    page = client.get('/api/conversation', params={'offset': 1}).json()
+    assert page['messages'] == []
+    assert page['total'] == 0
+    assert page['conversation_id'] == 'empty'
+    assert page['history_revision']
 
 
-def test_count_and_window_share_snapshot(history):
+def test_revision_count_and_window_share_snapshot(history):
     factory, client = history
     engine = factory.kw['bind']
     with engine.connect() as connection:
@@ -88,9 +109,9 @@ def test_count_and_window_share_snapshot(history):
     inserted = False
 
     @sa.event.listens_for(engine, 'after_cursor_execute')
-    def append_after_count(connection, cursor, statement, parameters, context, executemany):
+    def append_during_read(connection, cursor, statement, parameters, context, executemany):
         nonlocal inserted
-        if not inserted and 'count(' in statement.lower():
+        if not inserted and 'from messages' in statement.lower():
             inserted = True
             with engine.begin() as writer:
                 writer.execute(sa.insert(Message).values(id='new', conversation_id='active', role='user', content='new', at=0))
@@ -99,3 +120,4 @@ def test_count_and_window_share_snapshot(history):
     assert inserted and before['total'] == 105 and before['messages'][0]['content'] == '0'
     after = client.get('/api/conversation', params={'limit': 1}).json()
     assert after['total'] == 106 and after['messages'][0]['content'] == 'new'
+    assert before['history_revision'] != after['history_revision']

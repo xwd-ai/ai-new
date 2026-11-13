@@ -1,3 +1,5 @@
+import hashlib
+import json
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -60,7 +62,7 @@ def source_detail(source_id: str) -> SourceDetail:
 @chat_router.get(
     "/conversation", response_model=ConversationResponse, summary="读取最近会话的消息",
     response_model_exclude_none=True,
-    description="有效用户仅返回最近会话。无分页参数时返回全部消息；分页时附带 total，选中会话时附带 conversation_id。无效登录态返回空历史。",
+    description="有效用户仅返回最近会话。分页时附带 total，选中会话时附带 conversation_id 和 history_revision。无效登录态返回空历史。",
 )
 def conversation(
     user: dict | None = Depends(current_user),
@@ -85,24 +87,36 @@ def conversation(
         if not conv:
             return empty
         query = (
-            db.query(Message.role, Message.content, Message.at)
+            db.query(Message.role, Message.content, Message.at, Message.id)
             .filter(Message.conversation_id == conv.id)
+            .order_by(Message.at.asc(), Message.id.asc())
         )
-        total = query.count() if paged else None
-        query = query.order_by(Message.at.asc(), Message.id.asc())
+        pagination = {}
         if paged:
             start = 0 if offset is None else offset
-            messages = query.offset(start).limit(100 if limit is None else limit).all() if start < total else []
+            stop = start + (100 if limit is None else limit)
+            digest = hashlib.sha256()
+            messages = []
+            total = 0
+            # 同一次有序读取生成指纹、计数和分页窗口。
+            for index, row in enumerate(query.yield_per(100)):
+                digest.update(json.dumps(tuple(row), separators=(",", ":")).encode("ascii"))
+                digest.update(b"\n")
+                if start <= index < stop:
+                    messages.append(row)
+                total += 1
+            pagination = {
+                "total": total,
+                "conversation_id": conv.id,
+                "history_revision": digest.hexdigest(),
+            }
         else:
             messages = query.all()
-        result = {
+        return {
             "messages": [
                 {"role": m.role, "content": m.content, "at": m.at} for m in messages
-            ]
+            ],
+            **pagination,
         }
-        if paged:
-            result["total"] = total
-            result["conversation_id"] = conv.id
-        return result
     finally:
         db.close()

@@ -307,6 +307,25 @@ test('equal-sized history from another conversation forces a fresh read without 
   assert.equal(state.elements.msgInput.value,'draft');
 });
 
+test('a changed history revision restarts paging even when conversation and count match',async()=>{
+  let readsStarted=0;
+  const edited=[{...rows[0],content:'edited first message'},...rows.slice(1)];
+  const state=page(url=>{
+    if (!url.startsWith('/api/conversation?')) return null;
+    const offset=Number(new URLSearchParams(url.split('?')[1]).get('offset'));
+    const first=readsStarted++===0;
+    return json({messages:(first?rows:edited).slice(offset,offset+100),total:205,
+      conversation_id:'same',history_revision:first?'before':'after'});
+  });
+  await settle();
+  state.elements.msgInput.value='draft';
+  assert.equal(state.elements.chatLog.children.length,0);
+  await state.retry();
+  assert.equal(readsStarted,5);
+  assert.deepEqual(contents(state.elements.chatLog),edited.map(row=>row.content));
+  assert.equal(state.elements.msgInput.value,'draft');
+});
+
 test('last page progress waits for final identity before reporting success',async()=>{
   let identities=0,release;
   const {elements:e}=page(url=>url==='/api/me'&&++identities===2?new Promise(r=>release=r):null);
