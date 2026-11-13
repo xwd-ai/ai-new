@@ -35,7 +35,24 @@ def test_legacy_and_paged_history_keep_stable_order_and_count(history):
         assert [m['content'] for m in response.json()['messages']] == expected
     assert len(client.get('/api/conversation', params={'offset': 0}).json()['messages']) == 100
     for offset in (105, 2**63):
-        assert client.get('/api/conversation', params={'offset': offset}).json() == {'messages': [], 'total': 105}
+        assert client.get('/api/conversation', params={'offset': offset}).json() == {
+            'messages': [], 'total': 105, 'conversation_id': 'active',
+        }
+
+
+def test_equal_counts_still_identify_a_change_in_latest_conversation(history):
+    factory, client = history
+    first = client.get('/api/conversation', params={'limit': 100}).json()
+    with factory() as db:
+        db.query(Conversation).filter_by(id='old').update({'updated_at': 150})
+        db.add_all([
+            Message(id=f'old-{i:03}', conversation_id='old', role='user', content=f'old-{i}', at=2)
+            for i in range(104)
+        ])
+        db.commit()
+    second = client.get('/api/conversation', params={'offset': 100}).json()
+    assert first['total'] == second['total'] == 105
+    assert (first['conversation_id'], second['conversation_id']) == ('active', 'old')
 
 
 @pytest.mark.parametrize('params', [{'offset': -1}, {'limit': 0}, {'limit': 101}, {'limit': 'bad'}])
@@ -58,7 +75,9 @@ def test_existing_empty_conversation_returns_zero(selection_store):
         db.add(Conversation(id='empty', user_id='user', title='', created_at=1, updated_at=1))
         db.commit()
     assert client.get('/api/conversation').json() == {'messages': []}
-    assert client.get('/api/conversation', params={'offset': 1}).json() == {'messages': [], 'total': 0}
+    assert client.get('/api/conversation', params={'offset': 1}).json() == {
+        'messages': [], 'total': 0, 'conversation_id': 'empty',
+    }
 
 
 def test_count_and_window_share_snapshot(history):

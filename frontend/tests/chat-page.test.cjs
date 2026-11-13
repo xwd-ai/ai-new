@@ -287,6 +287,26 @@ test('history body abort uses the active attempt timeout reason',async()=>{
   assert.match(state.elements.connectionStatus.textContent,/同步超时/);
 });
 
+test('equal-sized history from another conversation forces a fresh read without mixing pages',async()=>{
+  let readsStarted=0;
+  const newRows=rows.map(row=>({...row,content:'new-'+row.content}));
+  const state=page(url=>{
+    if (!url.startsWith('/api/conversation?')) return null;
+    const offset=Number(new URLSearchParams(url.split('?')[1]).get('offset'));
+    const first=readsStarted++===0;
+    const source=first?rows:newRows;
+    return json({messages:source.slice(offset,offset+100),total:205,conversation_id:first?'first':'second'});
+  });
+  await settle();
+  state.elements.msgInput.value='draft';
+  assert.equal(state.elements.chatLog.textContent,'welcome');
+  assert.equal(state.timers.length,1);
+  await state.retry();
+  assert.deepEqual(reads(state.calls).map(call=>new URLSearchParams(call.url.split('?')[1]).get('offset')),['0','100','0','100','200']);
+  assert.deepEqual(contents(state.elements.chatLog),newRows.map(row=>row.content));
+  assert.equal(state.elements.msgInput.value,'draft');
+});
+
 test('last page progress waits for final identity before reporting success',async()=>{
   let identities=0,release;
   const {elements:e}=page(url=>url==='/api/me'&&++identities===2?new Promise(r=>release=r):null);

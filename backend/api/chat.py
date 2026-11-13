@@ -60,7 +60,7 @@ def source_detail(source_id: str) -> SourceDetail:
 @chat_router.get(
     "/conversation", response_model=ConversationResponse, summary="读取最近会话的消息",
     response_model_exclude_none=True,
-    description="有效用户仅返回最近会话。无分页参数时返回全部消息；传入 offset 或 limit 时附带 total。无效登录态返回空历史。",
+    description="有效用户仅返回最近会话。无分页参数时返回全部消息；分页时附带 total，选中会话时附带 conversation_id。无效登录态返回空历史。",
 )
 def conversation(
     user: dict | None = Depends(current_user),
@@ -102,6 +102,7 @@ def conversation(
         }
         if paged:
             result["total"] = total
+            result["conversation_id"] = conv.id
         return result
     finally:
         db.close()

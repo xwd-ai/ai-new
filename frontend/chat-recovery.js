@@ -21,13 +21,18 @@
     await checkIdentity();
     const messages = [];
     let total;
+    let conversationId;
     do {
       const data = await read(`/api/conversation?offset=${messages.length}&limit=100`);
       if (!Array.isArray(data.messages) || !Number.isSafeInteger(data.total) || data.total < 0) {
         throw new Error('历史格式错误');
       }
       if (total !== undefined && total !== data.total) throw new Error('历史数量发生变化，请重新同步。');
+      if (total !== undefined && conversationId !== data.conversation_id) {
+        throw new Error('历史所属会话发生变化，请重新同步。');
+      }
       total = data.total;
+      conversationId = data.conversation_id;
       if (data.messages.length !== Math.min(100, total - messages.length)) throw new Error('历史分页不完整');
       messages.push(...data.messages);
       onProgress(messages.length, total);

@@ -175,7 +175,9 @@ def test_http_optional_identity_logout_and_history_isolation(server):
         assert len(before['messages']) == 2
         page = client.get('/api/conversation', headers=customer, params={'offset': 1, 'limit': 1})
         assert page.status_code == 200
-        assert page.json() == {'messages': before['messages'][1:2], 'total': 2}
+        assert page.json()['messages'] == before['messages'][1:2]
+        assert page.json()['total'] == 2
+        assert page.json()['conversation_id']
         assert client.post('/api/logout', headers=customer).status_code == 200
         # 同一用户重新登录的凭据仍应能读取原来的私人历史。
         renewed = login(client, 'customer')
