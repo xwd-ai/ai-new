@@ -270,6 +270,39 @@ test('final history failure describes the last attempt and preserves display and
   }
 });
 
+test('exhausted history changes ask the user to sync later and keep the displayed history',async()=>{
+  const firstPage={messages:rows.slice(0,100),total:205,conversation_id:'first',history_revision:'before'};
+  const secondPage={...firstPage,messages:rows.slice(100,200)};
+  const cases=[
+    {...secondPage,total:206},
+    {...secondPage,conversation_id:'second'},
+    {...secondPage,history_revision:'after'},
+  ];
+  for (const changedPage of cases) {
+    let changing=false;
+    const state=page(url=>{
+      if (!changing || !url.startsWith('/api/conversation?')) return null;
+      return json(url.includes('offset=0&')?firstPage:changedPage);
+    });
+    const e=state.elements;
+    await settle();
+    e.msgInput.value='draft';
+    changing=true;
+    await e.syncHistory.emit('click');
+    await state.retry();
+    await state.retry();
+    assert.equal(reads(state.calls).length,7);
+    assert.equal(state.timers.length,0);
+    assert.match(e.connectionStatus.textContent,/历史.*变化.*稍后.*同步历史/);
+    assert.deepEqual(contents(e.chatLog),['saved']);
+    assert.equal(e.msgInput.value,'draft');
+    assert.equal(e.syncHistory.disabled,false);
+    changing=false;
+    await e.syncHistory.emit('click');
+    assert.match(e.connectionStatus.textContent,/历史已同步/);
+  }
+});
+
 test('history body abort uses the active attempt timeout reason',async()=>{
   let fail=false;
   const state=page(url=>{

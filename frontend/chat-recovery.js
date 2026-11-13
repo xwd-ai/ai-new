@@ -1,6 +1,8 @@
 /* HTTP 历史恢复只重试读取，绝不自动重发对话 POST。 */
 (function (root) {
   'use strict';
+  class HistoryChangedError extends Error {}
+
   async function fetchPagedHistory(request, userId, onProgress = () => {}) {
     const read = async path => {
       const response = await request(path);
@@ -28,12 +30,12 @@
       if (!Array.isArray(data.messages) || !Number.isSafeInteger(data.total) || data.total < 0) {
         throw new Error('历史格式错误');
       }
-      if (total !== undefined && total !== data.total) throw new Error('历史数量发生变化，请重新同步。');
+      if (total !== undefined && total !== data.total) throw new HistoryChangedError('历史数量发生变化，请重新同步。');
       if (total !== undefined && conversationId !== data.conversation_id) {
-        throw new Error('历史所属会话发生变化，请重新同步。');
+        throw new HistoryChangedError('历史所属会话发生变化，请重新同步。');
       }
       if (total !== undefined && historyRevision !== data.history_revision) {
-        throw new Error('历史内容发生变化，请重新同步。');
+        throw new HistoryChangedError('历史内容发生变化，请重新同步。');
       }
       total = data.total;
       conversationId = data.conversation_id;
@@ -125,7 +127,9 @@
             if (error.retryable === false) { this.onStatus(error.message); return; }
             if (attempt === 2) {
               let message = '历史同步失败，请点击「同步历史」重试。';
-              if (error.name === 'TimeoutError') {
+              if (error instanceof HistoryChangedError) {
+                message = '历史在同步期间发生变化，请稍后点击「同步历史」重试。';
+              } else if (error.name === 'TimeoutError') {
                 message = '历史同步超时，请点击「同步历史」重试。';
               } else if (error.httpStatus >= 500 && error.httpStatus < 600) {
                 message = '历史同步失败，服务暂时异常，请稍后点击「同步历史」重试。';
