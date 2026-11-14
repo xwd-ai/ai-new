@@ -482,13 +482,14 @@ def transfer_ticket(req: TransferRequest, user: dict = Depends(require_admin)):
     可追溯的原因；auto=true 表示完全按规则执行，未命中转人工规则则拒绝，
     不会把仍在服务范围内、排查轮次也足够的工单误转。auto=false 时管理员可
     显式指定原因直接转人工，判定结果仅作为响应里的参考依据返回。
-    服务范围取自工单所属用户的订单，管理员处理他人工单时结论对应工单本人。
+    服务范围由订单模块按多订单综合判定（任一在期订单覆盖即算在范围内），
+    管理员处理他人工单时结论对应工单本人。
     仅管理员可转人工；非法来源状态（如已关闭的工单）由状态流转校验拒绝。
     """
     data = _require_ticket(user, req.ticket_id, "转人工")
     decision = tickets.evaluate_transfer_rule(
         data,
-        order=orders.query_order(data["user_id"]),
+        order_scope=orders.describe_feature_scope(data["user_id"], feature=req.feature),
         user_text=req.user_text,
         feature=req.feature,
     )
@@ -694,16 +695,17 @@ def transfer_decision(
     """按规则判定工单是否需要转人工，返回命中原因与判定依据。
 
     三条规则按优先级返回：用户主动要求、超出服务范围（无订单 / 服务到期 /
-    版本不含该功能）、多次排查无效（已尝试步骤或人工回复达到阈值）。
+    功能不在服务范围内，按订单模块的多订单综合结论判定，任一在期订单覆盖
+    即算在范围内）、多次排查无效（已尝试步骤或人工回复达到阈值）。
     判定只读：不改变工单状态，也不追加回复，调用方据此决定是否调用转人工接口。
-    服务范围取自工单所属用户的订单而非当前登录账号，管理员查看他人工单时结论
+    服务范围取自工单所属用户的全部订单而非当前登录账号，管理员查看他人工单时结论
     仍对应工单本人的服务范围。普通用户仅可判定本人工单，越权返回「无权限」。
     """
     data = _require_ticket(user, ticket_id, "判定")
 
     decision = tickets.evaluate_transfer_rule(
         data,
-        order=orders.query_order(data["user_id"]),
+        order_scope=orders.describe_feature_scope(data["user_id"], feature=feature),
         user_text=user_text,
         feature=feature,
     )

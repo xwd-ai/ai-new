@@ -1617,6 +1617,37 @@ def _check_service_scope(order: dict | None, feature: str) -> dict:
     return {"out_of_scope": False, "code": "", "detail": ""}
 
 
+def _check_order_scope(order_scope: dict, feature: str) -> dict:
+    """按订单模块的多订单服务范围结论判断是否超出服务范围。
+
+    与 _check_service_scope 的分工：那个函数只看单条订单视图，多产品用户会被
+    主订单挡住；这里直接消费订单模块的综合判定（任一在期订单覆盖该功能即算在
+    范围内），细分原因沿用订单侧结论原文，转人工说明与订单查询保持同一口径。
+    没给功能时跳过功能比对，只按有无订单与是否存在在期订单判定。
+    """
+    if not order_scope.get("has_order"):
+        return {
+            "out_of_scope": True,
+            "code": order_scope.get("reason_code") or "no_order",
+            "detail": order_scope.get("reason") or SCOPE_REASON_TEXT["no_order"],
+        }
+    if not order_scope.get("in_service_count"):
+        return {
+            "out_of_scope": True,
+            "code": order_scope.get("reason_code") or "service_expired",
+            "detail": order_scope.get("reason") or SCOPE_REASON_TEXT["service_expired"],
+        }
+    target = " ".join(str(feature or "").split())
+    if target and not order_scope.get("in_scope"):
+        return {
+            "out_of_scope": True,
+            "code": order_scope.get("reason_code") or "feature_not_included",
+            "detail": order_scope.get("reason")
+            or f"{SCOPE_REASON_TEXT['feature_not_included']}「{target}」",
+        }
+    return {"out_of_scope": False, "code": "in_scope", "detail": ""}
+
+
 def evaluate_transfer_rule(
     ticket: dict,
     order: dict | None = None,
@@ -1624,6 +1655,7 @@ def evaluate_transfer_rule(
     feature: str = "",
     tried_step_count: int | None = None,
     human_reply_count: int | None = None,
+    order_scope: dict | None = None,
 ) -> dict:
     """按三条规则判定工单是否需要转人工，给出命中原因与判定依据。
 
@@ -1636,9 +1668,19 @@ def evaluate_transfer_rule(
     判定只读不写：不改变工单状态，也不追加回复，是否真的转人工由调用方决定。
     工单已处终态或当前状态不允许流转到转人工时 applicable 为 False，
     直接给出「无需判定」，避免对已关闭、待确认的工单给出误导性建议。
+
+    服务范围有两种来源：order_scope 是订单模块的多订单综合结论（多产品用户
+    任一在期订单覆盖即算在范围内），优先使用；只给了单条订单视图 order 时，
+    退回 _check_service_scope 按单订单判定。判定依据里附 service_scope 摘要，
+    调用方能看到结论背后有几条订单、哪条订单覆盖了该功能。
     """
     status = ticket.get("status", "")
     applicable = can_transition(status, STATUS_TRANSFERRED_HUMAN)
+    scope_verdict = (
+        _check_order_scope(order_scope, feature)
+        if order_scope is not None
+        else _check_service_scope(order, feature)
+    )
 
     tried = (
         len(parse_tried_steps(ticket.get("tried_steps")))
@@ -1666,13 +1708,12 @@ def evaluate_transfer_rule(
                 }
             )
 
-        scope = _check_service_scope(order, feature)
-        if scope["out_of_scope"]:
+        if scope_verdict["out_of_scope"]:
             reasons.append(
                 {
                     "code": "out_of_scope",
                     "label": TRANSFER_REASON_LABELS["out_of_scope"],
-                    "detail": scope["detail"],
+                    "detail": scope_verdict["detail"],
                 }
             )
 
@@ -1702,6 +1743,34 @@ def evaluate_transfer_rule(
     else:
         message = "暂不需要转人工：问题在服务范围内，排查轮次也未达到阈值"
 
+    if order_scope is not None:
+        has_order = bool(order_scope.get("has_order"))
+        in_service = bool(order_scope.get("in_service_count"))
+    else:
+        has_order = bool(order and order.get("has_order"))
+        in_service = bool(order and order.get("has_order") and order.get("in_service"))
+
+    basis = {
+        "tried_step_count": tried,
+        "tried_step_threshold": TRANSFER_TRIED_STEP_THRESHOLD,
+        "human_reply_count": human,
+        "human_reply_threshold": TRANSFER_HUMAN_REPLY_THRESHOLD,
+        "feature": " ".join(str(feature or "").split()),
+        "has_order": has_order,
+        "in_service": in_service,
+        "matched_keyword": keyword,
+    }
+    if order_scope is not None:
+        # 附上订单侧的多订单摘要，让「为什么算超范围」能追到具体订单
+        basis["service_scope"] = {
+            "out_of_scope": scope_verdict["out_of_scope"],
+            "code": scope_verdict["code"],
+            "detail": scope_verdict["detail"],
+            "order_count": order_scope.get("order_count", 0),
+            "in_service_count": order_scope.get("in_service_count", 0),
+            "covered_by": order_scope.get("covered_by"),
+        }
+
     return {
         "ticket_id": ticket.get("id"),
         "status": status,
@@ -1711,16 +1780,7 @@ def evaluate_transfer_rule(
         "reason_codes": [item["code"] for item in reasons],
         "reasons": reasons,
         "reason_text": reason_text,
-        "basis": {
-            "tried_step_count": tried,
-            "tried_step_threshold": TRANSFER_TRIED_STEP_THRESHOLD,
-            "human_reply_count": human,
-            "human_reply_threshold": TRANSFER_HUMAN_REPLY_THRESHOLD,
-            "feature": " ".join(str(feature or "").split()),
-            "has_order": bool(order and order.get("has_order")),
-            "in_service": bool(order and order.get("has_order") and order.get("in_service")),
-            "matched_keyword": keyword,
-        },
+        "basis": basis,
         "message": message,
     }
 
