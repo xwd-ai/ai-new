@@ -6,7 +6,7 @@
 - [ReDoc](http://127.0.0.1:8000/redoc)
 - [OpenAPI JSON](http://127.0.0.1:8000/openapi.json)
 
-接口使用 JSON 请求与响应。OpenAPI 中有具体的响应模型和错误状态说明；`trace`、诊断 `stages` 与 `config` 保留可扩展的对象结构，字段含义见下文。工单与订单接口见 [tickets-api.md](tickets-api.md)，登录、注册、换发、登出等认证接口见 [auth-api.md](auth-api.md)。
+接口使用 JSON 请求与响应。OpenAPI 中有具体的响应模型和错误状态说明；`trace`、诊断 `stages` 与 `config` 保留可扩展的对象结构，字段含义见下文。工单接口见 [tickets-api.md](tickets-api.md)，订单接口见 [orders-api.md](orders-api.md)，登录、注册、换发、登出等认证接口见 [auth-api.md](auth-api.md)。
 
 ## 登录与权限
 

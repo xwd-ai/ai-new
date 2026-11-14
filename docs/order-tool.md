@@ -1,6 +1,6 @@
 # 订单查询工具
 
-本文描述订单模块提供给对话链路的只读查询工具 `query_order`：怎么注册、怎么调用、返回什么、失败怎么区分。订单的 HTTP 接口见 [tickets-api.md](tickets-api.md#订单)，认证接口见 [auth-api.md](auth-api.md)，对话与知识库接口见 [api.md](api.md)。
+本文描述订单模块提供给对话链路的只读查询工具 `query_order`：怎么注册、怎么调用、返回什么、失败怎么区分。订单的 HTTP 接口见 [orders-api.md](orders-api.md)，认证接口见 [auth-api.md](auth-api.md)，对话与知识库接口见 [api.md](api.md)。
 
 工具实现位于 `backend/services/orders.py` 第九节（工具定义与执行）与第十节（注册与调用约定）。
 
