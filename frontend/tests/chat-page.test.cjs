@@ -359,6 +359,34 @@ test('a changed history revision restarts paging even when conversation and coun
   assert.equal(state.elements.msgInput.value,'draft');
 });
 
+test('history change shows the next retry during the wait and allows cancellation',async()=>{
+  const state=page(url=>{
+    if (!url.startsWith('/api/conversation?')) return null;
+    const offset=Number(new URLSearchParams(url.split('?')[1]).get('offset'));
+    return json({
+      messages:rows.slice(offset,offset+100),
+      total:rows.length,
+      conversation_id:'same',
+      history_revision:offset===0?'before':'after',
+    });
+  });
+  await settle();
+  const e=state.elements;
+  e.msgInput.value='draft';
+  assert.match(e.connectionStatus.textContent,/历史.*变化.*1 秒后.*从首页.*2\/3/);
+  assert.doesNotMatch(e.connectionStatus.textContent,/已读取/);
+  await state.retry();
+  assert.match(e.connectionStatus.textContent,/历史.*变化.*2 秒后.*从首页.*3\/3/);
+  assert.equal(e.cancelHistory.hidden,false);
+  await e.cancelHistory.emit('click');
+  const count=state.calls.length;
+  await state.retry();
+  assert.equal(state.calls.length,count);
+  assert.match(e.connectionStatus.textContent,/已取消/);
+  assert.equal(e.chatLog.textContent,'welcome');
+  assert.equal(e.msgInput.value,'draft');
+});
+
 test('last page progress waits for final identity before reporting success',async()=>{
   let identities=0,release;
   const {elements:e}=page(url=>url==='/api/me'&&++identities===2?new Promise(r=>release=r):null);

@@ -137,7 +137,11 @@
               this.onStatus(message);
               return;
             }
-            await Promise.race([this.sleep(1000 * (attempt + 1)), cancelled]);
+            const retryDelay = attempt + 1;
+            if (error instanceof HistoryChangedError) {
+              this.onStatus(`历史在同步期间发生变化，${retryDelay} 秒后从首页重读（${attempt + 2}/3）…`);
+            }
+            await Promise.race([this.sleep(1000 * retryDelay), cancelled]);
           }
         }
       } finally {
