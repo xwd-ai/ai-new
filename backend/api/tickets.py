@@ -189,7 +189,16 @@ def _detail_message(data: dict) -> str:
 
 @tickets_router.post("/tickets")
 def create_ticket(req: CreateTicketRequest, user: dict = Depends(require_login)):
-    """创建待确认草稿，工单归属取自登录身份。"""
+    """创建待确认草稿，归属与建单人一律取自登录身份。
+
+    身份只认登录态：请求体里没有、也不接受「替谁建单」这类字段，
+    即使带上别人的客户编号也会被忽略，工单始终挂在当前账号名下。
+    响应里的 identity 回显本次建单采用的归属号、展示名与角色，
+    前端据此确认归属，不必自己再解析令牌。
+    """
+    # 先换算身份再取数：身份缺失在入口就以 401 拒绝，不带着空归属去查步骤
+    actor = tickets.ticket_identity(user)
+
     # 若前端未显式传已尝试步骤，则从会话已记录的步骤自动沉淀
     tried_steps = req.tried_steps
     if not tried_steps:
@@ -197,7 +206,7 @@ def create_ticket(req: CreateTicketRequest, user: dict = Depends(require_login))
         try:
             steps = (
                 db.query(TriedStep)
-                .filter(TriedStep.user_id == user["id"])
+                .filter(TriedStep.user_id == actor["id"])
                 .order_by(TriedStep.at.asc())
                 .all()
             )
@@ -205,9 +214,8 @@ def create_ticket(req: CreateTicketRequest, user: dict = Depends(require_login))
         finally:
             db.close()
 
-    ticket, created = tickets.create_ticket(
-        user_id=user["id"],
-        user_name=user["name"],
+    ticket, created, identity = tickets.create_ticket_for_user(
+        actor,
         description=req.description,
         tried_steps=tried_steps,
         evidence=req.evidence,
@@ -219,6 +227,7 @@ def create_ticket(req: CreateTicketRequest, user: dict = Depends(require_login))
     return {
         "ticket": ticket,
         "created": created,
+        "identity": identity,
         "message": message,
     }
 
@@ -553,12 +562,15 @@ def confirm_ticket(req: ConfirmRequest, user: dict = Depends(require_login)):
     幂等：重复确认或确认已终结工单时原样返回，不产生副作用；
     工单不存在返回「工单不存在」，非法来源状态由流转校验拒绝。
     仅工单本人或管理员可确认，他人工单返回「无权限」。
+    时间线记录本次确认的操作人：本人确认记本人，管理员代确认记管理员，
+    与建单人分开落痕，事后能还原「谁提的单、谁确认的」。
     """
+    identity = tickets.ticket_identity(user)
     _require_ticket(user, req.ticket_id, "确认")
-    t = tickets.confirm_ticket(req.ticket_id)
+    t = tickets.confirm_ticket(req.ticket_id, operator=identity["name"])
     if t is None:
         raise TicketNotFoundError(req.ticket_id)
-    return {"ticket": t}
+    return {"ticket": t, "identity": identity}
 
 
 @tickets_router.post("/tickets/cancel")
@@ -568,12 +580,15 @@ def cancel_ticket(req: CancelRequest, user: dict = Depends(require_login)):
     幂等：重复取消或取消已终结工单时原样返回，不产生副作用；
     工单不存在返回「工单不存在」，非法来源状态由流转校验拒绝。
     仅工单本人或管理员可取消，他人工单返回「无权限」。
+    时间线记录本次取消的操作人，取消说明本身仍按系统记录归类，
+    不会因为多了一条说明就把这条工单算成有一次人工回复。
     """
+    identity = tickets.ticket_identity(user)
     _require_ticket(user, req.ticket_id, "取消")
-    t = tickets.cancel_ticket(req.ticket_id, req.reason)
+    t = tickets.cancel_ticket(req.ticket_id, req.reason, operator=identity["name"])
     if t is None:
         raise TicketNotFoundError(req.ticket_id)
-    return {"ticket": t}
+    return {"ticket": t, "identity": identity}
 
 
 @tickets_router.post("/tickets/expire")

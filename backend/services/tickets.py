@@ -3,6 +3,7 @@
 分层约定（文件内按此顺序分段）：
 - 会话与取数：统一的连接边界与单条取数；
 - 权限层：数据可见范围（普通用户仅本人，管理员可全量），角色判定复用认证层的口径；
+- 认证联动层：把登录身份换算成工单侧的操作人，写接口统一从这里取身份与落痕名；
 - 状态机层：状态变更的唯一写入口，负责校验、留痕与字段赋值；
 - 入参归一化层：状态、分页、排序、关键词等外部入参收敛为内部口径；
 - 写入层、查询层、统计层、组装层、判定层：各自只负责一件事。
@@ -24,6 +25,7 @@ from sqlalchemy import func, or_, text
 from backend.database import SessionLocal
 from backend.models import Ticket
 from backend.models.ticket import (
+    TicketAuthRequiredError,
     TicketErrorCode,
     TicketPermissionError,
     TicketStatus,
@@ -249,6 +251,55 @@ def ensure_ticket_access(
 
 
 # ---------------------------------------------------------------------------
+# 认证联动层：登录身份 → 工单侧操作人
+# ---------------------------------------------------------------------------
+#
+# 认证层回答「这张令牌是谁」，本层负责把答案换算成工单侧能直接用的操作人：
+# 归属号、展示名与角色标记。写接口统一从这里取身份，不再各自到用户字典里
+# 抠字段——少一处取值就少一处「字段缺失后被静默写成空串」的隐患，
+# 也让建单、确认、取消这些动作的操作人落痕与登录身份始终对得上。
+
+# 兜底操作人：没有真实操作人的场景（系统定时收敛、超时关闭）落到这个名称
+DEFAULT_OPERATOR = "system"
+# 操作人展示名长度上限：与用户名上限对齐，超长截断，避免写进时间线撑坏展示
+OPERATOR_NAME_MAX_LENGTH = 32
+
+
+def _clean_operator(value: str | None, fallback: str = DEFAULT_OPERATOR) -> str:
+    """归一化操作人名称：压空白、截断超长、空值回落到兜底名称。"""
+    text = " ".join(str(value or "").split())
+    if not text:
+        return fallback
+    return text[:OPERATOR_NAME_MAX_LENGTH]
+
+
+def ticket_identity(user: dict | None) -> dict:
+    """把登录用户换算成工单侧的操作人身份。
+
+    返回 id（数据归属）、name（时间线展示名）、role（角色）与 is_admin；
+    展示名优先取昵称，缺省回退用户名，再缺省回退归属号，保证时间线上不会
+    出现一条没有操作人的空记录。身份缺失（未登录、令牌里没有主体）直接抛
+    TicketAuthRequiredError：宁可让这次写入失败，也不拿一个空归属继续落数据。
+    """
+    account = user if isinstance(user, dict) else {}
+    user_id = str(account.get("id") or "").strip()
+    if not user_id:
+        raise TicketAuthRequiredError(
+            "登录状态缺失，请重新登录", details={"action": "身份校验"}
+        )
+    name = _clean_operator(
+        account.get("name") or account.get("username"), fallback=user_id
+    )
+    role = auth_service.role_of(account)
+    return {
+        "id": user_id,
+        "name": name,
+        "role": role,
+        "is_admin": role == auth_service.ADMIN_ROLE,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 状态机层：工单状态变更的唯一写入口
 # ---------------------------------------------------------------------------
 
@@ -313,6 +364,7 @@ def create_ticket(
     description: str,
     tried_steps: str,
     evidence: str,
+    operator: str = DEFAULT_OPERATOR,
 ) -> tuple[dict, bool]:
     """创建工单（两阶段建单的第一阶段），返回 (工单数据, 是否新建)。
 
@@ -321,6 +373,9 @@ def create_ticket(
 
     同一用户同一问题（dedup_key）已有未解决工单时，直接返回原工单，
     并标记 created=False，调用方据此区分「新建」与「命中已有」，避免重复建单。
+
+    operator 是首条状态时间线的操作人：带登录身份的调用方传真实建单人，
+    定时任务等无身份场景沿用兜底名称。
     """
     description = (description or "").strip()
     if not description:
@@ -356,17 +411,49 @@ def create_ticket(
         db.flush()
         db.refresh(ticket)
         # 建单即首次状态落位，写入首条时间线记录（from_status 为空表示初始创建）
-        _log_status_change(db, ticket.id, "", INITIAL_STATUS, operator="system")
+        _log_status_change(
+            db, ticket.id, "", INITIAL_STATUS, operator=_clean_operator(operator)
+        )
         return ticket.to_dict(), True
 
 
-def confirm_ticket(ticket_id: str) -> dict | None:
+def create_ticket_for_user(
+    user: dict | None,
+    description: str,
+    tried_steps: str = "",
+    evidence: str = "",
+) -> tuple[dict, bool, dict]:
+    """以登录身份建单，归属与建单人一律取自登录态。
+
+    入参可以是原始用户字典，也可以是 ticket_identity 已经换算好的身份块
+    （两者字段同名，二次换算结果一致），接口层先换算再传即可避免重复取值。
+    返回 (工单, 是否新建, 操作人身份)，身份块可直接回给前端用于确认归属。
+    工单归属不接受外部指定：请求体里写谁的工单号都不影响结果，工单永远挂在
+    当前登录账号名下，从入口上排除「替别人建单」这类越权写法。
+    首条时间线记录真实建单人，客服复盘时能看清是谁提的单，
+    而不是所有工单都显示由系统创建。
+    """
+    identity = ticket_identity(user)
+    ticket, created = create_ticket(
+        user_id=identity["id"],
+        user_name=identity["name"],
+        description=description,
+        tried_steps=tried_steps,
+        evidence=evidence,
+        operator=identity["name"],
+    )
+    return ticket, created, identity
+
+
+def confirm_ticket(ticket_id: str, operator: str = DEFAULT_OPERATOR) -> dict | None:
     """确认待确认草稿，将其正式流转为待处理工单（幂等）。
 
     两阶段建单的第二阶段：pending_confirm 草稿经用户二次确认后流转为 open。
     幂等语义：若工单已不在待确认状态（例如已 open、已关闭、已被并发确认），
     不抛错也不重复流转，直接原样返回当前工单，重复确认不会产生副作用。
     工单不存在时返回 None，由接口层区分「不存在」与「已确认」。
+    operator 是确认动作的操作人：带登录身份的调用方传真实用户名，
+    时间线据此区分「本人确认」与「系统确认」。
     """
     with _ticket_session(write=True) as db:
         t = _load_ticket(db, ticket_id)
@@ -375,17 +462,23 @@ def confirm_ticket(ticket_id: str) -> dict | None:
         # 已非待确认状态视为已确认/已终结，幂等返回，不重复流转
         if t.status != STATUS_PENDING_CONFIRM:
             return t.to_dict()
-        _apply_transition(db, t, STATUS_OPEN, operator="system")
+        _apply_transition(db, t, STATUS_OPEN, operator=_clean_operator(operator))
         return t.to_dict()
 
 
-def cancel_ticket(ticket_id: str, reason: str = "") -> dict | None:
+def cancel_ticket(
+    ticket_id: str,
+    reason: str = "",
+    operator: str = DEFAULT_OPERATOR,
+) -> dict | None:
     """取消待确认草稿，将其流转为已关闭终态，并记录取消原因。
 
     两阶段建单的取消分支：pending_confirm 草稿由用户主动放弃后流转为 closed。
     取消原因以 system 来源写入 replies，时间线同时落一条流转记录，供后续复盘。
     幂等语义：若工单已不在待确认状态（已 open、已关闭、已被并发确认或取消），
     不抛错也不重复流转，原样返回当前工单；工单不存在时返回 None。
+    取消说明的来源仍是系统记录，操作人落在时间线上，
+    避免把一句系统说明算成一次人工回复。
     """
     with _ticket_session(write=True) as db:
         t = _load_ticket(db, ticket_id)
@@ -399,7 +492,9 @@ def cancel_ticket(ticket_id: str, reason: str = "") -> dict | None:
             "content": f"取消工单：{reason}".strip(),
             "at": time.time(),
         }
-        _apply_transition(db, t, STATUS_CLOSED, operator="system", reply=reply)
+        _apply_transition(
+            db, t, STATUS_CLOSED, operator=_clean_operator(operator), reply=reply
+        )
         return t.to_dict()
 
 
