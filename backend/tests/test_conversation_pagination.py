@@ -59,6 +59,37 @@ def test_history_revision_is_shared_across_pages_and_changes_for_equal_count_edi
     assert after['history_revision'] != second['history_revision']
 
 
+@pytest.mark.parametrize('same_connection', [True, False])
+def test_stable_pages_reuse_revision_but_committed_edits_invalidate_it(history, same_connection):
+    factory, client = history
+    engine = factory.kw['bind']
+    scans = []
+
+    @sa.event.listens_for(engine, 'before_cursor_execute')
+    def record_scan(connection, cursor, statement, parameters, context, executemany):
+        sql = statement.lower()
+        if sql.startswith('select') and 'from messages' in sql and 'limit' not in sql:
+            scans.append(connection.connection.driver_connection)
+
+    first = client.get('/api/conversation', params={'limit': 100}).json()
+    second = client.get('/api/conversation', params={'offset': 100}).json()
+    assert second['history_revision'] == first['history_revision']
+    assert len(scans) == 1
+    writer_engine = engine if same_connection else sa.create_engine(engine.url)
+    try:
+        with writer_engine.begin() as writer:
+            assert (writer.connection.driver_connection is scans[0]) == same_connection
+            writer.execute(sa.update(Message).where(Message.id == 'm-000').values(content='new'))
+    finally:
+        if not same_connection:
+            writer_engine.dispose()
+    after = client.get('/api/conversation', params={'offset': 100}).json()
+    assert len(scans) == 2
+    assert after['history_revision'] != first['history_revision']
+    assert after['total'] == second['total']
+    assert after['messages'] == second['messages']
+
+
 def test_equal_counts_still_identify_a_change_in_latest_conversation(history):
     factory, client = history
     first = client.get('/api/conversation', params={'limit': 100}).json()
@@ -101,11 +132,13 @@ def test_existing_empty_conversation_returns_zero(selection_store):
     assert page['history_revision']
 
 
-def test_revision_count_and_window_share_snapshot(history):
+@pytest.mark.parametrize('warm_cache', [False, True])
+def test_revision_count_and_window_share_snapshot(history, warm_cache):
     factory, client = history
     engine = factory.kw['bind']
     with engine.connect() as connection:
         connection.exec_driver_sql('PRAGMA journal_mode=WAL').close()
+    cached = client.get('/api/conversation', params={'limit': 1}).json() if warm_cache else None
     inserted = False
 
     @sa.event.listens_for(engine, 'after_cursor_execute')
@@ -118,6 +151,8 @@ def test_revision_count_and_window_share_snapshot(history):
 
     before = client.get('/api/conversation', params={'limit': 1}).json()
     assert inserted and before['total'] == 105 and before['messages'][0]['content'] == '0'
+    if warm_cache:
+        assert before == cached
     after = client.get('/api/conversation', params={'limit': 1}).json()
     assert after['total'] == 106 and after['messages'][0]['content'] == 'new'
     assert before['history_revision'] != after['history_revision']

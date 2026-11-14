@@ -76,6 +76,12 @@ def conversation(
     db = SessionLocal()
     try:
         db.execute(text('BEGIN'))
+        if paged:
+            connection = db.connection()
+            # 先固定读取快照。data_version 检测其他连接的提交，
+            # total_changes 补足当前物理连接执行的写入。
+            version = connection.exec_driver_sql("PRAGMA main.data_version").scalar_one()
+            changes = connection.connection.driver_connection.total_changes
         conv = (
             db.query(Conversation)
             .filter(Conversation.user_id == user["id"])
@@ -94,21 +100,29 @@ def conversation(
         pagination = {}
         if paged:
             start = 0 if offset is None else offset
-            stop = start + (100 if limit is None else limit)
-            digest = hashlib.sha256()
-            messages = []
-            total = 0
-            # 同一次有序读取生成指纹、计数和分页窗口。
-            for index, row in enumerate(query.yield_per(100)):
-                digest.update(json.dumps(tuple(row), separators=(",", ":")).encode("ascii"))
-                digest.update(b"\n")
-                if start <= index < stop:
-                    messages.append(row)
-                total += 1
+            size = 100 if limit is None else limit
+            cache_key = (version, changes, conv.id)
+            cached = connection.info.get("conversation_history_revision")
+            if cached is not None and cached[0] == cache_key:
+                _, total, revision = cached
+                messages = query.offset(start).limit(size).all() if start < total else []
+            else:
+                stop = start + size
+                digest = hashlib.sha256()
+                messages = []
+                total = 0
+                for index, row in enumerate(query.yield_per(100)):
+                    digest.update(json.dumps(tuple(row), separators=(",", ":")).encode("ascii"))
+                    digest.update(b"\n")
+                    if start <= index < stop:
+                        messages.append(row)
+                    total += 1
+                revision = digest.hexdigest()
+                connection.info["conversation_history_revision"] = (cache_key, total, revision)
             pagination = {
                 "total": total,
                 "conversation_id": conv.id,
-                "history_revision": digest.hexdigest(),
+                "history_revision": revision,
             }
         else:
             messages = query.all()
