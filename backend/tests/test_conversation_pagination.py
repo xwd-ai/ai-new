@@ -24,13 +24,16 @@ def history(selection_store):
 
 def test_legacy_and_paged_history_keep_stable_order_and_count(history):
     _, client = history
-    legacy = client.get('/api/conversation').json()
+    legacy_response = client.get('/api/conversation')
+    assert legacy_response.headers['cache-control'] == 'no-store'
+    legacy = legacy_response.json()
     assert set(legacy) == {'messages'} and len(legacy['messages']) == 105
     assert [m['content'] for m in legacy['messages']] == list(map(str, range(105)))
     for params, expected in [({'limit': 2}, ['0', '1']), ({'offset': 1, 'limit': 2}, ['1', '2']),
                              ({'offset': 100}, list(map(str, range(100, 105))))]:
         response = client.get('/api/conversation', params=params)
         assert response.status_code == 200
+        assert response.headers['cache-control'] == 'no-store'
         assert response.json()['total'] == 105
         assert [m['content'] for m in response.json()['messages']] == expected
     assert len(client.get('/api/conversation', params={'offset': 0}).json()['messages']) == 100
@@ -146,7 +149,9 @@ def test_missing_conversation_and_anonymous_have_no_total_leak(history):
     for identity in (None, {'id': 'empty-user'}):
         client.app.dependency_overrides[api.current_user] = lambda: identity
         assert client.get('/api/conversation').json() == {'messages': []}
-        assert client.get('/api/conversation', params={'limit': 1}).json() == {'messages': [], 'total': 0}
+        response = client.get('/api/conversation', params={'limit': 1})
+        assert response.headers['cache-control'] == 'no-store'
+        assert response.json() == {'messages': [], 'total': 0}
 
 
 def test_existing_empty_conversation_returns_zero(selection_store):

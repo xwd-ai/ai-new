@@ -2,7 +2,7 @@ import hashlib
 import json
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import text
 
 from backend.api.auth import current_user
@@ -65,10 +65,12 @@ def source_detail(source_id: str) -> SourceDetail:
     description="有效用户仅返回最近会话。分页时附带 total，选中会话时附带 conversation_id 和 history_revision。无效登录态返回空历史。",
 )
 def conversation(
+    response: Response,
     user: dict | None = Depends(current_user),
     offset: Annotated[int | None, Query(ge=0, description="跳过的消息数，省略时为 0")] = None,
     limit: Annotated[int | None, Query(ge=1, le=100, description="最多返回条数，分页时默认 100")] = None,
 ):
+    response.headers["Cache-Control"] = "no-store"
     paged = offset is not None or limit is not None
     empty = {"messages": [], **({"total": 0} if paged else {})}
     if not user:

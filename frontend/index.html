@@ -689,7 +689,11 @@
       onAuthExpired: requireRelogin,
       fetchHistory: async (onProgress, signal) => {
         const timeout = AbortSignal.timeout(10000);
-        const options = {headers: {'Authorization': 'Bearer ' + token}, signal: signal ? AbortSignal.any([signal, timeout]) : timeout};
+        const options = {
+          cache: 'no-store',
+          headers: {'Authorization': 'Bearer ' + token},
+          signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+        };
         try {
           return await fetchPagedHistory(path => { options.signal.throwIfAborted(); return fetch(path, options); }, me.id, onProgress);
         } catch (error) {

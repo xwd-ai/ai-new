@@ -123,6 +123,7 @@ test('actual scripts initialize all pages, manual sync replaces and preserves dr
   const {elements:e,calls}=page(()=>null,rows); await settle();
   assert.deepEqual(contents(e.chatLog),rows.map(x=>x.content)); assert.equal(reads(calls).length,3);
   assert.ok(calls.filter(x=>x.url==='/api/me'||x.url.startsWith('/api/conversation?')).every(x=>x.headers.Authorization==='Bearer test-token'));
+  assert.ok(calls.filter(x=>x.url==='/api/me'||x.url.startsWith('/api/conversation?')).every(x=>x.cache==='no-store'));
   assert.ok(reads(calls).every(x=>x.signal===reads(calls)[0].signal && x.signal.budget===10000));
   e.msgInput.value='draft'; await e.syncHistory.emit('click');
   assert.equal(e.msgInput.value,'draft'); assert.equal(e.chatLog.children.length,205);
