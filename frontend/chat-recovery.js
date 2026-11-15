@@ -117,6 +117,13 @@
             }, controller.signal), cancelled]);
             if (!current()) return;
             this.onMessages(messages);
+            if (!messages.length) {
+              const emptyStatus = '未读取到已保存的历史，已保留当前展示。';
+              this.onStatus(this.uncertain
+                ? emptyStatus + '发送结果仍待核对，请稍后再同步，勿重复提交。'
+                : emptyStatus);
+              return;
+            }
             this.onStatus(this.uncertain
               ? '已同步已保存消息；服务可能仍在处理，请稍后再同步，勿重复提交。'
               : '历史已同步。');

@@ -397,6 +397,40 @@ test('last page progress waits for final identity before reporting success',asyn
   assert.match(e.connectionStatus.textContent,/重新登录/);assert.equal(e.chatLog.textContent,'welcome');
 });
 
+test('empty history preserves the display, draft and any unresolved send',async()=>{
+  for (const uncertain of [false,true]) {
+    let empty=false;
+    const state=page(url=>{
+      if(url==='/api/chat')return json({},503);
+      if(empty&&url.startsWith('/api/conversation?'))return json({messages:[],total:0});
+    });
+    const {elements:e,calls,timers}=state;
+    await settle();
+    if (uncertain) {
+      e.msgInput.value='unconfirmed';
+      await e.sendBtn.emit('click');
+    }
+    const before=e.chatLog.textContent;
+    e.msgInput.value='draft';
+    empty=true;
+    await e.syncHistory.emit('click');
+    assert.match(e.connectionStatus.textContent,/未读取到已保存的历史.*保留/);
+    if(uncertain){
+      assert.match(e.connectionStatus.textContent,/勿重复提交/);
+      assert.match(e.uncertainTexts.textContent,/unconfirmed/);
+    }
+    assert.equal(e.chatLog.textContent,before);
+    assert.equal(e.msgInput.value,'draft');
+    assert.equal(e.syncHistory.disabled,false);
+    assert.equal(e.reloginLink.hidden,true);
+    assert.equal(timers.length,0);
+    assert.equal(calls.filter(x=>x.method==='POST').length,Number(uncertain));
+    empty=false;
+    await e.syncHistory.emit('click');
+    assert.match(e.connectionStatus.textContent,/已同步/);
+  }
+});
+
 test('uncertain POST is never retried and its text survives full history sync',async()=>{
   const {elements:e,calls}=page(url=>url==='/api/chat'?json({},503):null); await settle();
   e.msgInput.value='unconfirmed'; await e.sendBtn.emit('click');
