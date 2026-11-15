@@ -39,6 +39,7 @@
     .layout {
       display: grid;
       grid-template-columns: 260px 1fr 300px;
+      grid-template-rows: minmax(0, 1fr);
       height: 100vh;
     }
 
@@ -447,23 +448,27 @@
       window.location.href = '/login';
     });
 
-    function scrollBottom() { const s = document.querySelector('.chat-scroll'); s.scrollTop = s.scrollHeight; }
+    const chatScroll = document.querySelector('.chat-scroll');
+    function scrollBottom() { chatScroll.scrollTop = chatScroll.scrollHeight; }
+    function isAtBottom() {
+      return chatScroll.scrollHeight - chatScroll.clientHeight - chatScroll.scrollTop <= 2;
+    }
 
-    function addUserMsg(text) {
+    function addUserMsg(text, follow = true) {
       const wrap = document.createElement('div');
       wrap.className = 'msg user';
       wrap.innerHTML = `<div class="avatar">客</div><div class="body"><div class="bubble"></div></div>`;
       wrap.querySelector('.bubble').textContent = text;
       log.appendChild(wrap);
-      scrollBottom();
+      if (follow) scrollBottom();
     }
 
-    function addAiContainer() {
+    function addAiContainer(follow = true) {
       const wrap = document.createElement('div');
       wrap.className = 'msg ai';
       wrap.innerHTML = `<div class="avatar">AI</div><div class="body"></div>`;
       log.appendChild(wrap);
-      scrollBottom();
+      if (follow) scrollBottom();
       return wrap.querySelector('.body');
     }
 
@@ -483,7 +488,6 @@
       b.className = 'bubble';
       b.textContent = text;
       body.appendChild(b);
-      scrollBottom();
       return b;
     }
 
@@ -624,7 +628,10 @@
     const canUseSession = () => pageActive && !loginRequired;
 
     function showStatus(text) {
-      if (!loginRequired) connectionStatus.textContent = text;
+      if (loginRequired) return;
+      const follow = isAtBottom();
+      connectionStatus.textContent = text;
+      if (follow) scrollBottom();
     }
 
     function updateControls(busy) {
@@ -704,13 +711,16 @@
       },
       onMessages: messages => {
         if (!messages.length) return; // 未落库时保留欢迎语或结果不确定的本地消息。
+        const previousTop = chatScroll.scrollTop;
+        const atBottom = isAtBottom();
         log.replaceChildren();
         currentSources = [];
         messages.forEach(message => {
-          if (message.role === 'user') addUserMsg(message.content);
-          else if (message.role === 'assistant') addBubble(addAiContainer(), message.content);
+          if (message.role === 'user') addUserMsg(message.content, false);
+          else if (message.role === 'assistant') addBubble(addAiContainer(false), message.content);
         });
-        scrollBottom();
+        if (atBottom) scrollBottom();
+        else chatScroll.scrollTop = previousTop;
       },
       onStatus: showStatus,
       onBusy: updateControls,

@@ -42,6 +42,12 @@ function page(handler=()=>null, rows=[{role:'user',content:'saved'}]) {
     const element=elements[match[2]]=new Element(match[1]); element.hidden=/\bhidden\b/.test(match[0]);
   }
   elements.chatLog.textContent='welcome';
+  const chatScroll={
+    clientHeight:100,
+    get scrollHeight(){return Math.max(this.clientHeight,elements.chatLog.children.length*20);},
+    get scrollTop(){return this.position||0;},
+    set scrollTop(value){this.position=Math.max(0,Math.min(value,this.scrollHeight-this.clientHeight));},
+  };
   const calls=[], timers=[], timeouts=[], browser=new Element(), storage=new Map([
     ['token','test-token'],['user',JSON.stringify({id:'u',name:'客户',role:'customer'})],
   ]);
@@ -51,7 +57,7 @@ function page(handler=()=>null, rows=[{role:'user',content:'saved'}]) {
   const navigator={onLine:true};
   const context=vm.createContext({console, navigator, AbortController, window:browser,
     document:{getElementById:id=>{assert.ok(elements[id],`missing ${id}`); return elements[id];},
-      createElement:tag=>new Element(tag), querySelector:()=>new Element(), querySelectorAll:()=>[]},
+      createElement:tag=>new Element(tag), querySelector:selector=>selector==='.chat-scroll'?chatScroll:new Element(), querySelectorAll:()=>[]},
     localStorage:{getItem:key=>storage.get(key),removeItem:key=>storage.delete(key)},
     AbortSignal:{timeout:budget=>{
       const signal={budget,throwIfAborted(){}};
@@ -74,12 +80,29 @@ function page(handler=()=>null, rows=[{role:'user',content:'saved'}]) {
   const scripts=[...html.matchAll(/<script(?: src="([^"]+)")?>([\s\S]*?)<\/script>/g)];
   assert.deepEqual(scripts.filter(x=>x[1]).map(x=>x[1]),['/assets/chat-recovery.js']);
   for (const [,src,inline] of scripts) vm.runInContext(src?fs.readFileSync(path.join(root,src.replace('/assets/','')),'utf8'):inline,context,{filename:src||'index-inline.js'});
-  return {elements,calls,browser,navigator,timers,timeouts,storage,fillAndSend:context.fillAndSend,get reloads(){return reloads;},
+  return {elements,calls,browser,navigator,timers,timeouts,storage,chatScroll,fillAndSend:context.fillAndSend,get reloads(){return reloads;},
     async retry(){assert.ok(timers.length);timers.shift()();await settle();}};
 }
 const reads = calls => calls.filter(x=>x.url.startsWith('/api/conversation?'));
 const contents = log => log.children.map(x=>x.querySelector('.bubble').textContent);
 const rows = Array.from({length:205},(_,i)=>({role:i%2?'assistant':'user',content:`saved-${i}`}));
+
+test('history replay preserves reading position and follows new messages at the bottom',async()=>{
+  const history=rows.slice(0,10);
+  const {elements:e,chatScroll}=page(()=>null,history);
+  await settle();
+  assert.equal(chatScroll.scrollTop,100);
+  chatScroll.scrollTop=40;
+  history.push(rows[10]);
+  await e.syncHistory.emit('click');
+  assert.equal(chatScroll.scrollTop,40);
+  assert.equal(e.chatLog.children.length,11);
+  chatScroll.scrollTop=119;
+  history.push(rows[11]);
+  await e.syncHistory.emit('click');
+  assert.equal(chatScroll.scrollTop,140);
+  assert.equal(e.chatLog.children.length,12);
+});
 
 test('pagehide cancels paging and cached return synchronizes without losing the draft',async()=>{
   let release,hold=true;
