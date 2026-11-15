@@ -90,6 +90,36 @@ def test_stable_pages_reuse_revision_but_committed_edits_invalidate_it(history, 
     assert after['messages'] == second['messages']
 
 
+@pytest.mark.parametrize('replace_connection', [False, True])
+def test_history_revision_rebuilds_after_rollback_or_connection_replacement(history, replace_connection):
+    factory, client = history
+    engine = factory.kw['bind']
+    scans = []
+
+    @sa.event.listens_for(engine, 'before_cursor_execute')
+    def record_scan(connection, cursor, statement, parameters, context, executemany):
+        sql = statement.lower()
+        if sql.startswith('select') and 'from messages' in sql and 'limit' not in sql:
+            scans.append(connection.connection.driver_connection)
+
+    first = client.get('/api/conversation', params={'limit': 1}).json()
+    assert len(scans) == 1
+    if replace_connection:
+        engine.dispose()
+    else:
+        with engine.connect() as writer:
+            assert writer.connection.driver_connection is scans[0]
+            writer.execute(sa.update(Message).where(Message.id == 'm-000').values(content='rolled back'))
+            writer.rollback()
+
+    next_page = client.get('/api/conversation', params={'limit': 1}).json()
+    assert next_page == first
+    assert len(scans) == 2
+    assert (scans[1] is not scans[0]) == replace_connection
+    assert client.get('/api/conversation', params={'offset': 100}).json()['history_revision'] == first['history_revision']
+    assert len(scans) == 2
+
+
 def test_equal_counts_still_identify_a_change_in_latest_conversation(history):
     factory, client = history
     first = client.get('/api/conversation', params={'limit': 100}).json()
