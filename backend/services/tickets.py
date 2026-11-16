@@ -53,6 +53,8 @@ INITIAL_STATUS = STATUS_PENDING_CONFIRM
 PENDING_CONFIRM_TIMEOUT_SECONDS = 30 * 60
 # 单次扫描最多收敛的工单数，分批消化积压，避免一次扫描长时间占用写锁
 EXPIRE_BATCH_LIMIT = 200
+# 单批收敛条数的硬上限：与订单归档接口保持同一口径，超过即视为入参错误
+EXPIRE_BATCH_MAX = 500
 # 超时收敛的写锁键：同一时刻只允许一个扫描任务在临界区内收敛
 _EXPIRE_LOCK_KEY = "ticket:pending_confirm:expire"
 
@@ -498,6 +500,29 @@ def cancel_ticket(
         return t.to_dict()
 
 
+def _expire_batch_size(limit) -> int:
+    """校验单批收敛条数：非整数或越过 1–500 区间按入参错误拒绝。
+
+    同类的批量归档接口（订单侧）也以 500 为上限，两处口径一致，
+    调用方按同一个区间传参即可，不必记两套规则。
+    """
+    try:
+        value = int(limit)
+    except (TypeError, ValueError):
+        raise TicketValidationError(
+            "单批收敛条数必须是整数",
+            code=TicketErrorCode.INVALID_BATCH,
+            details={"field": "limit", "value": limit},
+        )
+    if value < 1 or value > EXPIRE_BATCH_MAX:
+        raise TicketValidationError(
+            f"单批收敛条数需在 1–{EXPIRE_BATCH_MAX} 之间",
+            code=TicketErrorCode.INVALID_BATCH,
+            details={"field": "limit", "value": value},
+        )
+    return value
+
+
 def expire_pending_tickets(
     timeout_seconds: int | None = None,
     limit: int | None = None,
@@ -512,7 +537,9 @@ def expire_pending_tickets(
     并发控制：整个扫描收敛过程持有固定 key 的写锁，多个调度触发时串行执行，
     先到者收敛完毕，后到者按同条件重查已无候选，不会重复关闭。
     分批消化：单次最多处理 limit 条，返回的 remaining 表示仍有超时草稿待收敛，
-    调用方可据此决定是否继续下一批。
+    调用方可据此决定是否继续下一批。limit 越界（非整数、小于 1 或超过上限）
+    按入参错误拒绝，不再静默拉回合法区间——批量接口一次改一批数据，
+    参数写错应当立刻暴露，而不是让调用方以为传什么都生效。
 
     返回扫描与收敛统计，closed_ids 为本次被关闭的工单号。
     """
@@ -521,7 +548,7 @@ def expire_pending_tickets(
         if timeout_seconds is None
         else max(0, int(timeout_seconds))
     )
-    batch = EXPIRE_BATCH_LIMIT if limit is None else max(1, int(limit))
+    batch = EXPIRE_BATCH_LIMIT if limit is None else _expire_batch_size(limit)
     ts = time.time() if now is None else now
     deadline = ts - timeout
 

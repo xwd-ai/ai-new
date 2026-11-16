@@ -603,6 +603,7 @@ def expire_pending_tickets(
     仅管理员可触发，供定时任务或运营手动调用：超过超时阈值仍未确认的草稿
     统一关闭，并写入取消说明与状态时间线。timeout_seconds / limit 可覆盖默认
     阈值与单批上限，返回的 remaining 大于 0 表示仍有超时草稿待下一批处理。
+    limit 超出 1–500 时按入参错误返回 422，与订单归档接口的上限口径一致。
     """
     result = tickets.expire_pending_tickets(timeout_seconds=timeout_seconds, limit=limit)
     if result["closed"]:
