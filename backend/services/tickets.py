@@ -199,7 +199,14 @@ def _ticket_session(write: bool = False):
 
 
 def _load_ticket(db, ticket_id: str):
-    """按工单号取单条记录，不存在返回 None。"""
+    """按工单号取单条记录，不存在返回 None。
+
+    工单号不是字符串时直接按「查不到」返回：请求体里混进对象、数组这类值
+    不该一路走到 SQL 绑定层把接口打成 500，统一按不存在处理，
+    所有取数入口（详情、回复、改状态、确认、取消）共享这一道防线。
+    """
+    if not isinstance(ticket_id, str):
+        return None
     return db.query(Ticket).filter(Ticket.id == ticket_id).first()
 
 
@@ -523,6 +530,32 @@ def _expire_batch_size(limit) -> int:
     return value
 
 
+def _pending_timeout(timeout_seconds) -> int:
+    """校验待确认超时阈值：未传取默认值，非整数或负数按入参错误拒绝。
+
+    负数阈值没有业务含义，却会把「现在还没到期」的草稿全部判成超时——
+    一次写错的参数就能立即批量关闭所有待确认工单，所以和 limit 一样
+    当场拒绝，而不是悄悄拉回 0 继续执行。0 是合法值，表示「立即视为超时」。
+    """
+    if timeout_seconds is None:
+        return PENDING_CONFIRM_TIMEOUT_SECONDS
+    try:
+        timeout = int(timeout_seconds)
+    except (TypeError, ValueError):
+        raise TicketValidationError(
+            "待确认超时阈值必须是整数",
+            code=TicketErrorCode.INVALID_PAYLOAD,
+            details={"field": "timeout_seconds", "value": timeout_seconds},
+        )
+    if timeout < 0:
+        raise TicketValidationError(
+            "待确认超时阈值不能为负数",
+            code=TicketErrorCode.INVALID_PAYLOAD,
+            details={"field": "timeout_seconds", "value": timeout},
+        )
+    return timeout
+
+
 def expire_pending_tickets(
     timeout_seconds: int | None = None,
     limit: int | None = None,
@@ -540,14 +573,12 @@ def expire_pending_tickets(
     调用方可据此决定是否继续下一批。limit 越界（非整数、小于 1 或超过上限）
     按入参错误拒绝，不再静默拉回合法区间——批量接口一次改一批数据，
     参数写错应当立刻暴露，而不是让调用方以为传什么都生效。
+    timeout_seconds 同理：负数或非整数直接拒绝，否则负阈值会把还没到期的
+    草稿全部判成超时；0 保留为合法值，表示「立即视为超时」。
 
     返回扫描与收敛统计，closed_ids 为本次被关闭的工单号。
     """
-    timeout = (
-        PENDING_CONFIRM_TIMEOUT_SECONDS
-        if timeout_seconds is None
-        else max(0, int(timeout_seconds))
-    )
+    timeout = _pending_timeout(timeout_seconds)
     batch = EXPIRE_BATCH_LIMIT if limit is None else _expire_batch_size(limit)
     ts = time.time() if now is None else now
     deadline = ts - timeout
@@ -625,12 +656,10 @@ def list_pending_tickets(
     并以 expired / remaining_seconds 标记其状态，避免前端拿到无法确认的条目。
     user_id 非空时只返回该用户的草稿，用于普通用户视角的列表隔离；
     管理员需要全量视图时不传 user_id。列表按建单时间倒序，最新草稿排在最前。
+    timeout_seconds 与超时收敛共用同一套校验：负数或非整数直接拒绝，
+    避免查询视图和收敛视图对「是否超时」的判断出现分歧。
     """
-    timeout = (
-        PENDING_CONFIRM_TIMEOUT_SECONDS
-        if timeout_seconds is None
-        else max(0, int(timeout_seconds))
-    )
+    timeout = _pending_timeout(timeout_seconds)
     ts = time.time() if now is None else now
     deadline = ts - timeout
 
