@@ -155,7 +155,8 @@ class Session(Base):
     username: Mapped[str] = mapped_column(String, nullable=False)
     name: Mapped[str] = mapped_column(String, nullable=False)
     role: Mapped[str] = mapped_column(String, nullable=False)
-    expires_at: Mapped[float] = mapped_column(Float, nullable=False)
+    # expires_at 是过期清理的扫描条件，建索引避免清一批过期会话也要全表扫
+    expires_at: Mapped[float] = mapped_column(Float, nullable=False, index=True)
 
     def to_dict(self) -> dict:
         return {
@@ -186,7 +187,8 @@ class RevokedToken(Base):
     jti: Mapped[str] = mapped_column(String, primary_key=True)
     user_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     token_type: Mapped[str] = mapped_column(String, nullable=False)  # access / refresh
-    expires_at: Mapped[float] = mapped_column(Float, nullable=False)
+    # expires_at 是过期清理的扫描条件，建索引避免整表扫描
+    expires_at: Mapped[float] = mapped_column(Float, nullable=False, index=True)
     revoked_at: Mapped[float] = mapped_column(Float, nullable=False)
     reason: Mapped[str] = mapped_column(String, nullable=False, default="")
 
@@ -218,7 +220,8 @@ class RefreshToken(Base):
 
     token: Mapped[str] = mapped_column(String, primary_key=True)
     user_id: Mapped[str] = mapped_column(String, nullable=False)
-    expires_at: Mapped[float] = mapped_column(Float, nullable=False)
+    # expires_at 是过期清理的扫描条件，建索引避免整表扫描
+    expires_at: Mapped[float] = mapped_column(Float, nullable=False, index=True)
     revoked_at: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     @property

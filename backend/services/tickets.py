@@ -995,14 +995,19 @@ def build_ticket_statistics(user_id: str | None = None, days: int | None = None)
             query = query.filter(Ticket.user_id == user_id)
         if since is not None:
             query = query.filter(Ticket.created_at >= since)
-        rows = query.all()
 
+        # 状态计数整组下推给数据库聚合：不再把整表（含回复 JSON 与长文本）拉回内存逐条数
+        grouped = dict(
+            query.with_entities(Ticket.status, func.count(Ticket.id))
+            .group_by(Ticket.status)
+            .all()
+        )
         status_counts = {status.value: 0 for status in TicketStatus}
-        for ticket in rows:
-            if ticket.status in status_counts:
-                status_counts[ticket.status] += 1
+        for status_value, count in grouped.items():
+            if status_value in status_counts:
+                status_counts[status_value] = count
 
-        total = len(rows)
+        total = sum(grouped.values())
         breakdown = [
             {
                 "status": status.value,
@@ -1013,7 +1018,12 @@ def build_ticket_statistics(user_id: str | None = None, days: int | None = None)
             for status in TicketStatus
         ]
 
-        settled_rows = [t for t in rows if t.status in SETTLED_STATUSES]
+        # 处理时长只需结算工单的三个轻量字段，不取回复与排查长文本
+        settled_rows = (
+            query.with_entities(Ticket.id, Ticket.status, Ticket.created_at)
+            .filter(Ticket.status.in_(SETTLED_STATUSES))
+            .all()
+        )
         by_status = _handling_durations(db, settled_rows)
 
     all_durations = [d for values in by_status.values() for d in values]

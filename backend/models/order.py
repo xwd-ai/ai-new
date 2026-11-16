@@ -256,11 +256,13 @@ class Order(Base):
     __tablename__ = "orders"
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
-    user_id: Mapped[str] = mapped_column(String, nullable=False)
+    # user_id / status / expires_at 是用户订单查询、管理筛选与到期归档扫描的高频条件，
+    # 各建单列索引让这些查询走索引定位而不是全表扫描
+    user_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     product_tier: Mapped[str] = mapped_column(String, nullable=False)  # basic / pro
-    status: Mapped[str] = mapped_column(String, nullable=False)  # 取值见 OrderStatus
+    status: Mapped[str] = mapped_column(String, nullable=False, index=True)  # 取值见 OrderStatus
     started_at: Mapped[float] = mapped_column(Float, nullable=False)
-    expires_at: Mapped[float] = mapped_column(Float, nullable=False)
+    expires_at: Mapped[float] = mapped_column(Float, nullable=False, index=True)
 
     def to_dict(self) -> dict:
         return {

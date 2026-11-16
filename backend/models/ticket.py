@@ -264,13 +264,15 @@ class Ticket(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     dedup_key: Mapped[str] = mapped_column(String, nullable=False, unique=True)
-    user_id: Mapped[str] = mapped_column(String, nullable=False)
+    # user_id / status / created_at 是列表筛选、超时扫描与统计聚合的高频条件，
+    # 各建单列索引让这些查询走索引定位而不是全表扫描
+    user_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     user_name: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str] = mapped_column(String, nullable=False)
     tried_steps: Mapped[str] = mapped_column(String, default="")
     evidence: Mapped[str] = mapped_column(String, default="")
-    status: Mapped[str] = mapped_column(String, default="open")  # 取值见 TicketStatus
-    created_at: Mapped[float] = mapped_column(Float, nullable=False)
+    status: Mapped[str] = mapped_column(String, default="open", index=True)  # 取值见 TicketStatus
+    created_at: Mapped[float] = mapped_column(Float, nullable=False, index=True)
     replies: Mapped[list] = mapped_column(JSON, default=list)
 
     def to_dict(self) -> dict:
