@@ -16,11 +16,14 @@
 
 from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import JSONResponse
-from fastapi.routing import APIRoute
+from fastapi import APIRouter, Depends, Query
 
-from backend.api.auth import current_user, require_admin, require_login
+from backend.api.auth import (
+    BusinessErrorRoute,
+    current_user,
+    require_admin,
+    require_login,
+)
 from backend.database import SessionLocal
 from backend.models import TriedStep
 from backend.models.order import OrderBusinessError
@@ -67,35 +70,23 @@ def _as_ticket_error(exc: auth.AuthError) -> Optional[TicketBusinessError]:
     return None
 
 
-class TicketErrorRoute(APIRoute):
-    """把工单业务异常统一转换为错误响应。
+class TicketErrorRoute(BusinessErrorRoute):
+    """工单接口与同路由下的订单接口共用的错误响应。
 
-    业务代码只负责抛出 TicketBusinessError 派生异常，本路由类在一个地方拼装响应：
-    HTTP 状态取自异常的 http_status，响应体固定为
-    {"error": 文案, "error_code": 错误码, "error_detail": 补充上下文（可选）}。
-    新增接口不必再各写一遍 try/except，错误结构也不会随接口各自漂移。
-    权限依赖抛出的认证异常也在这里收口，路由签名只声明「需要什么身份」，
-    不必为了对齐错误码在每个接口里再包一层转换。订单接口挂在本路由下，
-    订单业务异常沿用同一套响应结构，避免同一模块里出现两种错误契约。
+    只声明要接管的异常族与认证异常的翻译规则，响应码与响应体结构交给
+    BusinessErrorRoute 统一处理：工单/订单业务异常直接按其 http_status 与
+    统一字段输出，认证层抛出的 401/403 先翻译成本模块错误码再输出，
+    因此「未登录一律 TICKET_UNAUTHORIZED、无权限一律 TICKET_FORBIDDEN」
+    这条对外契约不随权限实现变化而改变。
     """
 
-    def get_route_handler(self):
-        handler = super().get_route_handler()
+    error_types = (TicketBusinessError, OrderBusinessError, auth.AuthError)
 
-        async def dispatch(request: Request):
-            try:
-                return await handler(request)
-            except (TicketBusinessError, OrderBusinessError) as exc:
-                return JSONResponse(status_code=exc.http_status, content=exc.to_payload())
-            except auth.AuthError as exc:
-                translated = _as_ticket_error(exc)
-                if translated is None:
-                    raise
-                return JSONResponse(
-                    status_code=translated.http_status, content=translated.to_payload()
-                )
-
-        return dispatch
+    def translate_error(self, exc):
+        """认证异常翻译成工单错误码；其它异常原样返回。"""
+        if isinstance(exc, auth.AuthError):
+            return _as_ticket_error(exc)
+        return exc
 
 
 tickets_router = APIRouter(route_class=TicketErrorRoute)

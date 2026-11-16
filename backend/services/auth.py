@@ -73,7 +73,12 @@ logger = logging.getLogger(__name__)
 
 
 class AuthError(ValueError):
-    """认证业务异常基类，携带错误码与建议的 HTTP 状态。"""
+    """认证业务异常基类，携带错误码与建议的 HTTP 状态。
+
+    对外暴露 code / message / details / http_status 四项，与订单、工单模块的
+    异常同名同义，接口层据此用同一套逻辑组装错误响应；error_code 与 detail
+    是既有名字，保留为同一份数据的别名，调用方与既有用例无需改动。
+    """
 
     error_code = "AUTH_ERROR"
     http_status = 400
@@ -82,6 +87,16 @@ class AuthError(ValueError):
         super().__init__(message)
         self.message = message
         self.detail = detail
+
+    @property
+    def code(self) -> str:
+        """对外错误码，与工单/订单异常的 code 同名。"""
+        return self.error_code
+
+    @property
+    def details(self) -> dict:
+        """补充上下文，与工单/订单异常的 details 同名。"""
+        return dict(self.detail or {})
 
     def to_payload(self) -> dict:
         payload = {"error": self.message, "error_code": self.error_code}

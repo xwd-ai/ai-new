@@ -17,6 +17,7 @@
   过期凭据清理是运维动作，只对管理员开放：未登录 401、非管理员 403。
 """
 
+import re
 from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, Header, Request
@@ -38,12 +39,73 @@ from backend.schemas.auth import (
 from backend.services import auth
 
 
-class AuthErrorRoute(APIRoute):
-    """把认证业务异常统一转换为错误响应。
+# ---------------------------------------------------------------------------
+# 错误响应契约：认证、订单、工单三个模块共用同一套字段与同一个组装入口
+# ---------------------------------------------------------------------------
+#
+# 各模块的业务异常统一携带 code / message / details / http_status 四项：
+# code 是机器可读标识，message 是可直接展示的文案，details 是可选补充上下文，
+# http_status 是建议的响应码。响应体固定为
+#   {"error": 文案, "error_code": 错误码, "error_detail": 补充上下文（可选）}
+# 且只由 build_error_body 一处组装，路由类不再各自拼字典。
+# 错误码约定为大写字母开头、只含大写字母/数字/下划线的 <模块>_<原因> 形式，
+# 因此前端可以按 error_code 前缀区分来源，按整体值分支处理。
 
-    响应体固定为 {"error": 文案, "error_code": 错误码, "error_detail": 补充上下文（可选）}，
-    与工单模块的错误结构保持一致，前端按 error_code 分支即可。
+ERROR_CODE_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+def is_valid_error_code(code: str) -> bool:
+    """判断错误码是否符合对外约定，供用例与自检使用。"""
+    return bool(ERROR_CODE_PATTERN.match(code or ""))
+
+
+def build_error_body(
+    code: str, message: str = "", details: Optional[dict] = None
+) -> dict:
+    """组装错误响应体：字段顺序固定，补充上下文只在有值时出现。
+
+    details 复制一份再放入，避免调用方后续改动异常对象时影响已生成的响应。
     """
+    body = {"error": message or "", "error_code": code}
+    if details:
+        body["error_detail"] = dict(details)
+    return body
+
+
+def error_payload(exc: Exception) -> dict:
+    """把业务异常序列化为错误响应体。
+
+    认证异常历史上用 error_code/detail 两个字段名，工单与订单用 code/details，
+    认证异常类已把两套名字对齐，这里按同一组属性取值，不再按模块分支。
+    """
+    return build_error_body(
+        getattr(exc, "code", ""),
+        getattr(exc, "message", ""),
+        getattr(exc, "details", None),
+    )
+
+
+def error_response(exc: Exception) -> JSONResponse:
+    """按异常自带的状态码与统一结构生成错误响应。"""
+    return JSONResponse(
+        status_code=getattr(exc, "http_status", 500), content=error_payload(exc)
+    )
+
+
+class BusinessErrorRoute(APIRoute):
+    """业务异常统一收口的路由基类。
+
+    子类只声明本模块要接管的异常族 error_types，必要时覆写 translate_error
+    把上游异常翻译成本模块的错误码；响应码与响应体形状一律由本类决定，
+    新增接口不必再各写一遍 try/except，错误结构也不会随接口各自漂移。
+    """
+
+    #: 本路由要转换为错误响应的异常类型，为空表示不接管任何业务异常。
+    error_types: tuple = ()
+
+    def translate_error(self, exc: Exception):
+        """把捕获到的异常换成对外异常，返回 None 表示不接管、按原样抛出。"""
+        return exc
 
     def get_route_handler(self):
         handler = super().get_route_handler()
@@ -51,10 +113,19 @@ class AuthErrorRoute(APIRoute):
         async def dispatch(request: Request):
             try:
                 return await handler(request)
-            except auth.AuthError as exc:
-                return JSONResponse(status_code=exc.http_status, content=exc.to_payload())
+            except self.error_types as exc:
+                translated = self.translate_error(exc)
+                if translated is None:
+                    raise
+                return error_response(translated)
 
         return dispatch
+
+
+class AuthErrorRoute(BusinessErrorRoute):
+    """认证接口：认证异常原样转成统一错误响应，不改写错误码。"""
+
+    error_types = (auth.AuthError,)
 
 
 auth_router = APIRouter(route_class=AuthErrorRoute)
