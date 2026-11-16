@@ -735,18 +735,23 @@
       },
       onMessages: messages => {
         if (!messages.length) return; // 未落库时保留欢迎语或结果不确定的本地消息。
-        if (renderedHistory?.length === messages.length && messages.every((message, index) => {
-          const previous = renderedHistory[index];
-          return message.role === previous.role && message.content === previous.content;
-        })) return;
+        const canReuse = renderedHistory && renderedHistory.length <= messages.length &&
+          renderedHistory.every((previous, index) => {
+            const message = messages[index];
+            return message.role === previous.role && message.content === previous.content;
+          });
+        const firstNewMessage = canReuse ? renderedHistory.length : 0;
+        if (firstNewMessage === messages.length) return;
         const previousTop = chatScroll.scrollTop;
         const atBottom = isAtBottom();
-        log.replaceChildren();
-        currentSources = [];
-        messages.forEach(message => {
+        if (!canReuse) {
+          log.replaceChildren();
+          currentSources = [];
+        }
+        for (const message of messages.slice(firstNewMessage)) {
           if (message.role === 'user') addUserMsg(message.content, false);
           else if (message.role === 'assistant') addBubble(addAiContainer(false), message.content);
-        });
+        }
         renderedHistory = messages;
         if (atBottom) scrollBottom();
         else {

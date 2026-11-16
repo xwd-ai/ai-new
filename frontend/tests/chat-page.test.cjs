@@ -95,16 +95,19 @@ test('history replay preserves reading position and follows new messages at the 
   const history=rows.slice(0,10);
   const {elements:e,chatScroll}=page(()=>null,history);
   await settle();
+  const original=e.chatLog.children[0];
   assert.equal(chatScroll.scrollTop,100);
   chatScroll.scrollTop=40;
   history.push(rows[10]);
   await e.syncHistory.emit('click');
   assert.equal(chatScroll.scrollTop,40);
+  assert.equal(e.chatLog.children[0],original);
   assert.equal(e.chatLog.children.length,11);
   chatScroll.scrollTop=119;
   history.push(rows[11]);
   await e.syncHistory.emit('click');
   assert.equal(chatScroll.scrollTop,140);
+  assert.equal(e.chatLog.children[0],original);
   assert.equal(e.chatLog.children.length,12);
 });
 
@@ -121,6 +124,11 @@ test('unchanged saved history keeps message nodes while equal-count edits refres
   await e.syncHistory.emit('click');
   assert.notEqual(e.chatLog.children[0],original);
   assert.equal(contents(e.chatLog)[0],'edited message');
+  const editedNode=e.chatLog.children[0];
+  history.unshift({role:'assistant',content:'inserted earlier'});
+  await e.syncHistory.emit('click');
+  assert.notEqual(e.chatLog.children[1],editedNode);
+  assert.deepEqual(contents(e.chatLog),history.map(row=>row.content));
 });
 
 test('a local send invalidates the previously rendered history',async()=>{
