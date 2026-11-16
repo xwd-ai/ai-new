@@ -187,7 +187,14 @@
 
     /* 输入区 */
     .composer {
+      position: relative;
       padding: 14px 22px 18px; background: var(--surface); border-top: 1px solid var(--border);
+    }
+    .jump-latest {
+      position: absolute; right: 22px; bottom: calc(100% + 8px); z-index: 1;
+      padding: 8px 12px; border: 1px solid var(--border); border-radius: 12px;
+      background: var(--surface); color: var(--text); box-shadow: var(--shadow);
+      font: inherit; font-size: 13px; cursor: pointer;
     }
     .composer .inner { max-width: 760px; margin: 0 auto; }
     .composer .box {
@@ -377,7 +384,7 @@
         <div id="copyUnsavedStatus" role="status"></div>
         <textarea id="copyUnsavedText" aria-label="可手动复制的未保存内容" rows="4" readonly hidden style="width:100%;box-sizing:border-box"></textarea>
       </div>
-      <div class="chat-scroll">
+      <div class="chat-scroll" tabindex="-1" role="region" aria-label="对话消息">
         <details id="uncertainQuestions" hidden style="max-width:760px;margin:0 auto 16px;color:var(--muted)">
           <summary>发送结果待核对（本页保留原文，请勿重复提交）</summary>
           <div id="uncertainTexts" style="white-space:pre-wrap;overflow-wrap:anywhere"></div>
@@ -393,6 +400,7 @@
       </div>
 
       <div class="composer">
+        <button id="jumpLatest" class="jump-latest" type="button" hidden>返回最新消息</button>
         <div class="inner">
           <div class="box">
             <textarea id="msgInput" rows="1" placeholder="输入问题，例如：专业版导出功能一直失败"></textarea>
@@ -449,10 +457,23 @@
     });
 
     const chatScroll = document.querySelector('.chat-scroll');
-    function scrollBottom() { chatScroll.scrollTop = chatScroll.scrollHeight; }
+    const jumpLatest = document.getElementById('jumpLatest');
+    function scrollBottom() {
+      chatScroll.scrollTop = chatScroll.scrollHeight;
+      updateJumpLatest();
+    }
     function isAtBottom() {
       return chatScroll.scrollHeight - chatScroll.clientHeight - chatScroll.scrollTop <= 2;
     }
+    function updateJumpLatest() {
+      jumpLatest.hidden = isAtBottom();
+    }
+    chatScroll.addEventListener('scroll', updateJumpLatest, {passive: true});
+    window.addEventListener('resize', updateJumpLatest);
+    jumpLatest.addEventListener('click', () => {
+      chatScroll.focus({preventScroll: true});
+      scrollBottom();
+    });
 
     function addUserMsg(text, follow = true) {
       const wrap = document.createElement('div');
@@ -632,6 +653,7 @@
       const follow = isAtBottom();
       connectionStatus.textContent = text;
       if (follow) scrollBottom();
+      else updateJumpLatest();
     }
 
     function updateControls(busy) {
@@ -649,6 +671,7 @@
       copyUnsaved.hidden = false;
       document.getElementById('reloginLink').hidden = false;
       connectionStatus.textContent = message;
+      updateJumpLatest();
     }
 
     function clearCopyFeedback() {
@@ -720,7 +743,10 @@
           else if (message.role === 'assistant') addBubble(addAiContainer(false), message.content);
         });
         if (atBottom) scrollBottom();
-        else chatScroll.scrollTop = previousTop;
+        else {
+          chatScroll.scrollTop = previousTop;
+          updateJumpLatest();
+        }
       },
       onStatus: showStatus,
       onBusy: updateControls,
@@ -814,7 +840,13 @@
       input.value = t;
       handleSend();
     }
-    function newChat() { if (recovery.sending || recovery.syncing) return; log.innerHTML = ''; currentSources = []; input.focus(); }
+    function newChat() {
+      if (recovery.sending || recovery.syncing) return;
+      log.innerHTML = '';
+      currentSources = [];
+      updateJumpLatest();
+      input.focus();
+    }
     function switchConv(el) { document.querySelectorAll('.conv').forEach(c => c.classList.remove('active')); el.classList.add('active'); }
     function goTickets() { alert('工单管理页（后续实现）'); }
 

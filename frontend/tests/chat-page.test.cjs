@@ -42,12 +42,16 @@ function page(handler=()=>null, rows=[{role:'user',content:'saved'}]) {
     const element=elements[match[2]]=new Element(match[1]); element.hidden=/\bhidden\b/.test(match[0]);
   }
   elements.chatLog.textContent='welcome';
-  const chatScroll={
+  const chatScroll=Object.assign(new Element(),{
     clientHeight:100,
-    get scrollHeight(){return Math.max(this.clientHeight,elements.chatLog.children.length*20);},
-    get scrollTop(){return this.position||0;},
-    set scrollTop(value){this.position=Math.max(0,Math.min(value,this.scrollHeight-this.clientHeight));},
-  };
+  });
+  Object.defineProperties(chatScroll,{
+    scrollHeight:{get(){return Math.max(this.clientHeight,elements.chatLog.children.length*20);}},
+    scrollTop:{
+      get(){return this.position||0;},
+      set(value){this.position=Math.max(0,Math.min(value,this.scrollHeight-this.clientHeight));},
+    },
+  });
   const calls=[], timers=[], timeouts=[], browser=new Element(), storage=new Map([
     ['token','test-token'],['user',JSON.stringify({id:'u',name:'客户',role:'customer'})],
   ]);
@@ -102,6 +106,23 @@ test('history replay preserves reading position and follows new messages at the 
   await e.syncHistory.emit('click');
   assert.equal(chatScroll.scrollTop,140);
   assert.equal(e.chatLog.children.length,12);
+});
+
+test('return to latest is available while reading and jumps without sending a request',async()=>{
+  const {elements:e,chatScroll,calls}=page(()=>null,rows);
+  await settle();
+  assert.equal(e.jumpLatest.hidden,true);
+  chatScroll.scrollTop=40;
+  await chatScroll.emit('scroll');
+  assert.equal(e.jumpLatest.hidden,false);
+  e.msgInput.value='draft';
+  const callCount=calls.length;
+  await e.jumpLatest.emit('click');
+  assert.equal(chatScroll.scrollTop,chatScroll.scrollHeight-chatScroll.clientHeight);
+  assert.equal(e.jumpLatest.hidden,true);
+  assert.equal(chatScroll.focused,true);
+  assert.equal(e.msgInput.value,'draft');
+  assert.equal(calls.length,callCount);
 });
 
 test('pagehide cancels paging and cached return synchronizes without losing the draft',async()=>{
