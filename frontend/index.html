@@ -637,6 +637,7 @@
 
     // 当前对话命中的知识来源（供建单时沉淀为「依据」）
     let currentSources = [];
+    let renderedHistory = null;
 
     const syncBtn = document.getElementById('syncHistory');
     const connectionStatus = document.getElementById('connectionStatus');
@@ -734,6 +735,10 @@
       },
       onMessages: messages => {
         if (!messages.length) return; // 未落库时保留欢迎语或结果不确定的本地消息。
+        if (renderedHistory?.length === messages.length && messages.every((message, index) => {
+          const previous = renderedHistory[index];
+          return message.role === previous.role && message.content === previous.content;
+        })) return;
         const previousTop = chatScroll.scrollTop;
         const atBottom = isAtBottom();
         log.replaceChildren();
@@ -742,6 +747,7 @@
           if (message.role === 'user') addUserMsg(message.content, false);
           else if (message.role === 'assistant') addBubble(addAiContainer(false), message.content);
         });
+        renderedHistory = messages;
         if (atBottom) scrollBottom();
         else {
           chatScroll.scrollTop = previousTop;
@@ -775,6 +781,7 @@
     async function handleSend() {
       const text = input.value.trim();
       if (!text || !recovery.beginSend()) return;
+      renderedHistory = null;
       addUserMsg(text);
       input.value = '';
       input.style.height = 'auto';
@@ -843,6 +850,7 @@
     function newChat() {
       if (recovery.sending || recovery.syncing) return;
       log.innerHTML = '';
+      renderedHistory = null;
       currentSources = [];
       updateJumpLatest();
       input.focus();
