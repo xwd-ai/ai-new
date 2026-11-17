@@ -203,11 +203,14 @@ def test_http_history_revision_changes_when_tail_content_is_edited(server, tmp_p
         with sqlite3.connect(database_path) as db:
             db.execute('UPDATE messages SET content = ? WHERE id = ?', ('revised-100', 'history-100'))
 
+        tail_during_sync = page(100)
+        # A client that read page zero before the write must reread it.
+        assert tail_during_sync['history_revision'] != first_before['history_revision']
         first_after, tail_after = page(0), page(100)
-        pages = (first_before, tail_before, first_after, tail_after)
+        pages = (first_before, tail_before, tail_during_sync, first_after, tail_after)
         assert {data['total'] for data in pages} == {101}
         assert {data['conversation_id'] for data in pages} == {'history-test'}
-        assert first_after['history_revision'] == tail_after['history_revision'] != first_before['history_revision']
+        assert first_after['history_revision'] == tail_after['history_revision'] == tail_during_sync['history_revision']
         assert first_after['messages'] == first_before['messages'] == expected[:100]
         assert tail_after['messages'] == [{**expected[100], 'content': 'revised-100'}]
 
