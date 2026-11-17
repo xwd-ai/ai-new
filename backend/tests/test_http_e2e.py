@@ -134,16 +134,16 @@ def verify_answer(client, headers, source_id):
     return answer
 
 
-def seed_history(database_path, user_id):
-    """Start one message below the page limit without making 50 model calls."""
+def seed_history(database_path, user_id, count=99):
+    """Seed a predictable history without sending model requests."""
     messages = [
         ('assistant' if i % 2 else 'user', f'history-{i}', i + 1)
-        for i in range(99)
+        for i in range(count)
     ]
     with sqlite3.connect(database_path) as db:
         db.execute(
             "INSERT INTO conversations (id, user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            ('history-test', user_id, 'History', 1, 99),
+            ('history-test', user_id, 'History', 1, count),
         )
         db.executemany(
             "INSERT INTO messages (id, conversation_id, role, content, at) VALUES (?, 'history-test', ?, ?, ?)",
@@ -180,6 +180,36 @@ def test_http_history_append_across_page_boundary(server, tmp_path):
         assert [(m['role'], m['content']) for m in first['messages'][99:] + tail['messages']] == [
             ('user', 'e2eexport'), ('assistant', answer['reply']),
         ]
+
+
+def test_http_history_revision_changes_when_tail_content_is_edited(server, tmp_path):
+    _, client = server()
+    with client:
+        customer = login(client, 'customer')
+        user = client.get('/api/me', headers=customer).raise_for_status().json()['user']
+        database_path = tmp_path / 'http.db'
+        expected = seed_history(database_path, user['id'], count=101)
+
+        def page(offset):
+            return client.get('/api/conversation', headers=customer, params={
+                'offset': offset, 'limit': 100,
+            }).raise_for_status().json()
+
+        first_before, tail_before = page(0), page(100)
+        assert first_before['history_revision'] == tail_before['history_revision']
+        assert tail_before['messages'] == expected[100:]
+
+        # Update only the second page via a separate SQLite connection.
+        with sqlite3.connect(database_path) as db:
+            db.execute('UPDATE messages SET content = ? WHERE id = ?', ('revised-100', 'history-100'))
+
+        first_after, tail_after = page(0), page(100)
+        pages = (first_before, tail_before, first_after, tail_after)
+        assert {data['total'] for data in pages} == {101}
+        assert {data['conversation_id'] for data in pages} == {'history-test'}
+        assert first_after['history_revision'] == tail_after['history_revision'] != first_before['history_revision']
+        assert first_after['messages'] == first_before['messages'] == expected[:100]
+        assert tail_after['messages'] == [{**expected[100], 'content': 'revised-100'}]
 
 
 def test_http_ingest_retrieval_chat_and_restart_persistence(server):
