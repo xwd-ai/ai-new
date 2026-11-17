@@ -3,6 +3,7 @@
 import os
 from contextlib import contextmanager
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import time
@@ -131,6 +132,54 @@ def verify_answer(client, headers, source_id):
     assert [source['id'] for source in answer['sources']] == [source_id]
     assert answer['trace'][-1]['kind'] == 'done'
     return answer
+
+
+def seed_history(database_path, user_id):
+    """Start one message below the page limit without making 50 model calls."""
+    messages = [
+        ('assistant' if i % 2 else 'user', f'history-{i}', i + 1)
+        for i in range(99)
+    ]
+    with sqlite3.connect(database_path) as db:
+        db.execute(
+            "INSERT INTO conversations (id, user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            ('history-test', user_id, 'History', 1, 99),
+        )
+        db.executemany(
+            "INSERT INTO messages (id, conversation_id, role, content, at) VALUES (?, 'history-test', ?, ?, ?)",
+            [(f'history-{i}', *message) for i, message in enumerate(messages)],
+        )
+    return [{'role': role, 'content': content, 'at': at} for role, content, at in messages]
+
+
+def test_http_history_append_across_page_boundary(server, tmp_path):
+    _, client = server()
+    with client:
+        customer = login(client, 'customer')
+        user = client.get('/api/me', headers=customer).raise_for_status().json()['user']
+        expected = seed_history(tmp_path / 'http.db', user['id'])
+
+        def page(offset):
+            response = client.get('/api/conversation', headers=customer, params={'offset': offset, 'limit': 100})
+            assert response.headers['Cache-Control'] == 'no-store'
+            return response.raise_for_status().json()
+
+        before = page(0)
+        assert before['messages'] == expected
+        assert before['total'] == 99
+        admin = login(client, 'admin')
+        source_id = client.post('/api/knowledge/ingest', headers=admin, json=DOCUMENT).raise_for_status().json()['knowledge_id']
+        answer = verify_answer(client, customer, source_id)
+
+        first, tail = page(0), page(100)
+        assert first['total'] == tail['total'] == 101
+        assert first['conversation_id'] == tail['conversation_id'] == before['conversation_id']
+        assert first['history_revision'] == tail['history_revision'] != before['history_revision']
+        assert len(first['messages']) == 100 and len(tail['messages']) == 1
+        assert first['messages'][:99] == expected
+        assert [(m['role'], m['content']) for m in first['messages'][99:] + tail['messages']] == [
+            ('user', 'e2eexport'), ('assistant', answer['reply']),
+        ]
 
 
 def test_http_ingest_retrieval_chat_and_restart_persistence(server):
