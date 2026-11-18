@@ -125,6 +125,7 @@ _TRANSFER_REQUEST_RE = re.compile(
 TRANSFER_REASON_LABELS = {
     "user_requested": "用户主动要求转人工",
     "out_of_scope": "超出服务范围",
+    "scope_unverified": "服务范围待人工核实",
     "ineffective_retries": "多次排查无效",
 }
 # 超出服务范围的三种细分情形，用于回显具体判定依据
@@ -133,6 +134,10 @@ SCOPE_REASON_TEXT = {
     "service_expired": "服务已到期或订单非有效状态",
     "feature_not_included": "不包含该功能",
 }
+# 订单侧「判不了」的原因码：所购版本或功能名不可识别时，只能确认暂时无法
+# 核实，并不等于用户超出服务范围。这类结论单独给码，不混进 out_of_scope，
+# 避免把「识别不出功能名」记成「没买这项服务」。
+UNVERIFIED_SCOPE_CODES = frozenset({"tier_unknown", "period_unknown", "feature_unknown"})
 # 转人工未给出原因、规则也未命中时的默认说明，保证每次转人工都可追溯
 DEFAULT_TRANSFER_REASON = "客服手动转人工"
 # 转人工说明的回复类型标记：时间线据此与普通回复区分，便于单独渲染
@@ -1655,16 +1660,20 @@ def _check_service_scope(order: dict | None, feature: str) -> dict:
     依次判断三点：有没有订单、订单是否在服务期内、问题涉及的功能是否在
     当前版本的能力范围内。feature 为空时跳过功能比对，只按订单与服务期判定。
     返回是否超范围、细分原因码与可直接展示的说明。
+    单条订单视图里功能名总是能与能力列表比对出结果，因此 unverified 恒为
+    False；「判不了」的结论只可能来自多订单判定。
     """
     if not order or not order.get("has_order"):
         return {
             "out_of_scope": True,
+            "unverified": False,
             "code": "no_order",
             "detail": SCOPE_REASON_TEXT["no_order"],
         }
     if not order.get("in_service"):
         return {
             "out_of_scope": True,
+            "unverified": False,
             "code": "service_expired",
             "detail": SCOPE_REASON_TEXT["service_expired"],
         }
@@ -1677,10 +1686,11 @@ def _check_service_scope(order: dict | None, feature: str) -> dict:
             tier = order.get("product_name") or order.get("product_tier") or "当前版本"
             return {
                 "out_of_scope": True,
+                "unverified": False,
                 "code": "feature_not_included",
                 "detail": f"{tier}{SCOPE_REASON_TEXT['feature_not_included']}「{target}」",
             }
-    return {"out_of_scope": False, "code": "", "detail": ""}
+    return {"out_of_scope": False, "unverified": False, "code": "", "detail": ""}
 
 
 def _check_order_scope(order_scope: dict, feature: str) -> dict:
@@ -1690,28 +1700,46 @@ def _check_order_scope(order_scope: dict, feature: str) -> dict:
     主订单挡住；这里直接消费订单模块的综合判定（任一在期订单覆盖该功能即算在
     范围内），细分原因沿用订单侧结论原文，转人工说明与订单查询保持同一口径。
     没给功能时跳过功能比对，只按有无订单与是否存在在期订单判定。
+
+    三种结论分开表达：out_of_scope 表示确有依据判定超范围；unverified 表示
+    版本或功能名不可识别、暂时判不了，不能写成超出范围；都不是则在范围内。
+    结论码为 scope_unverified，与订单侧原因码分开，读日志时不会把「识别不出
+    功能名」误当成「客户没买这项服务」。
     """
     if not order_scope.get("has_order"):
         return {
             "out_of_scope": True,
+            "unverified": False,
             "code": order_scope.get("reason_code") or "no_order",
             "detail": order_scope.get("reason") or SCOPE_REASON_TEXT["no_order"],
         }
     if not order_scope.get("in_service_count"):
         return {
             "out_of_scope": True,
+            "unverified": False,
             "code": order_scope.get("reason_code") or "service_expired",
             "detail": order_scope.get("reason") or SCOPE_REASON_TEXT["service_expired"],
         }
     target = " ".join(str(feature or "").split())
     if target and not order_scope.get("in_scope"):
+        order_code = str(order_scope.get("reason_code") or "")
+        detail = order_scope.get("reason") or (
+            f"{SCOPE_REASON_TEXT['feature_not_included']}「{target}」"
+        )
+        if order_code in UNVERIFIED_SCOPE_CODES:
+            return {
+                "out_of_scope": False,
+                "unverified": True,
+                "code": "scope_unverified",
+                "detail": f"无法自动核实服务范围：{detail}",
+            }
         return {
             "out_of_scope": True,
-            "code": order_scope.get("reason_code") or "feature_not_included",
-            "detail": order_scope.get("reason")
-            or f"{SCOPE_REASON_TEXT['feature_not_included']}「{target}」",
+            "unverified": False,
+            "code": order_code or "feature_not_included",
+            "detail": detail,
         }
-    return {"out_of_scope": False, "code": "in_scope", "detail": ""}
+    return {"out_of_scope": False, "unverified": False, "code": "in_scope", "detail": ""}
 
 
 def evaluate_transfer_rule(
@@ -1729,6 +1757,8 @@ def evaluate_transfer_rule(
     1. 用户主动要求：用户消息或工单描述里出现转人工诉求，最优先，用户意愿
        不被其他规则覆盖；
     2. 超出服务范围：无订单、服务已到期、所问功能不在当前版本能力内；
+       功能名或所购版本不可识别时只记为 scope_unverified（待人工核实），
+       不写成超出范围，避免把「识别不出来」记成「没买这项服务」；
     3. 多次排查无效：已尝试步骤数达到阈值，或人工回复轮数达到阈值仍未闭环。
 
     判定只读不写：不改变工单状态，也不追加回复，是否真的转人工由调用方决定。
@@ -1782,6 +1812,15 @@ def evaluate_transfer_rule(
                     "detail": scope_verdict["detail"],
                 }
             )
+        elif scope_verdict.get("unverified"):
+            # 判不了与服务范围不符是两件事：前者只是缺信息，说明里不写「超出范围」
+            reasons.append(
+                {
+                    "code": "scope_unverified",
+                    "label": TRANSFER_REASON_LABELS["scope_unverified"],
+                    "detail": scope_verdict["detail"],
+                }
+            )
 
         # 排查无效的两种表现只记一条原因码，避免同一原因重复出现在原因文本里
         if tried >= TRANSFER_TRIED_STEP_THRESHOLD:
@@ -1830,6 +1869,7 @@ def evaluate_transfer_rule(
         # 附上订单侧的多订单摘要，让「为什么算超范围」能追到具体订单
         basis["service_scope"] = {
             "out_of_scope": scope_verdict["out_of_scope"],
+            "unverified": bool(scope_verdict.get("unverified")),
             "code": scope_verdict["code"],
             "detail": scope_verdict["detail"],
             "order_count": order_scope.get("order_count", 0),
