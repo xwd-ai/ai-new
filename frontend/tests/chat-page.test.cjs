@@ -358,8 +358,16 @@ test('exhausted history changes ask the user to sync later and keep the displaye
   ];
   for (const changedPage of cases) {
     let changing=false;
+    let recovered=false;
+    const recoveredRows=rows.map(row=>({...row,content:'recovered '+row.content}));
     const state=page(url=>{
-      if (!changing || !url.startsWith('/api/conversation?')) return null;
+      if (!url.startsWith('/api/conversation?')) return null;
+      if (recovered) {
+        const offset=Number(new URLSearchParams(url.split('?')[1]).get('offset'));
+        return json({messages:recoveredRows.slice(offset,offset+100),total:recoveredRows.length,
+          conversation_id:'recovered',history_revision:'stable'});
+      }
+      if (!changing) return null;
       return json(url.includes('offset=0&')?firstPage:changedPage);
     });
     const e=state.elements;
@@ -375,9 +383,17 @@ test('exhausted history changes ask the user to sync later and keep the displaye
     assert.deepEqual(contents(e.chatLog),['saved']);
     assert.equal(e.msgInput.value,'draft');
     assert.equal(e.syncHistory.disabled,false);
+    assert.equal(e.cancelHistory.hidden,true);
+    assert.deepEqual(reads(state.calls).slice(1).map(call=>
+      Number(new URLSearchParams(call.url.split('?')[1]).get('offset'))),[0,100,0,100,0,100]);
     changing=false;
+    recovered=true;
     await e.syncHistory.emit('click');
     assert.match(e.connectionStatus.textContent,/历史已同步/);
+    assert.deepEqual(contents(e.chatLog),recoveredRows.map(row=>row.content));
+    assert.equal(e.msgInput.value,'draft');
+    assert.equal(state.timers.length,0);
+    assert.equal(state.calls.filter(call=>call.method==='POST').length,0);
   }
 });
 
