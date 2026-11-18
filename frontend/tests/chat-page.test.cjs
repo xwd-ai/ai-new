@@ -255,12 +255,17 @@ test('online event synchronizes while offline event and offline reads preserve d
 });
 
 test('quick reconnect aborts an old page read and starts fresh without waiting for it',async()=>{
-  let release;
+  let release,hold=false;
+  const history=rows.map(row=>({...row}));
   const state=page(url=>{
-    if (url.includes('offset=100') && !release) return new Promise(resolve=>release=resolve);
-  },rows);
+    if (hold && url.includes('offset=100') && !release) return new Promise(resolve=>release=resolve);
+  },history);
   const {elements:e,calls,browser,navigator}=state;
   await settle();
+  const original=e.chatLog.children[0];
+  hold=true;
+  const initialReads=reads(calls).length;
+  await e.syncHistory.emit('click');
   const signal=reads(calls).at(-1).signal;
   e.msgInput.value='draft';
   navigator.onLine=false;
@@ -268,15 +273,22 @@ test('quick reconnect aborts an old page read and starts fresh without waiting f
   assert.equal(signal.aborted,true);
   assert.equal(e.cancelHistory.hidden,true);
   assert.match(e.connectionStatus.textContent,/网络已断开/);
+  assert.equal(e.chatLog.children[0],original);
+  assert.deepEqual(contents(e.chatLog),rows.map(row=>row.content));
+  const offlineReads=reads(calls).length;
+  await e.syncHistory.emit('click');
+  assert.equal(reads(calls).length,offlineReads);
+  history[0]={...history[0],content:'updated while offline'};
   navigator.onLine=true;
   await browser.emit('online');
-  assert.deepEqual(reads(calls).map(call=>new URLSearchParams(call.url.split('?')[1]).get('offset')),['0','100','0','100','200']);
+  assert.deepEqual(reads(calls).slice(initialReads).map(call=>new URLSearchParams(call.url.split('?')[1]).get('offset')),['0','100','0','100','200']);
   release(json({},401));
   await settle();
   assert.equal(e.reloginLink.hidden,true);
-  assert.deepEqual(contents(e.chatLog),rows.map(row=>row.content));
+  assert.deepEqual(contents(e.chatLog),history.map(row=>row.content));
   assert.equal(e.msgInput.value,'draft');
   assert.match(e.connectionStatus.textContent,/历史已同步/);
+  assert.equal(state.calls.filter(call=>call.method==='POST').length,0);
 });
 
 test('quick reconnect bypasses the old retry timer and never repeats its read',async()=>{
