@@ -454,19 +454,24 @@ test('a changed history revision restarts paging even when conversation and coun
 });
 
 test('history change shows the next retry during the wait and allows cancellation',async()=>{
+  let changing=false;
+  const stableRows=rows.map(row=>({...row,content:'stable '+row.content}));
   const state=page(url=>{
     if (!url.startsWith('/api/conversation?')) return null;
     const offset=Number(new URLSearchParams(url.split('?')[1]).get('offset'));
     return json({
-      messages:rows.slice(offset,offset+100),
+      messages:(changing?rows:stableRows).slice(offset,offset+100),
       total:rows.length,
       conversation_id:'same',
-      history_revision:offset===0?'before':'after',
+      history_revision:changing&&offset===0?'before':'after',
     });
   });
   await settle();
   const e=state.elements;
   e.msgInput.value='draft';
+  const original=e.chatLog.children[0];
+  changing=true;
+  await e.syncHistory.emit('click');
   assert.match(e.connectionStatus.textContent,/历史.*变化.*1 秒后.*从首页.*2\/3/);
   assert.doesNotMatch(e.connectionStatus.textContent,/已读取/);
   await state.retry();
@@ -477,8 +482,21 @@ test('history change shows the next retry during the wait and allows cancellatio
   await state.retry();
   assert.equal(state.calls.length,count);
   assert.match(e.connectionStatus.textContent,/已取消/);
-  assert.equal(e.chatLog.textContent,'welcome');
+  assert.equal(e.chatLog.children[0],original);
+  assert.deepEqual(contents(e.chatLog),stableRows.map(row=>row.content));
   assert.equal(e.msgInput.value,'draft');
+  assert.equal(e.syncHistory.disabled,false);
+  assert.equal(e.cancelHistory.hidden,true);
+  changing=false;
+  stableRows[0]={...stableRows[0],content:'updated after cancellation'};
+  await e.syncHistory.emit('click');
+  assert.match(e.connectionStatus.textContent,/历史已同步/);
+  assert.deepEqual(contents(e.chatLog),stableRows.map(row=>row.content));
+  assert.equal(e.msgInput.value,'draft');
+  assert.deepEqual(reads(state.calls).slice(-3).map(call=>
+    Number(new URLSearchParams(call.url.split('?')[1]).get('offset'))),[0,100,200]);
+  assert.equal(state.timers.length,0);
+  assert.equal(state.calls.filter(call=>call.method==='POST').length,0);
 });
 
 test('last page progress waits for final identity before reporting success',async()=>{
