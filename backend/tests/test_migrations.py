@@ -1,6 +1,7 @@
 """迁移必须覆盖空库及旧库接入，所有操作只指向临时数据库。"""
 
 from pathlib import Path
+from contextlib import nullcontext
 
 import pytest
 import sqlalchemy as sa
@@ -15,7 +16,80 @@ from backend.models.user import RefreshToken, RevokedToken
 
 ROOT = Path(__file__).resolve().parents[2]
 OLD_REVISION = "d1178ec7c657"
-HEAD_REVISION = "d9236e507b14"
+HEAD_REVISION = "f28a6c913d72"
+
+
+QUERY_INDEXES = {
+    'orders': ['user_id', 'status', 'expires_at'],
+    'tickets': ['user_id', 'status', 'created_at'],
+    'sessions': ['expires_at'],
+    'revoked_tokens': ['expires_at'],
+    'refresh_tokens': ['expires_at'],
+}
+
+
+@pytest.mark.parametrize('precreated', [None, 'lower', 'upper'])
+def test_query_indexes_upgrade_preserves_records_and_existing_indexes(migration_env, precreated):
+    config, connection = migration_env
+    command.upgrade(config, 'd9236e507b14')
+    tables = sa.MetaData()
+    tables.reflect(connection)
+    for name in QUERY_INDEXES:
+        table = tables.tables[name]
+        record = {
+            column.name: 123.0 if isinstance(column.type, sa.Float)
+            else [] if isinstance(column.type, sa.JSON) else 'kept'
+            for column in table.columns
+        }
+        connection.execute(table.insert(), record)
+        if precreated:
+            for column in QUERY_INDEXES[name]:
+                index_name = f'ix_{name}_{column}'
+                if precreated == 'upper':
+                    index_name = index_name.upper()
+                connection.exec_driver_sql(f'CREATE INDEX {index_name} ON {name} ({column})')
+    connection.exec_driver_sql('CREATE INDEX custom_order_status ON orders (status)')
+    connection.commit()
+    before = {name: connection.execute(table.select()).all()
+              for name, table in tables.tables.items() if name in QUERY_INDEXES}
+    command.upgrade(config, 'head')
+    command.upgrade(config, 'head')
+    assert _version(connection) == HEAD_REVISION
+    for name, records in before.items():
+        assert connection.execute(tables.tables[name].select()).all() == records
+        indexes = {index['name'].lower(): index for index in sa.inspect(connection).get_indexes(name)}
+        for column in QUERY_INDEXES[name]:
+            index = indexes[f'ix_{name}_{column}']
+            if precreated == 'upper':
+                assert index['name'] == f'ix_{name}_{column}'.upper()
+            assert index['column_names'] == [column]
+            assert not index['unique']
+            assert index.get('dialect_options', {}).get('sqlite_where') is None
+    assert 'custom_order_status' in {
+        index['name'] for index in sa.inspect(connection).get_indexes('orders')
+    }
+
+
+@pytest.mark.parametrize('index_sql', [
+    'CREATE INDEX ix_refresh_tokens_expires_at ON refresh_tokens (user_id)',
+    'CREATE UNIQUE INDEX ix_refresh_tokens_expires_at ON refresh_tokens (expires_at)',
+    'CREATE INDEX ix_refresh_tokens_expires_at ON refresh_tokens (expires_at) WHERE expires_at > 0',
+    'CREATE INDEX ix_refresh_tokens_expires_at ON orders (expires_at)',
+    'CREATE INDEX ix_refresh_tokens_expires_at ON refresh_tokens (expires_at + 0)',
+    'CREATE INDEX IX_REFRESH_TOKENS_EXPIRES_AT ON refresh_tokens (user_id)',
+])
+def test_query_indexes_conflict_is_rejected_before_creating_any_index(migration_env, index_sql):
+    config, connection = migration_env
+    command.upgrade(config, 'd9236e507b14')
+    connection.exec_driver_sql(index_sql)
+    connection.commit()
+    before = connection.exec_driver_sql("SELECT name, sql FROM sqlite_master WHERE type='index'").all()
+    warning = (pytest.warns(sa.exc.SAWarning, match='Skipped unsupported reflection')
+               if '+ 0' in index_sql else nullcontext())
+    with warning, pytest.raises(RuntimeError, match='索引 ix_refresh_tokens_expires_at.*不兼容'):
+        command.upgrade(config, 'head')
+    assert _version(connection) == 'd9236e507b14'
+    assert connection.exec_driver_sql("SELECT name, sql FROM sqlite_master WHERE type='index'").all() == before
 
 
 def test_refresh_upgrade_preserves_precreated_records(migration_env):

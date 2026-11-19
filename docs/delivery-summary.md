@@ -227,23 +227,23 @@
 
 迁移使用 Alembic，默认复用应用引擎操作 `backend/app.db`。升级前先停止服务并备份，再执行：
 
-```bash
-python -m alembic current
-python -m alembic upgrade head
-python -m alembic check
+```powershell
+.\.venv\Scripts\python.exe -m alembic current
+.\.venv\Scripts\python.exe -m alembic upgrade head
+.\.venv\Scripts\python.exe -m alembic check
 ```
 
 ## 验证方式
 
-```bash
+```powershell
 # 依赖
-pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install -r backend/requirements-dev.txt
 
 # 全量测试
-python -m pytest backend/tests -q
+.\.venv\Scripts\python.exe -m pytest backend/tests -q
 
 # 启动
-python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
 当前状态：三模块专项测试 28 个文件、850 个用例，全量 1247 个用例通过。覆盖重点：
@@ -255,7 +255,7 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 - **边界与异常**：超长、空白、非字符串路径参数、越界分页、非法排序、重复操作等 20 余组场景，要求不出现 5xx。
 - **只读性**：查询类接口调用前后对订单、工单、会话做全量快照比对，确保查询不落库。
 
-已知环境注意点：仓库根目录的 `alembic/` 目录会遮蔽已安装的 alembic 包，运行依赖 alembic 的测试（迁移、隔离进程 HTTP 集成）时需单独排除；本地运行如需指定临时目录，应显式设置 `TMPDIR`。
+以上命令在仓库根目录的 Windows PowerShell 中使用项目虚拟环境执行。本环境已验证迁移与隔离进程 HTTP 测试可直接运行，无需排除；HTTP 测试临时目录必须位于仓库外，指定方法及测试边界见 [README](../README.md#运行测试)。
 
 ## 已知限制
 
