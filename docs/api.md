@@ -90,7 +90,7 @@
 | `title` | 标题字面子串，最长 200 字符（去空白前校验），去除首尾空白后为空则不筛选。`%`、`_` 按普通字符匹配；不搜索正文或关键词 |
 | `kind` | 精确匹配 `manual`、`faq` 或 `rule`。省略则不限类型；空值、大写或其他值返回 422 |
 
-例如 `GET /api/knowledge/items?offset=1&limit=1` 返回第二条摘要，`GET /api/knowledge/items?title=FAQ&kind=faq&limit=1` 返回标题包含 FAQ 且类型为 faq 的首条摘要。中文或特殊字符需由客户端进行 URL 编码。标题匹配沿用 SQLite LIKE 行为，默认忽略 ASCII 字母大小写，不保证非 ASCII 大小写折叠。`total` 始终是同时满足所有筛选条件的总数，无筛选时为全库总数；无匹配或偏移等于、超过筛选总数时 `items` 为空。参数越界、分页整数解析失败或类型值不合法时返回 HTTP 422，参数合法时非管理员返回 HTTP 403。分页的筛选计数和窗口来自同一 SQLite 读事务。不同请求各自读取快照，翻页期间新增资料可能改变偏移位置。正文和关键词可通过来源回查读取。
+例如 `GET /api/knowledge/items?offset=1&limit=1` 返回第二条摘要，`GET /api/knowledge/items?title=FAQ&kind=faq&limit=1` 返回标题包含 FAQ 且类型为 faq 的首条摘要。中文或特殊字符需由客户端进行 URL 编码。标题匹配沿用 SQLite LIKE 行为，默认忽略 ASCII 字母大小写，不保证非 ASCII 大小写折叠。`total` 始终是同时满足所有筛选条件的总数，无筛选时为全库总数；无匹配或偏移等于、超过筛选总数时 `items` 为空。非管理员先返回 HTTP 403，包括分页或筛选参数不合法时；管理员的参数越界、分页整数解析失败或类型值不合法返回 HTTP 422。分页的筛选计数和窗口来自同一 SQLite 读事务。不同请求各自读取快照，翻页期间新增资料可能改变偏移位置。正文和关键词可通过来源回查读取。
 
 `GET /api/sources/{source_id}` 使用列表中的 `id` 或回答中 `sources[].id` 回查原文。返回 `id`、`title`、`kind`、`content`、`keywords`；不存在时返回 HTTP 404 和 `{"detail":"来源不存在"}`。来源编号是持久化条目编号，不是 `c1` 这样的本轮引用句柄。当前来源详情不做登录或租户隔离检查。
 
