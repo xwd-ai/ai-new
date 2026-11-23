@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from datetime import datetime
 
 from sqlalchemy import func, or_, text
+from sqlalchemy.exc import IntegrityError
 
 from backend.database import SessionLocal
 from backend.models import Ticket
@@ -150,15 +151,22 @@ def _dedup_key(user_id: str, description: str) -> str:
 
 @contextmanager
 def advisory_lock(key: str):
-    """建单 advisory lock：串行化同一意图（dedup_key）的并发建单。
+    """建单临界区：按数据库能力选择并发控制方式。
 
-    SQLite 无 PG 的 advisory lock 原语，这里借数据库连接级的写锁实现等价效果：
-    持锁期间独占建单临界区，同一 key 的重复请求排队串行执行，避免并发下重复建单。
+    - SQLite：单写者模型，用 BEGIN IMMEDIATE 取得库级写锁，让同一 key 的并发
+      建单排队串行（SQLite 既没有行级锁，也没有 advisory lock）；
+    - MySQL / PostgreSQL：不加显式锁，由 dedup_key 的唯一约束做最终保证 —— 
+      并发写入时只有一个能成功，另一个被 IntegrityError 拦截后重查已有工单。
+
+    这里刻意不使用 MySQL 的 GET_LOCK：它是连接级命名锁，而连接在事务提交后
+    会归还连接池，释放动作可能落到另一条连接上，导致锁滞留到连接断开。
+    key 参数保留给调用方表达「同一意图」，SQLite 分支以库级锁覆盖全部意图。
     """
     db = SessionLocal()
     try:
-        # BEGIN IMMEDIATE 立即获取写锁，其他会话的写操作在此阻塞直到本事务提交/回滚
-        db.execute(text("BEGIN IMMEDIATE"))
+        if db.get_bind().dialect.name == "sqlite":
+            # 立即获取写锁，其他会话的写操作在此阻塞直到本事务提交/回滚
+            db.execute(text("BEGIN IMMEDIATE"))
         yield db
         db.commit()
     except Exception:
@@ -398,37 +406,51 @@ def create_ticket(
         )
 
     key = _dedup_key(user_id, description)
-    # 建单临界区接入 advisory lock：同一意图（dedup_key）的并发建单在此串行执行，
-    # 先到者建单并提交，后到者重查即可命中已有工单，避免并发下重复建单。
-    with advisory_lock(key) as db:
-        existing = (
-            db.query(Ticket)
-            .filter(Ticket.dedup_key == key, Ticket.status != STATUS_RESOLVED)
-            .first()
-        )
-        if existing:
-            return existing.to_dict(), False
+    try:
+        # 建单临界区：SQLite 用库级写锁串行化；MySQL/PG 由 dedup_key 唯一约束兜底
+        with advisory_lock(key) as db:
+            existing = (
+                db.query(Ticket)
+                .filter(Ticket.dedup_key == key, Ticket.status != STATUS_RESOLVED)
+                .first()
+            )
+            if existing:
+                return existing.to_dict(), False
 
-        ticket = Ticket(
-            id=_next_id(db),
-            dedup_key=key,
-            user_id=user_id,
-            user_name=user_name,
-            description=description,
-            tried_steps=tried_steps,
-            evidence=evidence,
-            status=INITIAL_STATUS,
-            created_at=time.time(),
-            replies=[],
-        )
-        db.add(ticket)
-        db.flush()
-        db.refresh(ticket)
-        # 建单即首次状态落位，写入首条时间线记录（from_status 为空表示初始创建）
-        _log_status_change(
-            db, ticket.id, "", INITIAL_STATUS, operator=_clean_operator(operator)
-        )
-        return ticket.to_dict(), True
+            ticket = Ticket(
+                id=_next_id(db),
+                dedup_key=key,
+                user_id=user_id,
+                user_name=user_name,
+                description=description,
+                tried_steps=tried_steps,
+                evidence=evidence,
+                status=INITIAL_STATUS,
+                created_at=time.time(),
+                replies=[],
+            )
+            db.add(ticket)
+            db.flush()
+            db.refresh(ticket)
+            # 建单即首次状态落位，写入首条时间线记录（from_status 为空表示初始创建）
+            _log_status_change(
+                db, ticket.id, "", INITIAL_STATUS, operator=_clean_operator(operator)
+            )
+            return ticket.to_dict(), True
+    except IntegrityError:
+        # 并发下另一请求已插入同一 dedup_key：唯一约束拦截，重查后返回已有工单
+        db = SessionLocal()
+        try:
+            existing = (
+                db.query(Ticket)
+                .filter(Ticket.dedup_key == key, Ticket.status != STATUS_RESOLVED)
+                .first()
+            )
+            if existing:
+                return existing.to_dict(), False
+            raise
+        finally:
+            db.close()
 
 
 def create_ticket_for_user(
