@@ -61,6 +61,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from backend.database import SessionLocal
 from backend.models import Session, User
 from backend.models.user import DEFAULT_ROLE, RefreshToken, RevokedToken, UserRole, normalize_role
+from backend.services import cache
 from backend.services.password import MAX_PASSWORD_BYTES, PasswordHashError, verify_password
 
 logger = logging.getLogger(__name__)
@@ -1157,6 +1158,8 @@ def _blacklist_token(
             )
         )
         db.commit()
+        # 吊销已落库，清掉缓存让下次校验回源（未启用缓存时为空操作）
+        cache.delete(f"{_REVOKED_CACHE_PREFIX}{jti}")
         return True
     except IntegrityError:
         # 并发登出时另一条请求已写入同一 jti，按「已作废」处理
@@ -1166,19 +1169,47 @@ def _blacklist_token(
         db.close()
 
 
+# 吊销检查的缓存：前缀 + 两种 TTL
+_REVOKED_CACHE_PREFIX = "auth:revoked:"
+# 未吊销只缓存 60 秒：登出时虽会主动删除该键，这里的 TTL 是兜底，
+# 避免「吊销已落库但缓存删除失败」造成长时间错误放行
+_REVOKED_NOT_FOUND_TTL = 60
+# 已吊销是终态，缓存 1 小时（过期回源仍会命中数据库记录）
+_REVOKED_FOUND_TTL = 3600
+
+
 def is_token_revoked(jti: Optional[str]) -> bool:
     """令牌是否已作废。
 
     只按 jti 判定，不看有效期：名单里的记录本身就是「这条令牌不该再用」的结论。
     缺少 jti 的令牌返回 False——它无从被登记，只能靠时效约束。
+
+    这是每个请求都会走的热点判断，而吊销是低频写入，因此结果可缓存。
+    未吊销结果只缓存短时间，且登出时主动删除对应键，保证登出即时生效；
+    已吊销是终态，可以缓存更久。
     """
     if not jti:
         return False
+
+    cache_key = f"{_REVOKED_CACHE_PREFIX}{jti}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached == "1"
+
     db = SessionLocal()
     try:
-        return db.query(RevokedToken).filter(RevokedToken.jti == jti).first() is not None
+        revoked = (
+            db.query(RevokedToken).filter(RevokedToken.jti == jti).first() is not None
+        )
     finally:
         db.close()
+
+    cache.set(
+        cache_key,
+        "1" if revoked else "0",
+        ttl=_REVOKED_FOUND_TTL if revoked else _REVOKED_NOT_FOUND_TTL,
+    )
+    return revoked
 
 
 def _drop_session(token: str) -> bool:
