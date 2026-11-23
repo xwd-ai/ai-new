@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.api.auth import auth_router
@@ -21,6 +21,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception(request: Request, exc: Exception) -> PlainTextResponse:
+    """未处理异常统一返回 500，并显式告知客户端不要复用这条连接。
+
+    Starlette 写出 500 之后仍会把异常抛给 ASGI 服务器，服务器随即关闭当前
+    的 keep-alive 连接；响应里若没有 ``Connection: close``，客户端会继续复用
+    一条已经关闭的连接，下一个请求直接收到 RST（Connection reset by peer）。
+    带上该头部后，客户端会主动换新连接，而不是把 500 之后的所有请求都撞死。
+    """
+    return PlainTextResponse(
+        "Internal Server Error", status_code=500, headers={"Connection": "close"},
+    )
+
 
 app.include_router(chat_router, prefix="/api")
 app.include_router(auth_router, prefix="/api")
