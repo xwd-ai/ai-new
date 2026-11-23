@@ -244,8 +244,8 @@ def validate_transition(current, target, *, allow_same: bool = True) -> OrderSta
 class Product(Base):
     __tablename__ = "products"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True)  # basic / pro
-    name: Mapped[str] = mapped_column(String, nullable=False)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)  # basic / pro
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
     features: Mapped[list] = mapped_column(JSON, nullable=False)
 
     def to_dict(self) -> dict:
@@ -255,12 +255,12 @@ class Product(Base):
 class Order(Base):
     __tablename__ = "orders"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
     # user_id / status / expires_at 是用户订单查询、管理筛选与到期归档扫描的高频条件，
     # 各建单列索引让这些查询走索引定位而不是全表扫描
-    user_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    product_tier: Mapped[str] = mapped_column(String, nullable=False)  # basic / pro
-    status: Mapped[str] = mapped_column(String, nullable=False, index=True)  # 取值见 OrderStatus
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    product_tier: Mapped[str] = mapped_column(String(255), nullable=False)  # basic / pro
+    status: Mapped[str] = mapped_column(String(255), nullable=False, index=True)  # 取值见 OrderStatus
     started_at: Mapped[float] = mapped_column(Float, nullable=False)
     expires_at: Mapped[float] = mapped_column(Float, nullable=False, index=True)
 

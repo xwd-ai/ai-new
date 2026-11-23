@@ -27,7 +27,7 @@ def _schema() -> sa.MetaData:
         sa.Column("kind", sa.String(), nullable=False),
         sa.Column("title", sa.String(), nullable=False),
         sa.Column("keywords", sa.JSON(), nullable=False),
-        sa.Column("content", sa.String(), nullable=False),
+        sa.Column("content", sa.Text(), nullable=False),
         sa.Column("fingerprint", sa.String(), nullable=True, index=True),
     )
     sa.Table(
@@ -35,7 +35,7 @@ def _schema() -> sa.MetaData:
         sa.Column("id", sa.String(), primary_key=True),
         sa.Column("conversation_id", sa.String(), nullable=False),
         sa.Column("role", sa.String(), nullable=False),
-        sa.Column("content", sa.String(), nullable=False),
+        sa.Column("content", sa.Text(), nullable=False),
         sa.Column("at", sa.Float(), nullable=False),
     )
     sa.Table(
@@ -77,9 +77,9 @@ def _schema() -> sa.MetaData:
         sa.Column("dedup_key", sa.String(), nullable=False),
         sa.Column("user_id", sa.String(), nullable=False),
         sa.Column("user_name", sa.String(), nullable=False),
-        sa.Column("description", sa.String(), nullable=False),
-        sa.Column("tried_steps", sa.String(), nullable=False),
-        sa.Column("evidence", sa.String(), nullable=False),
+        sa.Column("description", sa.Text(), nullable=False),
+        sa.Column("tried_steps", sa.Text(), nullable=False),
+        sa.Column("evidence", sa.Text(), nullable=False),
         sa.Column("status", sa.String(), nullable=False),
         sa.Column("created_at", sa.Float(), nullable=False),
         sa.Column("replies", sa.JSON(), nullable=False),
