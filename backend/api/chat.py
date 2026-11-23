@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import text
 
 from backend.api.auth import current_user
+from backend.api.ratelimit import chat_rate_limit
 from backend.database import SessionLocal
 from backend.services import chat as chat_service, knowledge
 from backend.models import Conversation, Message
@@ -21,7 +22,11 @@ chat_router = APIRouter()
     "/chat", response_model=ChatResponse, summary="生成对话回答",
     description="允许匿名请求；无效登录态按匿名处理。模型调用失败仍返回 200，故障提示见 reply 与 trace。",
 )
-def chat(req: ChatRequest, user: dict | None = Depends(current_user)) -> ChatResponse:
+def chat(
+    req: ChatRequest,
+    user: dict | None = Depends(current_user),
+    _rate: None = Depends(chat_rate_limit),
+) -> ChatResponse:
     with chat_service.execution_scope():
         user_id = user["id"] if user else "anonymous"
 
