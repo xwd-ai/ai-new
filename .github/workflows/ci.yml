@@ -28,8 +28,10 @@ jobs:
         run: pip install -r backend/requirements-dev.txt
 
       - name: 运行测试
+        env:
+          PYTHONPATH: ${{ github.workspace }}
         run: |
-          pytest backend/tests -q \
+          python -m pytest backend/tests -q \
             --deselect backend/tests/test_http_e2e.py::test_http_journal_recovery_after_restart_and_model_failure \
             --deselect backend/tests/test_http_e2e.py::test_http_stage_filter_pagination_and_recovery_across_restarts
 
@@ -50,6 +52,8 @@ jobs:
         run: pip install -r backend/requirements-dev.txt
 
       - name: 重启与阶段性恢复用例
+        env:
+          PYTHONPATH: ${{ github.workspace }}
         run: |
-          pytest backend/tests/test_http_e2e.py -q \
+          python -m pytest backend/tests/test_http_e2e.py -q \
             -k "journal_recovery_after_restart or stage_filter_pagination_and_recovery"
