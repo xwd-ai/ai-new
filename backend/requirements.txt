@@ -6,3 +6,4 @@ greenlet
 sqlalchemy
 alembic
 bcrypt
+redis
