@@ -12,8 +12,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
+
+	"airetrieval/internal/search"
 )
 
 const (
@@ -33,6 +36,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handleHealth)
+	mux.HandleFunc("POST /search", handleSearch)
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -63,6 +67,49 @@ func main() {
 
 func handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// searchRequest 是检索请求体。
+//
+// 文档随请求传入而不是在服务内维护：本服务不持有业务状态，
+// 调用方（Python 后端）决定检索哪批文档，服务只做计算与排序。
+type searchRequest struct {
+	Query string            `json:"query"`
+	TopK  int               `json:"top_k"`
+	Docs  []search.Document `json:"docs"`
+}
+
+type searchResponse struct {
+	Results []search.Result `json:"results"`
+	Count   int             `json:"count"`
+}
+
+const defaultTopK = 3
+
+func handleSearch(w http.ResponseWriter, r *http.Request) {
+	var req searchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体不是合法 JSON"})
+		return
+	}
+	if strings.TrimSpace(req.Query) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "query 不能为空"})
+		return
+	}
+	if req.TopK <= 0 {
+		req.TopK = defaultTopK
+	}
+
+	// 传入 r.Context()：客户端断开或超时会沿调用链取消下游计算
+	searcher := &search.Searcher{Docs: req.Docs}
+	results, err := searcher.Search(r.Context(), req.Query, req.TopK)
+	if err != nil {
+		slog.Error("检索失败", "err", err, "query", req.Query)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "检索失败"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, searchResponse{Results: results, Count: len(results)})
 }
 
 func writeJSON(w http.ResponseWriter, code int, payload any) {
