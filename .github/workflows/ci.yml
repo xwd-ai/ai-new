@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: 测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: 安装依赖
+        run: pip install -r backend/requirements-dev.txt
+
+      - name: 运行测试
+        run: |
+          pytest backend/tests -q \
+            --deselect backend/tests/test_http_e2e.py::test_http_journal_recovery_after_restart_and_model_failure \
+            --deselect backend/tests/test_http_e2e.py::test_http_stage_filter_pagination_and_recovery_across_restarts
+
+  e2e-restart:
+    name: 重启类端到端（观察性）
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: 安装依赖
+        run: pip install -r backend/requirements-dev.txt
+
+      - name: 重启与阶段性恢复用例
+        run: |
+          pytest backend/tests/test_http_e2e.py -q \
+            -k "journal_recovery_after_restart or stage_filter_pagination_and_recovery"
