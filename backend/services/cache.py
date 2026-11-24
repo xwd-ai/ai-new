@@ -88,6 +88,11 @@ def delete(*keys: str) -> int:
         return 0
 
 
+def client():
+    """返回底层客户端，供需要 Lua 脚本等高级能力的模块使用；不可用时为 None。"""
+    return _get_client()
+
+
 def incr(key: str) -> Optional[int]:
     """自增计数（不设过期），用于版本号这类单调递增标记。
 

@@ -38,6 +38,7 @@ from backend.models.ticket import (
     validate_transition,
 )
 from backend.services import auth as auth_service
+from backend.services.distlock import distributed_lock
 
 # 状态取值别名：业务代码统一引用这些常量，避免裸字符串分散在各处函数里
 STATUS_PENDING_CONFIRM = TicketStatus.PENDING_CONFIRM.value
@@ -151,29 +152,32 @@ def _dedup_key(user_id: str, description: str) -> str:
 
 @contextmanager
 def advisory_lock(key: str):
-    """建单临界区：按数据库能力选择并发控制方式。
+    """建单临界区：三层并发控制，按可用能力逐级降级。
 
-    - SQLite：单写者模型，用 BEGIN IMMEDIATE 取得库级写锁，让同一 key 的并发
-      建单排队串行（SQLite 既没有行级锁，也没有 advisory lock）；
-    - MySQL / PostgreSQL：不加显式锁，由 dedup_key 的唯一约束做最终保证 —— 
-      并发写入时只有一个能成功，另一个被 IntegrityError 拦截后重查已有工单。
+    1. **Redis 分布式锁**：多实例部署时跨进程互斥；缓存不可用则跳过；
+    2. **SQLite**：单写者模型，用 BEGIN IMMEDIATE 取得库级写锁
+       （SQLite 既没有行级锁，也没有 advisory lock）；
+    3. **MySQL / PostgreSQL**：不加数据库锁，由 dedup_key 唯一约束兜底。
 
-    这里刻意不使用 MySQL 的 GET_LOCK：它是连接级命名锁，而连接在事务提交后
-    会归还连接池，释放动作可能落到另一条连接上，导致锁滞留到连接断开。
-    key 参数保留给调用方表达「同一意图」，SQLite 分支以库级锁覆盖全部意图。
+    第 1 层只减少并发冲突，第 3 层才是最终保证 —— 因此任何一层缺失都不会
+    导致重复建单，只会多一些无谓的并发尝试。
+
+    刻意不使用 MySQL 的 GET_LOCK：它是连接级命名锁，而连接在事务提交后会
+    归还连接池，释放动作可能落到另一条连接上，导致锁滞留到连接断开。
     """
-    db = SessionLocal()
-    try:
-        if db.get_bind().dialect.name == "sqlite":
-            # 立即获取写锁，其他会话的写操作在此阻塞直到本事务提交/回滚
-            db.execute(text("BEGIN IMMEDIATE"))
-        yield db
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
+    with distributed_lock(f"lock:ticket:{key[:40]}"):
+        db = SessionLocal()
+        try:
+            if db.get_bind().dialect.name == "sqlite":
+                # 立即获取写锁，其他会话的写操作在此阻塞直到本事务提交/回滚
+                db.execute(text("BEGIN IMMEDIATE"))
+            yield db
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
 
 
 def _next_id(db) -> str:
