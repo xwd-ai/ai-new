@@ -48,8 +48,9 @@ BM25 与向量双路召回后 RRF 融合；重排全部不过阈值时，先放�
 62 个测试文件覆盖幂等、状态机、租约竞争、迁移、HTTP 全链路；Alembic 管理表结构演进；内置离线检索评测（Precision / Recall / MRR / nDCG）。
 
 **⑥ 按能力边界逐步替换语言**  
-纯 CPU 的检索打分与分块最先独立成 Go 服务；随后把订单查询、令牌校验、待确认工单列表这些「只读、无 LLM、无事务、无锁」的查询也迁到 Go 业务服务。写路径（建单、状态流转、幂等与分布式锁）仍留在 Python。
-后端优先调用 Go，连不上或超时自动退回本地实现 —— **远程服务只是加速，不是正确性依赖**。
+纯 CPU 的检索打分、分块与检索后处理最先独立成 Go 检索服务；随后把订单查询、令牌校验、待确认工单列表这些「只读、无 LLM、无事务、无锁」的查询迁到 Go 业务服务；最后加一层 Go 网关作为对外入口，承担反向代理、入口鉴权、限流、SSE 转发、pprof 与优雅关闭。
+写路径（建单、状态流转、幂等与分布式锁）与 LLM 编排仍留在 Python —— 不是搬不动，而是低频写事务与模型适配重写风险高于收益。
+所有远程能力都可缺省：未配置或不可用时自动退回 Python 本地实现 —— **远程服务只是加速，不是正确性依赖**。
 
 ## 架构
 
@@ -58,7 +59,14 @@ BM25 与向量双路召回后 RRF 融合；重排全部不过阈值时，先放�
   ├─ 客户工作台 ── 对话、来源回查、执行过程
   └─ 管理后台 ──── 工单、知识库、检索设置
           │ HTTP
-后端（FastAPI）
+网关（Go :8080，推荐作为对外入口，可缺省）
+  ├─ 反向代理 → Python
+  ├─ 入口鉴权   经业务服务验签，结果用于日志与限流维度
+  ├─ 入口限流   token bucket，按用户 / IP 分桶
+  ├─ /api/retrieval/stream   SSE 阶段进度转发
+  └─ /debug/pprof            性能剖析
+          │ HTTP
+后端（FastAPI :8000）—— LLM 编排、写事务与授权判定
   ├─ api/        路由与权限
   ├─ services/   业务：认证 / 订单 / 工单 / 知识 / 对话 / Agent
   ├─ models/     数据模型        schemas/  接口契约
@@ -67,9 +75,11 @@ BM25 与向量双路召回后 RRF 融合；重排全部不过阈值时，先放�
     SQLite / MySQL + Alembic    ┌─────┴──────┐
                                 │            │
                      检索服务（Go :8081）  业务服务（Go :8082）
-                       ├─ /search  BM25 + 向量 + RRF
-                       ├─ /ingest  分块 + 指纹（worker pool）
-                       └─ /stream  SSE 分阶段推送
+                       ├─ /search        BM25 + 向量 + RRF
+                       ├─ /rank          复合分 + 阈值降级 + MMR
+                       ├─ /ingest        分块 + 指纹（并发流水线）
+                       ├─ /ingest/stats  流水线计数（排队 / 在途 / 失败）
+                       └─ /stream        SSE 分阶段推送
                                              ├─ /api/order
                                              ├─ /api/orders
                                              ├─ /api/auth/verify
@@ -78,8 +88,9 @@ BM25 与向量双路召回后 RRF 融合；重排全部不过阈值时，先放�
     模型 API（OpenAI 兼容）
 ```
 
-两个 Go 服务相互独立，分别由 `GO_RETRIEVAL_URL` 与 `GO_BUSINESS_URL` 控制，
-可以单独部署、单独回滚；任一不可用都只影响对应的加速路径。
+网关与两个 Go 服务相互独立，分别由 `BACKEND_URL`、`GO_RETRIEVAL_URL` 与
+`GO_BUSINESS_URL` 控制，可以单独部署、单独回滚；任一不可用都只影响对应的加速路径。
+不启动网关时直接访问 Python 的 8000 端口，行为与之前完全一致。
 
 ## 快速开始
 
@@ -130,6 +141,34 @@ docker compose up -d go-business
 
 启动后在 `backend/.env` 里设置 `GO_BUSINESS_URL=http://127.0.0.1:8082`，后端即优先使用 Go 的只读查询；未配置或不可用时自动退回本地实现。
 
+### 可选：启动 Go 网关（推荐作为对外入口）
+
+网关把 Python 后端与两个 Go 服务收在同一个入口后面：反向代理、入口鉴权、
+限流、SSE 转发、pprof 与优雅关闭都在这一层完成。**不启动也能正常使用**——
+直接访问 Python 的 8000 端口，行为与之前完全一致。
+
+```bash
+# 先启动 Python 后端（:8000），再起网关
+cd go-gateway && go run .          # 默认 127.0.0.1:8080
+```
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `BACKEND_URL` | `http://127.0.0.1:8000` | 必需，Python 后端地址 |
+| `RETRIEVAL_URL` | 空 | 配置后启用 `/api/retrieval/stream` |
+| `GO_BUSINESS_URL` | 空 | 配置后启用入口鉴权（经业务服务验签） |
+| `GATEWAY_RATE_LIMIT` | `0` | 每秒令牌数，`0` 表示关闭入口限流 |
+| `GATEWAY_RATE_BURST` | 同 rate | 桶容量 |
+| `GATEWAY_PPROF` | `false` | 是否暴露 `/debug/pprof` |
+| `GATEWAY_UPSTREAM_TIMEOUT` | `30s` | 等待上游响应头的超时（不影响 SSE 流式 body） |
+
+启动后访问 <http://127.0.0.1:8080>，与直连 8000 等价；`/health` 会额外返回
+`gateway: true`、各上游健康状态与能力开关。
+
+网关**不接管授权判定**：它只做入口层令牌校验，结果用于日志与限流维度，
+不写进转发给 Python 的请求头 —— 授权仍只有 Python 一处权威。
+这样即使 Python 被直接暴露，也不存在可伪造的身份来源。
+
 ### 可选：切换到 MySQL
 
 ```bash
@@ -153,6 +192,7 @@ docker compose up -d mysql
 | [接口文档](docs/api.md)                                                           | 字段、权限、错误响应、调用示例 |
 | [认证](docs/auth-api.md) · [工单](docs/tickets-api.md) · [订单](docs/orders-api.md) | 各模块接口细节         |
 | [检索评测](docs/retrieval-evaluation.md)                                          | 离线评测方法与消融结果     |
+| [Go 网关](go-gateway/README.md) · [Go 检索](go-retrieval/README.md) · [Go 业务](go-business/README.md) | 三个 Go 服务的端点、配置与设计取舍 |
 | [交付说明](docs/delivery-summary.md)                                              | 阶段成果与已知限制       |
 
 ## 测试

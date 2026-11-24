@@ -166,3 +166,37 @@ def pending_tickets(
     if not isinstance(data, dict) or not isinstance(data.get("items"), list):
         return None
     return data
+
+
+def rank(
+    query: str,
+    results: list[dict],
+    *,
+    top_k: int,
+    threshold: Optional[float] = None,
+    lambda_: Optional[float] = None,
+    config: Optional[dict] = None,
+) -> Optional[list[dict]]:
+    """调用 Go 的 /rank 做检索后处理；未配置或不可用返回 None。
+
+    与 /search 的分工：/search 负责「召回 + 排序」，/rank 负责模型之后的
+    确定性处理——复合分、阈值降级、MMR 去冗余。重排模型仍留在 Python，
+    因为它需要供应商 SDK 与密钥；这里只把已有召回结果交给 Go 加工。
+
+    返回结构与入参保持同一套字段，调用方无需区分来源。
+    """
+    if not results:
+        return None
+
+    payload: dict = {"query": query, "top_k": top_k, "results": results}
+    if threshold is not None:
+        payload["threshold"] = threshold
+    if lambda_ is not None:
+        payload["lambda"] = lambda_
+    if config is not None:
+        payload["config"] = config
+
+    data = _post("/rank", payload)
+    if not data or not isinstance(data.get("results"), list):
+        return None
+    return data["results"]

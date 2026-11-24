@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"airetrieval/internal/ingest"
+	"airetrieval/internal/rank"
 	"airetrieval/internal/search"
 	"airetrieval/internal/stream"
 )
@@ -32,15 +33,22 @@ const (
 	ingestQueueSize = 64
 )
 
-// ingestWorker 是进程级的入库任务处理器，随服务启停。
-var ingestWorker *ingest.Worker
+// ingestPipeline 是进程级的入库流水线：parse → chunk → 指纹。
+//
+// 相对早先的单层 Worker，它补上了逐任务取消、检查点与优雅关闭：
+// 客户端断开或关闭信号能让在途任务尽快停下，而不是继续算完再丢弃。
+// 落库仍由调用方完成，本服务只做 CPU 密集的预处理。
+var ingestPipeline *ingest.Pipeline
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
 
-	ingestWorker = ingest.New(ingestWorkers, ingestQueueSize)
+	ingestPipeline = ingest.NewPipeline(ingest.PipelineConfig{
+		Workers:   ingestWorkers,
+		QueueSize: ingestQueueSize,
+	})
 
 	addr := os.Getenv("ADDR")
 	if addr == "" {
@@ -52,6 +60,8 @@ func main() {
 	mux.HandleFunc("POST /search", handleSearch)
 	mux.HandleFunc("POST /stream", handleStream)
 	mux.HandleFunc("POST /ingest", handleIngest)
+	mux.HandleFunc("GET /ingest/stats", handleIngestStats)
+	mux.HandleFunc("POST /rank", handleRank)
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -70,8 +80,8 @@ func main() {
 		if err := srv.Shutdown(ctx); err != nil {
 			slog.Error("服务关闭异常", "err", err)
 		}
-		// 停止入库 Worker：等待在途分块任务处理完
-		ingestWorker.Close()
+		// 停止入库流水线：不再接单，等待在途任务处理完并释放租约
+		ingestPipeline.Close()
 	}()
 
 	slog.Info("检索服务启动", "addr", addr)
@@ -252,7 +262,7 @@ func handleIngest(w http.ResponseWriter, r *http.Request) {
 		wg.Add(1)
 		go func(i int, job ingest.Job) {
 			defer wg.Done()
-			results[i], errs[i] = ingestWorker.Submit(r.Context(), job)
+			results[i], errs[i] = ingestPipeline.Submit(r.Context(), job)
 		}(i, job)
 	}
 	wg.Wait()
@@ -266,6 +276,80 @@ func handleIngest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, ingestResponse{Results: results, Count: len(results)})
+}
+
+// handleIngestStats 暴露入库流水线的实时计数。
+//
+// 背压是否生效、失败率多少、有没有任务卡在队列里，这些在排查
+// 「入库变慢」时最想知道。只读无副作用，可以安全地被运维轮询。
+func handleIngestStats(w http.ResponseWriter, _ *http.Request) {
+	s := ingestPipeline.Stats()
+	writeJSON(w, http.StatusOK, map[string]int64{
+		"queued":    s.Queued,
+		"in_flight": s.InFlight,
+		"completed": s.Completed,
+		"failed":    s.Failed,
+		"retried":   s.Retried,
+	})
+}
+
+// rankRequest 是检索后处理请求。
+//
+// 重排模型本身仍留在调用方（模型客户端与密钥都在 Python 侧），
+// 本服务只承担模型之后的确定性计算：复合分、阈值降级、MMR 去冗余。
+// 调用方把模型分按「可打分候选」的顺序放进 rerank_scores；
+// 不提供该字段表示「没有重排模型」，此时直接按召回分去冗余。
+type rankRequest struct {
+	Query        string         `json:"query"`
+	Results      []rank.Item    `json:"results"`
+	RerankScores []float64      `json:"rerank_scores"`
+	TopK         int            `json:"top_k"`
+	Threshold    *float64       `json:"threshold"`
+	Lambda       *float64       `json:"lambda"`
+	Config       map[string]any `json:"config"`
+}
+
+type rankResponse struct {
+	Results     []rank.Item      `json:"results"`
+	Count       int              `json:"count"`
+	Diagnostics rank.Diagnostics `json:"diagnostics"`
+}
+
+func handleRank(w http.ResponseWriter, r *http.Request) {
+	var req rankRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体不是合法 JSON"})
+		return
+	}
+	if req.TopK <= 0 {
+		req.TopK = defaultTopK
+	}
+	if len(req.Results) == 0 {
+		writeJSON(w, http.StatusOK, rankResponse{
+			Results: []rank.Item{}, Count: 0, Diagnostics: rank.Diagnostics{},
+		})
+		return
+	}
+	// 空数组与缺省同样表示「没有模型分」：两者都不该被当成
+	// 「传了分数但长度对不上」的错误映射。
+	if len(req.RerankScores) == 0 {
+		req.RerankScores = nil
+	}
+
+	cfg := rank.DefaultConfig()
+	if req.Config != nil {
+		cfg = rank.ParseConfig(req.Config)
+	}
+
+	results, diag := rank.Rank(req.Query, req.Results, req.RerankScores, rank.Options{
+		TopK:      req.TopK,
+		Threshold: req.Threshold,
+		Lambda:    req.Lambda,
+		Config:    cfg,
+	})
+	writeJSON(w, http.StatusOK, rankResponse{
+		Results: results, Count: len(results), Diagnostics: diag,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, code int, payload any) {

@@ -64,5 +64,35 @@ services:
       retries: 5
       start_period: 5s
 
+  # Go 网关：对外统一入口（反向代理、入口鉴权、限流、SSE 转发、pprof）。
+  # 不启动也能直接访问 Python 的 8000 端口；这里把它作为默认入口。
+  # Python 后端仍在宿主机运行，容器内通过 host.docker.internal 访问它。
+  gateway:
+    build: ./go-gateway
+    container_name: ainew-gateway
+    restart: unless-stopped
+    environment:
+      ADDR: 0.0.0.0:8080
+      BACKEND_URL: http://host.docker.internal:8000
+      RETRIEVAL_URL: http://go-retrieval:8081
+      GO_BUSINESS_URL: http://go-business:8082
+      GATEWAY_PPROF: "1"
+    ports:
+      - "8080:8080"
+    extra_hosts:
+      # Linux 上 Docker 默认没有 host.docker.internal，需显式映射到宿主机网关
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - go-retrieval
+      - go-business
+    healthcheck:
+      # 上游不可达时 /health 仍返回 200（status: degraded），
+      # 这里检测的是网关自身是否存活；上游状态在响应体里。
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
 volumes:
   mysql-data:
