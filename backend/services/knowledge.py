@@ -25,7 +25,7 @@ from sqlalchemy import text
 from backend.database import SessionLocal
 from backend.logging_conf import log_event
 from backend.models import KnowledgeDoc
-from backend.services import cache
+from backend.services import cache, go_client
 from backend.services.retrieval_config import RetrievalConfig, load_retrieval_config
 
 # 检索结果缓存：检索是纯函数（同一 query + 同一资料集必得同一结果），
@@ -210,7 +210,8 @@ def search_knowledge(query: str, top_k: int = 3) -> list[dict]:
 
     只返回分数大于 0 的条目（即至少命中一个查询词元）。
 
-    结果会写入缓存。缓存不可用时行为不变：读不到就直接计算，写不进也不影响返回。
+    取数顺序：缓存 → Go 服务 → 本地 BM25。后两级结果等价，
+    Go 不可用只是慢一点，不会改变语义。
     """
     cache_key = _search_cache_key(query, top_k)
     cached = cache.get(cache_key)
@@ -221,12 +222,62 @@ def search_knowledge(query: str, top_k: int = 3) -> list[dict]:
             # 缓存内容损坏：忽略并回源，不让坏数据影响检索结果
             pass
 
-    query_tokens = tokenize(query)
     docs = _all_docs()
     if not docs:
         log_event("retrieval.keyword", query_len=len(query or ""), hits=0, reason="empty_corpus")
         return []
 
+    payload = _search_via_go(query, docs, top_k)
+    if payload is None:
+        payload = _search_locally(query, docs, top_k)
+
+    if payload:
+        cache.set(cache_key, json.dumps(payload, ensure_ascii=False), ttl=_SEARCH_CACHE_TTL)
+    return payload
+
+
+def _search_via_go(query: str, docs: list[dict], top_k: int) -> list[dict] | None:
+    """调用 Go 服务排序；未配置或失败返回 None 由调用方降级。
+
+    Go 侧只做打分排序、不持有资料元数据（kind / keywords），
+    因此结果要按 id 从本地资料补回这些字段，保证对外契约不变。
+    """
+    hits = go_client.search(query, docs, top_k)
+    if hits is None:
+        return None
+
+    by_id = {item["id"]: item for item in docs}
+    results: list[dict] = []
+    for hit in hits:
+        meta = by_id.get(hit.get("id"))
+        if meta is None:
+            continue
+        results.append(
+            {
+                "id": hit["id"],
+                "title": hit.get("title") or meta.get("title", ""),
+                "kind": meta.get("kind", ""),
+                "content": hit.get("content") or meta.get("content", ""),
+                "keywords": meta.get("keywords") or [],
+                "score": float(hit.get("score") or 0.0),
+                "match_type": hit.get("match_type") or "keyword",
+            }
+        )
+
+    log_event(
+        "retrieval.keyword",
+        backend="go",
+        query_len=len(query or ""),
+        candidate=len(hits),
+        hits=len(results),
+        top_ids=[r["id"] for r in results],
+    )
+    return results
+
+
+def _search_locally(query: str, docs: list[dict], top_k: int) -> list[dict]:
+    """本地 BM25 实现：Go 服务未配置或不可用时的降级路径。"""
+    query_tokens = tokenize(query)
     raw_scores = _bm25_scores(query_tokens, docs)
     norm_scores = _normalize(raw_scores)
 
@@ -251,16 +302,13 @@ def search_knowledge(query: str, top_k: int = 3) -> list[dict]:
     top = results[:top_k]
     log_event(
         "retrieval.keyword",
+        backend="local",
         query_len=len(query or ""),
         candidate=len(results),
         hits=len(top),
         top_ids=[r.id for r in top],
     )
-
-    payload = [r.to_dict() for r in top]
-    if payload:
-        cache.set(cache_key, json.dumps(payload, ensure_ascii=False), ttl=_SEARCH_CACHE_TTL)
-    return payload
+    return [r.to_dict() for r in top]
 
 
 def get_knowledge(knowledge_id: str) -> dict | None:
