@@ -11,12 +11,12 @@ depends_on = None
 def upgrade() -> None:
     table = sa.Table(
         "revoked_tokens", sa.MetaData(),
-        sa.Column("jti", sa.String(), primary_key=True),
-        sa.Column("user_id", sa.String(), nullable=False),
-        sa.Column("token_type", sa.String(), nullable=False),
+        sa.Column("jti", sa.String(64), primary_key=True),
+        sa.Column("user_id", sa.String(255), nullable=False),
+        sa.Column("token_type", sa.String(255), nullable=False),
         sa.Column("expires_at", sa.Float(), nullable=False),
         sa.Column("revoked_at", sa.Float(), nullable=False),
-        sa.Column("reason", sa.String(), nullable=False),
+        sa.Column("reason", sa.String(255), nullable=False),
     )
     index = sa.Index("ix_revoked_tokens_user_id", table.c.user_id)
     connection = op.get_bind()

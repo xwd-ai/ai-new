@@ -2,6 +2,7 @@
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects.mysql import MEDIUMTEXT
 
 
 revision = "e5b7a91c2046"
@@ -15,90 +16,91 @@ def _schema() -> sa.MetaData:
     metadata = sa.MetaData()
     sa.Table(
         "conversations", metadata,
-        sa.Column("id", sa.String(), primary_key=True),
-        sa.Column("user_id", sa.String(), nullable=False),
-        sa.Column("title", sa.String(), nullable=False),
+        sa.Column("id", sa.String(64), primary_key=True),
+        sa.Column("user_id", sa.String(255), nullable=False),
+        sa.Column("title", sa.String(255), nullable=False),
         sa.Column("created_at", sa.Float(), nullable=False),
         sa.Column("updated_at", sa.Float(), nullable=False),
     )
     sa.Table(
         "knowledge_docs", metadata,
-        sa.Column("id", sa.String(), primary_key=True),
-        sa.Column("kind", sa.String(), nullable=False),
-        sa.Column("title", sa.String(), nullable=False),
+        sa.Column("id", sa.String(64), primary_key=True),
+        sa.Column("kind", sa.String(255), nullable=False),
+        sa.Column("title", sa.String(255), nullable=False),
         sa.Column("keywords", sa.JSON(), nullable=False),
-        sa.Column("content", sa.Text(), nullable=False),
-        sa.Column("fingerprint", sa.String(), nullable=True, index=True),
+        # 正文上限 10 万字符：MySQL 的 TEXT 仅 64KB，需要 MEDIUMTEXT
+        sa.Column("content", sa.Text().with_variant(MEDIUMTEXT, "mysql"), nullable=False),
+        sa.Column("fingerprint", sa.String(255), nullable=True, index=True),
     )
     sa.Table(
         "messages", metadata,
-        sa.Column("id", sa.String(), primary_key=True),
-        sa.Column("conversation_id", sa.String(), nullable=False),
-        sa.Column("role", sa.String(), nullable=False),
+        sa.Column("id", sa.String(64), primary_key=True),
+        sa.Column("conversation_id", sa.String(255), nullable=False),
+        sa.Column("role", sa.String(255), nullable=False),
         sa.Column("content", sa.Text(), nullable=False),
         sa.Column("at", sa.Float(), nullable=False),
     )
     sa.Table(
         "orders", metadata,
-        sa.Column("id", sa.String(), primary_key=True),
-        sa.Column("user_id", sa.String(), nullable=False),
-        sa.Column("product_tier", sa.String(), nullable=False),
-        sa.Column("status", sa.String(), nullable=False),
+        sa.Column("id", sa.String(64), primary_key=True),
+        sa.Column("user_id", sa.String(255), nullable=False),
+        sa.Column("product_tier", sa.String(255), nullable=False),
+        sa.Column("status", sa.String(255), nullable=False),
         sa.Column("started_at", sa.Float(), nullable=False),
         sa.Column("expires_at", sa.Float(), nullable=False),
     )
     sa.Table(
         "products", metadata,
-        sa.Column("id", sa.String(), primary_key=True),
-        sa.Column("name", sa.String(), nullable=False),
+        sa.Column("id", sa.String(64), primary_key=True),
+        sa.Column("name", sa.String(255), nullable=False),
         sa.Column("features", sa.JSON(), nullable=False),
     )
     sa.Table(
         "sessions", metadata,
-        sa.Column("token", sa.String(), primary_key=True),
-        sa.Column("user_id", sa.String(), nullable=False),
-        sa.Column("username", sa.String(), nullable=False),
-        sa.Column("name", sa.String(), nullable=False),
-        sa.Column("role", sa.String(), nullable=False),
+        sa.Column("token", sa.String(64), primary_key=True),
+        sa.Column("user_id", sa.String(255), nullable=False),
+        sa.Column("username", sa.String(255), nullable=False),
+        sa.Column("name", sa.String(255), nullable=False),
+        sa.Column("role", sa.String(255), nullable=False),
         sa.Column("expires_at", sa.Float(), nullable=False),
     )
     sa.Table(
         "ticket_status_logs", metadata,
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
-        sa.Column("ticket_id", sa.String(), nullable=False, index=True),
-        sa.Column("from_status", sa.String(), nullable=False),
-        sa.Column("to_status", sa.String(), nullable=False),
-        sa.Column("operator", sa.String(), nullable=False),
+        sa.Column("ticket_id", sa.String(255), nullable=False, index=True),
+        sa.Column("from_status", sa.String(255), nullable=False),
+        sa.Column("to_status", sa.String(255), nullable=False),
+        sa.Column("operator", sa.String(255), nullable=False),
         sa.Column("changed_at", sa.Float(), nullable=False),
     )
     sa.Table(
         "tickets", metadata,
-        sa.Column("id", sa.String(), primary_key=True),
-        sa.Column("dedup_key", sa.String(), nullable=False),
-        sa.Column("user_id", sa.String(), nullable=False),
-        sa.Column("user_name", sa.String(), nullable=False),
+        sa.Column("id", sa.String(64), primary_key=True),
+        sa.Column("dedup_key", sa.String(255), nullable=False),
+        sa.Column("user_id", sa.String(255), nullable=False),
+        sa.Column("user_name", sa.String(255), nullable=False),
         sa.Column("description", sa.Text(), nullable=False),
         sa.Column("tried_steps", sa.Text(), nullable=False),
         sa.Column("evidence", sa.Text(), nullable=False),
-        sa.Column("status", sa.String(), nullable=False),
+        sa.Column("status", sa.String(255), nullable=False),
         sa.Column("created_at", sa.Float(), nullable=False),
         sa.Column("replies", sa.JSON(), nullable=False),
         sa.UniqueConstraint("dedup_key", name="uq_tickets_dedup_key"),
     )
     sa.Table(
         "tried_steps", metadata,
-        sa.Column("id", sa.String(), primary_key=True),
-        sa.Column("user_id", sa.String(), nullable=False),
-        sa.Column("step", sa.String(), nullable=False),
+        sa.Column("id", sa.String(64), primary_key=True),
+        sa.Column("user_id", sa.String(255), nullable=False),
+        sa.Column("step", sa.String(255), nullable=False),
         sa.Column("at", sa.Float(), nullable=False),
     )
     sa.Table(
         "users", metadata,
-        sa.Column("id", sa.String(), primary_key=True),
-        sa.Column("username", sa.String(), nullable=False),
-        sa.Column("password_hash", sa.String(), nullable=False),
-        sa.Column("name", sa.String(), nullable=False),
-        sa.Column("role", sa.String(), nullable=False),
+        sa.Column("id", sa.String(64), primary_key=True),
+        sa.Column("username", sa.String(255), nullable=False),
+        sa.Column("password_hash", sa.String(60), nullable=False),
+        sa.Column("name", sa.String(255), nullable=False),
+        sa.Column("role", sa.String(255), nullable=False),
         sa.UniqueConstraint("username", name="uq_users_username"),
     )
     return metadata
@@ -149,9 +151,16 @@ def _preflight(connection, metadata: sa.MetaData) -> None:
                 if duplicate is not None:
                     raise RuntimeError(f"表 {table.name} 存在重复唯一键；请先人工核对，迁移不会删除数据。")
                 if not _has_unique(inspector, table.name, columns[0].name):
-                    trigger = connection.execute(sa.text(
-                        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = :table"
-                    ), {"table": table.name}).first()
+                    # 触发器目录同样按方言读取
+                    if connection.dialect.name == "sqlite":
+                        trigger = connection.execute(sa.text(
+                            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = :table"
+                        ), {"table": table.name}).first()
+                    else:
+                        trigger = connection.execute(sa.text(
+                            "SELECT trigger_name FROM information_schema.triggers "
+                            "WHERE trigger_schema = DATABASE() AND event_object_table = :table"
+                        ), {"table": table.name}).first()
                     if trigger or inspector.get_check_constraints(table.name) or inspector.get_foreign_keys(table.name):
                         raise RuntimeError(f"表 {table.name} 含自定义触发器或约束，不支持自动重建，请人工核对。")
 
@@ -164,7 +173,7 @@ def upgrade() -> None:
     metadata.create_all(connection, checkfirst=True)
     inspector = sa.inspect(connection)
     if "fingerprint" not in {c["name"] for c in inspector.get_columns("knowledge_docs")}:
-        op.add_column("knowledge_docs", sa.Column("fingerprint", sa.String(), nullable=True))
+        op.add_column("knowledge_docs", sa.Column("fingerprint", sa.String(255), nullable=True))
     for table_name, column_name, constraint_name in (
         ("tickets", "dedup_key", "uq_tickets_dedup_key"),
         ("users", "username", "uq_users_username"),

@@ -14,8 +14,8 @@ def upgrade() -> None:
     metadata = sa.MetaData()
     table = sa.Table(
         "knowledge_ingest_leases", metadata,
-        sa.Column("fingerprint", sa.String(), primary_key=True),
-        sa.Column("owner", sa.String(), nullable=False),
+        sa.Column("fingerprint", sa.String(64), primary_key=True),
+        sa.Column("owner", sa.String(255), nullable=False),
         sa.Column("expires_at", sa.Float(), nullable=False),
     )
     connection = op.get_bind()

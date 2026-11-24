@@ -11,8 +11,8 @@ depends_on = None
 def upgrade() -> None:
     table = sa.Table(
         "refresh_tokens", sa.MetaData(),
-        sa.Column("token", sa.String(), primary_key=True),
-        sa.Column("user_id", sa.String(), nullable=False),
+        sa.Column("token", sa.String(64), primary_key=True),
+        sa.Column("user_id", sa.String(255), nullable=False),
         sa.Column("expires_at", sa.Float(), nullable=False),
         sa.Column("revoked_at", sa.Float(), nullable=True),
     )

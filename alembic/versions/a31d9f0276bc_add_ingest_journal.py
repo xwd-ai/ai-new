@@ -11,10 +11,10 @@ depends_on = None
 def upgrade() -> None:
     table = sa.Table(
         "knowledge_ingest_journal", sa.MetaData(),
-        sa.Column("fingerprint", sa.String(), primary_key=True),
-        sa.Column("knowledge_id", sa.String(), nullable=False),
+        sa.Column("fingerprint", sa.String(64), primary_key=True),
+        sa.Column("knowledge_id", sa.String(255), nullable=False),
         sa.Column("payload", sa.JSON(), nullable=False),
-        sa.Column("stage", sa.String(), nullable=False),
+        sa.Column("stage", sa.String(255), nullable=False),
         sa.Column("chunk_count", sa.Integer(), nullable=False),
         sa.Column("updated_at", sa.Float(), nullable=False),
     )

@@ -20,9 +20,19 @@ def upgrade() -> None:
     connection = op.get_bind()
     inspector = sa.inspect(connection)
     # 使用 SQLite 的 ASCII 大小写规则匹配名称，保留真实名称供反射结果查找。
-    owners = {key: (name, table) for key, name, table in connection.exec_driver_sql(
-        "SELECT lower(name), name, lower(tbl_name) FROM sqlite_master WHERE type='index'"
-    ).all()}
+    # 按方言读取现有索引目录：SQLite 查 sqlite_master，MySQL 查 information_schema。
+    # 统一转成小写键，保留真实名称供反射结果查找。
+    if connection.dialect.name == "sqlite":
+        rows = connection.exec_driver_sql(
+            "SELECT lower(name), name, lower(tbl_name) FROM sqlite_master WHERE type='index'"
+        ).all()
+    else:
+        rows = connection.exec_driver_sql(
+            "SELECT lower(index_name), index_name, lower(table_name) "
+            "FROM information_schema.statistics "
+            "WHERE table_schema = DATABASE() AND index_name <> 'PRIMARY'"
+        ).all()
+    owners = {key: (name, table) for key, name, table in rows}
     missing = []
     # SQLite DDL 不保证回滚，先检查全部目标再创建缺失索引。
     for table, names in columns.items():
