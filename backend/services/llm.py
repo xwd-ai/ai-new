@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Iterator
 
 from dotenv import load_dotenv
 
@@ -90,25 +91,21 @@ ACTION_PREFIX = "ACTION:"
 _ACTION_PATTERN = "search_knowledge"
 
 
-def chat_step(
+def build_messages(
     message: str,
     *,
     history: list[dict] | None = None,
     observations: list[str] | None = None,
     order: dict | None = None,
     knowledge: list[dict] | None = None,
-    provider: ChatProvider | None = None,
-) -> str:
-    """执行一轮推理：把已观察到的信息交给模型，拿到它的下一步输出。
+    allow_action: bool = True,
+) -> list[dict]:
+    """组装一次请求的消息序列。
 
-    输出有两种形态：
-    - 以 ``ACTION: search_knowledge [关键词]`` 开头：模型还想再查一次。
-    - 其它：模型的最终回答。
-
-    这里只负责组装与调用，不解析语义——解析交给调用方，
-    这样模型即使不按协议输出，也能退化成「直接回答」而不报错。
+    ``allow_action`` 控制是否附加「还可以再检索」的指令：Agent 循环需要它，
+    流式输出不需要 —— 流式一旦开始就无法在中途插入工具调用。
     """
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     if order:
         if order.get("has_order"):
@@ -149,20 +146,95 @@ def chat_step(
     if history:
         messages.extend(history)
 
-    messages.append(
-        {
-            "role": "system",
-            "content": (
-                "如果你还需要继续检索才能回答，请只输出一行："
-                f"`{ACTION_PREFIX} {_ACTION_PATTERN} 关键词`。"
-                "如果信息已经足够，直接给出最终回答，不要再输出该指令。"
-            ),
-        }
-    )
-    messages.append({"role": "user", "content": message})
+    if allow_action:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "如果你还需要继续检索才能回答，请只输出一行："
+                    f"`{ACTION_PREFIX} {_ACTION_PATTERN} 关键词`。"
+                    "如果信息已经足够，直接给出最终回答，不要再输出该指令。"
+                ),
+            }
+        )
 
+    messages.append({"role": "user", "content": message})
+    return messages
+
+
+def chat_step(
+    message: str,
+    *,
+    history: list[dict] | None = None,
+    observations: list[str] | None = None,
+    order: dict | None = None,
+    knowledge: list[dict] | None = None,
+    provider: ChatProvider | None = None,
+) -> str:
+    """执行一轮推理：把已观察到的信息交给模型，拿到它的下一步输出。
+
+    输出有两种形态：
+    - 以 ``ACTION: search_knowledge [关键词]`` 开头：模型还想再查一次。
+    - 其它：模型的最终回答。
+
+    这里只负责组装与调用，不解析语义——解析交给调用方，
+    这样模型即使不按协议输出，也能退化成「直接回答」而不报错。
+    """
+    messages = build_messages(
+        message,
+        history=history,
+        observations=observations,
+        order=order,
+        knowledge=knowledge,
+        allow_action=True,
+    )
     chat = provider or _get_provider()
     return chat.chat(messages)
+
+
+def chat_stream_messages(
+    messages: list[dict],
+    *,
+    provider: ChatProvider | None = None,
+) -> Iterator[str]:
+    """对已组装好的消息序列做流式生成。
+
+    单独提供这个入口，是给「自己组装消息、只需流式取结果」的调用方用，
+    避免为了流式再走一遍 build_messages。
+    provider 不支持流式时退化为一次性返回。
+    """
+    chat = provider or _get_provider()
+
+    stream_method = getattr(chat, "chat_stream", None)
+    if stream_method is None:
+        text = chat.chat(messages)
+        if text:
+            yield text
+        return
+    yield from stream_method(messages)
+
+
+def chat_stream(
+    message: str,
+    *,
+    history: list[dict] | None = None,
+    order: dict | None = None,
+    knowledge: list[dict] | None = None,
+    provider: ChatProvider | None = None,
+) -> Iterator[str]:
+    """流式生成最终回答，逐段产出文本增量。
+
+    检索已在调用前完成，因此这里不附加「可再检索」指令（见 build_messages）。
+    provider 不支持流式时退化为一次性返回，保证调用方无需分支处理。
+    """
+    messages = build_messages(
+        message,
+        history=history,
+        order=order,
+        knowledge=knowledge,
+        allow_action=False,
+    )
+    yield from chat_stream_messages(messages, provider=provider)
 
 
 def parse_action(text: str) -> dict | None:

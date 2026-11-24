@@ -271,6 +271,39 @@ def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
     return reply, sources, suggest
 
 
+def build_stream_messages(
+    user_id: str, message: str
+) -> tuple[list[dict], list[dict], str]:
+    """为流式回答准备消息、证据与对话 id。
+
+    与 build_reply 的差异：**不做 Agent 多轮决策**。边决策边流式无法保证
+    输出一致 —— 决策可能要求再检索一轮，而流式内容已经发出去了。
+    因此这里一次性完成检索，再让模型基于证据边生成边返回。
+
+    返回 (messages, sources, conversation_id)，由接口层负责流式输出。
+    """
+    conversation_id = get_or_create_conversation(user_id)
+    compacted = context.compact_history(
+        citations.history_as_context(history(conversation_id))
+    )
+
+    order = orders.query_order(user_id) if user_id != "anonymous" else None
+
+    # 检索结果分配请求内有效的句柄，模型只看到编号，前端按编号回查原文
+    registry = citations.SourceRegistry()
+    found = knowledge.search_knowledge(message)
+    prompt_items = citations.build_prompt_items(found, registry)
+
+    messages = llm.build_messages(
+        message,
+        history=compacted.messages,
+        order=order,
+        knowledge=prompt_items,
+        allow_action=False,
+    )
+    return messages, citations.public_sources(registry), conversation_id
+
+
 # 当前执行上下文最近一次完整对话的摘要与判定，作为一组发布。
 # 单独暴露而不是塞进三元组返回值，是为了不破坏既有调用方的解包写法；
 # 需要执行过程的调用方（如接口层）在这里取。
