@@ -838,12 +838,30 @@ def rerank_with_mmr(
     """重排后再做 MMR 去冗余，返回最终用于回答的若干条。
 
     这是检索链路的收口函数：召回 → 融合 → 重排 → 阈值 → 去冗余。
+
+    取数顺序与检索一致：配置了 Go 检索服务且**没有重排模型**时，把确定性
+    后处理交给 Go（复合分、阈值降级、MMR 都不依赖模型）。一旦存在
+    rerank_provider，就必须先在 Python 侧调模型拿到分数——Go 不持有模型
+    客户端，那条路径无法远程化。Go 不可用即降级本地，两条路径结果等价。
     """
     cfg = deepcopy(config if config is not None else load_retrieval_config())
     if threshold is not None:
         cfg.threshold = threshold
     if lambda_ is not None:
         cfg.mmr_lambda = lambda_
+
+    if rerank_provider is None and go_client.enabled():
+        remote = go_client.rank(
+            query,
+            results,
+            top_k=top_k,
+            threshold=threshold,
+            lambda_=lambda_,
+            config=cfg.to_dict(),
+        )
+        if remote is not None:
+            return remote
+
     candidate_count = max(top_k * 3, top_k)
     reranked = rerank_results(
         query,
