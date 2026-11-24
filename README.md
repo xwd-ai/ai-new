@@ -47,6 +47,10 @@ BM25 与向量双路召回后 RRF 融合；重排全部不过阈值时，先放�
 **⑤ 工程完备度**  
 62 个测试文件覆盖幂等、状态机、租约竞争、迁移、HTTP 全链路；Alembic 管理表结构演进；内置离线检索评测（Precision / Recall / MRR / nDCG）。
 
+**⑥ 按计算特性划分语言边界**  
+检索打分与文档分块是纯 CPU 计算，独立成 Go 服务；业务编排与模型调用留在 Python。
+后端优先调用 Go，连不上或超时自动退回本地实现 —— **远程服务只是加速，不是正确性依赖**。
+
 ## 架构
 
 ```
@@ -59,8 +63,13 @@ BM25 与向量双路召回后 RRF 融合；重排全部不过阈值时，先放�
   ├─ services/   业务：认证 / 订单 / 工单 / 知识 / 对话 / Agent
   ├─ models/     数据模型        schemas/  接口契约
   └─ providers/  模型适配（Chat / Embedding / Rerank）
+          │                                    │ HTTP（可选，失败降级本地）
+    SQLite / MySQL + Alembic            检索服务（Go :8081）
+                                          ├─ /search   BM25 + 向量 + RRF
+                                          ├─ /ingest   分块 + 指纹（worker pool）
+                                          └─ /stream   SSE 分阶段推送
           │
-    SQLite + Alembic          模型 API（OpenAI 兼容）
+    模型 API（OpenAI 兼容）
 ```
 
 ## 快速开始
@@ -83,6 +92,30 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
 启动会初始化 SQLite 并预置演示数据，数据库路径固定为 `backend/app.db`；`--reload` 仅供本地开发。
 
 > Windows 用户：把 `python` 换成 `.\.venv\Scripts\python.exe`
+
+### 可选：启动 Go 检索服务
+
+不启动也能正常使用 —— 后端检测不到该服务时会自动降级为本地实现，只是检索计算慢一些。
+
+```bash
+# 方式一：直接运行
+cd go-retrieval && go run .          # 默认 127.0.0.1:8081
+
+# 方式二：容器（连同 MySQL 一起起）
+docker compose up -d go-retrieval
+```
+
+启动后在 `backend/.env` 里设置 `GO_RETRIEVAL_URL=http://127.0.0.1:8081`，后端即优先使用 Go 计算。
+
+### 可选：切换到 MySQL
+
+```bash
+docker compose up -d mysql
+# 在 backend/.env 里设置：
+# DATABASE_URL=mysql+pymysql://ainew:ainew@127.0.0.1:3307/ainew?charset=utf8mb4
+```
+
+首次部署执行 `python -m alembic upgrade head` 建表；不设置则继续使用本地 SQLite。
 
 ## 演示账号
 

@@ -23,5 +23,23 @@ services:
       retries: 10
       start_period: 20s
 
+  # Go 检索服务：检索、入库分块、SSE 三个能力。
+  # 后端通过 GO_RETRIEVAL_URL 调用它；未配置或不可用时 Python 会自动降级，
+  # 因此这个服务不是应用的启动硬依赖。
+  go-retrieval:
+    build: ./go-retrieval
+    container_name: ainew-retrieval
+    restart: unless-stopped
+    environment:
+      ADDR: 0.0.0.0:8081
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8081/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
 volumes:
   mysql-data:
