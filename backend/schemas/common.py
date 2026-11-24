@@ -20,4 +20,7 @@ class ModelCapabilityReport(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str
+    # 是否支持流式对话（POST /api/chat/stream）。前端据此决定用流式还是
+    # 一次性接口，避免「先盲试流式、失败再回退」多发一个请求。
+    stream: bool = True
     models: ModelCapabilityReport
