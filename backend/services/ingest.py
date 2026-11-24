@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session
 from backend.database import SessionLocal
 from backend.models import KnowledgeDoc, KnowledgeIngestJournal
 from backend.schemas.knowledge import IngestRequest
-from backend.services import ingest_leases
+from backend.services import go_client, ingest_leases
 
 # 分块参数：单块目标长度与相邻块重叠，保证跨块语义不断裂
 CHUNK_SIZE = 512
@@ -156,6 +156,18 @@ def split_into_chunks(
     return chunks
 
 
+def _count_chunks(title: str, content: str) -> int:
+    """计算分块数：优先交给 Go 服务（CPU 密集），不可用时退回本地实现。
+
+    分块内容本身不落库，只用于进度记录与统计；因此远程与本地的切法
+    即使略有差异，也不会改变已入库数据的检索行为。
+    """
+    remote = go_client.chunk_count(title, content)
+    if remote is not None:
+        return remote
+    return len(split_into_chunks(content))
+
+
 def _derive_keywords(title: str, content: str, extra: list[str] | None) -> list[str]:
     """整理关键词。
 
@@ -241,7 +253,7 @@ def ingest(
         # 同指纹重试使用首次持久化的输入，避免恢复时悄悄改变类型或关键词。
         title, content, kind, keywords = (payload[k] for k in ('title', 'content', 'kind', 'keywords'))
         if chunk_count is None:
-            chunk_count = len(split_into_chunks(content))
+            chunk_count = _count_chunks(title, content)
             _journal_chunked(lease, chunk_count)
         checkpoint.mark(STAGE_CHUNKED)
         checkpoint.chunk_count = chunk_count
