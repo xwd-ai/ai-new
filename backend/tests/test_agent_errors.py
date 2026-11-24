@@ -113,7 +113,8 @@ def chat_client(monkeypatch):
     monkeypatch.setattr(chat, "history", lambda _: [])
     monkeypatch.setattr(chat, "append_turn", lambda *args: None)
     monkeypatch.setattr(chat, "append_tried_step", lambda *args: None)
-    monkeypatch.setattr(chat.knowledge, "search_knowledge", lambda _: [])
+    # 桩函数接受任意关键字参数：对话链路经 search_for_chat 调用时会传 top_k
+    monkeypatch.setattr(chat.knowledge, "search_knowledge", lambda *args, **kwargs: [])
     app = FastAPI()
     app.include_router(chat_router, prefix="/api")
     with chat.execution_scope(), TestClient(app) as client:
@@ -173,7 +174,7 @@ def test_chat_success_keeps_existing_response(chat_client, monkeypatch):
 def test_initial_retrieval_failure_can_still_answer(chat_client, monkeypatch):
     calls = []
 
-    def fail(query):
+    def fail(query, **kwargs):
         calls.append(query)
         raise TimeoutError(PRIVATE_DETAIL)
 
@@ -207,7 +208,7 @@ def test_chat_import_does_not_require_model_key():
 def test_successful_retrieval_preserves_citations(chat_client, monkeypatch):
     calls = []
 
-    def search(query):
+    def search(query, **kwargs):
         calls.append(query)
         return [{"id": "k-test", "title": "导出手册", "kind": "manual", "content": "使用 CSV。"}]
 

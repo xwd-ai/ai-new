@@ -8,7 +8,7 @@ Embedding / Rerank 时无需改动业务链路。
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Protocol, Sequence
+from typing import Iterator, Protocol, Sequence
 
 from backend.errors import ModelConfigurationError
 
@@ -69,6 +69,31 @@ class OpenAICompatChatProvider:
             temperature=temperature,
         )
         return resp.choices[0].message.content or ""
+
+    def chat_stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,
+        temperature: float = 0.7,
+    ) -> Iterator[str]:
+        """流式生成回复，逐段产出增量文本。
+
+        每个 chunk 只带增量 delta，调用方拼起来才是完整回答。
+        末尾的空 chunk（只带 finish_reason）直接跳过，避免产出空串。
+        """
+        stream = self._client.chat.completions.create(
+            model=model or self._model,
+            messages=list(messages),
+            temperature=temperature,
+            stream=True,
+        )
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if delta is not None and delta.content:
+                yield delta.content
 
 
 class EmbeddingProvider(Protocol):

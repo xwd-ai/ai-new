@@ -783,6 +783,82 @@
       if (!recovery.cancelSync(message)) showStatus(message);
     });
 
+    // 探测服务端是否支持流式对话：只探一次并缓存。
+    // 探测失败（网络问题、旧版服务端）按不支持处理，走一次性接口 ——
+    // 这样不会出现「先盲试流式、失败再重发」的双请求。
+    let streamCapability = null;
+    async function supportsStream() {
+      if (streamCapability !== null) return streamCapability;
+      try {
+        const res = await fetch('/health', { cache: 'no-store' });
+        const data = await res.json();
+        streamCapability = Boolean(data.stream);
+      } catch {
+        streamCapability = false;
+      }
+      return streamCapability;
+    }
+
+    // 流式对话：逐字渲染回答，返回 { reply, sources, suggest }
+    // 之所以手写 SSE 解析而不用 EventSource：本接口是 POST，EventSource 只支持 GET
+    async function streamChat(text, typingEl) {
+      const res = await fetch('/api/chat/stream', {
+        method: 'POST',
+        signal: AbortSignal.timeout(120000),
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+        body: JSON.stringify({ message: text }),
+      });
+      if (!res.ok || !res.body) throw new Error('stream unavailable');
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let reply = '';
+      let sources = [];
+      let suggest = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        // SSE 以空行分隔帧；最后一段可能不完整，留在 buffer 里等下次拼接
+        let sep;
+        while ((sep = buffer.indexOf('\n\n')) >= 0) {
+          const frame = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+
+          let event = 'message';
+          const dataLines = [];
+          for (const line of frame.split('\n')) {
+            if (line.startsWith('event: ')) event = line.slice(7).trim();
+            else if (line.startsWith('data: ')) dataLines.push(line.slice(6));
+          }
+          if (!dataLines.length) continue;
+
+          let payload;
+          try { payload = JSON.parse(dataLines.join('\n')); } catch { continue; }
+
+          if (event === 'retrieval') {
+            sources = payload.sources || [];
+          } else if (event === 'delta') {
+            reply += payload.text || '';
+            typingEl.textContent = reply;
+            typingEl.style.color = '';
+            scrollBottom();
+          } else if (event === 'done') {
+            if (typeof payload.reply === 'string') reply = payload.reply;
+            suggest = Boolean(payload.suggest_ticket);
+          } else if (event === 'error') {
+            throw new Error(payload.message || 'stream error');
+          }
+        }
+      }
+
+      if (!reply) throw new Error('stream empty');
+      return { reply, sources, suggest };
+    }
+
     async function handleSend() {
       const text = input.value.trim();
       if (!text || !recovery.beginSend()) return;
@@ -801,15 +877,34 @@
       let trace = [];
       let uncertain = false;
       try {
-        const res = await fetch('/api/chat', { method: 'POST', signal: AbortSignal.timeout(60000), headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify({ message: text }) });
-        if (res.status === 401) requireRelogin('登录已失效，请重新登录。');
-        if (!res.ok) throw new Error('对话请求失败');
-        const data = await res.json();
-        if (typeof data.reply !== 'string') throw new Error('对话响应格式错误');
-        reply = data.reply;
-        suggest = data.suggest_ticket;
-        sources = data.sources || [];
-        trace = data.trace || [];
+        // 优先走流式：能边生成边显示。服务端不支持时直接走一次性接口，
+        // 不做「先试再回退」，避免每次发送多一个无用请求。
+        let streamed = null;
+        if (await supportsStream()) {
+          try {
+            streamed = await streamChat(text, typing);
+          } catch (streamErr) {
+            // 流式已经开始但中途失败：回退到一次性接口拿完整回答
+            streamed = null;
+          }
+        }
+
+        if (streamed) {
+          reply = streamed.reply;
+          suggest = streamed.suggest;
+          sources = streamed.sources;
+          // 流式接口不跑 Agent 循环，因此没有执行过程可展示
+        } else {
+          const res = await fetch('/api/chat', { method: 'POST', signal: AbortSignal.timeout(60000), headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify({ message: text }) });
+          if (res.status === 401) requireRelogin('登录已失效，请重新登录。');
+          if (!res.ok) throw new Error('对话请求失败');
+          const data = await res.json();
+          if (typeof data.reply !== 'string') throw new Error('对话响应格式错误');
+          reply = data.reply;
+          suggest = data.suggest_ticket;
+          sources = data.sources || [];
+          trace = data.trace || [];
+        }
       } catch (e) {
         uncertain = true;
         const retained = document.createElement('p');

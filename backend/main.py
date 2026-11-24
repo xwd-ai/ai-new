@@ -59,7 +59,7 @@ def health() -> JSONResponse:
     """
     from backend.providers import capability_report
 
-    return JSONResponse({"status": "ok", "models": capability_report()})
+    return JSONResponse({"status": "ok", "stream": True, "models": capability_report()})
 
 
 @app.get("/")

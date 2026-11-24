@@ -16,6 +16,9 @@ test('page send timeout releases controls and preserves uncertain question outsi
     addUserMsg() {}, addAiContainer: () => ({}), addTyping: () => ({style:{}}),
     addTrace() {}, addSources() {}, addConfirmTicket() {}, scrollBottom() {}, clearCopyFeedback() {},
     AbortSignal: {timeout: ms => {timeout = ms; return 'bounded-signal';}},
+    // handleSend 现在会先探测流式能力；这里声明为不支持，验证非流式路径的
+    // 超时预算与不确定问题保留逻辑。
+    supportsStream: async () => false,
     fetch: async (url, options) => {requestOptions=options; throw new Error('timeout');},
     document: {createElement: () => ({}), getElementById: id => id === 'uncertainTexts'
       ? {appendChild: item => retained.push(item.textContent)} : detail},

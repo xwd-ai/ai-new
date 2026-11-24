@@ -3,12 +3,13 @@ import json
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.responses import StreamingResponse
 from sqlalchemy import text
 
 from backend.api.auth import current_user
 from backend.api.ratelimit import chat_rate_limit
 from backend.database import SessionLocal
-from backend.services import chat as chat_service, knowledge
+from backend.services import chat as chat_service, knowledge, llm
 from backend.models import Conversation, Message
 from backend.schemas import (
     ChatRequest, ChatResponse, ConversationResponse, ErrorResponse,
@@ -40,6 +41,67 @@ def chat(
             sources=sources,
             trace=trace,
         )
+
+
+def _sse_frame(event: str, payload: dict) -> str:
+    """把一条事件编码成 SSE 帧：event 行 + data 行 + 结束空行。"""
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+@chat_router.post(
+    "/chat/stream",
+    summary="流式生成对话回答",
+    description=(
+        "SSE 输出：先推检索到的来源（event: retrieval），"
+        "再逐段推模型回复增量（event: delta），最后推完整回答（event: done）。"
+        "不做 Agent 多轮工具决策，供需要即时反馈的场景使用。"
+    ),
+)
+def chat_stream_endpoint(
+    req: ChatRequest,
+    user: dict | None = Depends(current_user),
+    _rate: None = Depends(chat_rate_limit),
+) -> StreamingResponse:
+    """流式回答：检索一次完成，模型输出边生成边推送。
+
+    与 /chat 的分工：/chat 走 Agent 循环，回答质量更高但必须等全部生成完；
+    本接口牺牲多轮决策换取即时反馈，适合对话类前端。
+    """
+    user_id = user["id"] if user else "anonymous"
+    messages, sources, conversation_id, suggest = chat_service.build_stream_messages(
+        user_id, req.message
+    )
+
+    def event_stream():
+        # 来源先发：前端在第一个字到达前就能渲染证据列表
+        yield _sse_frame("retrieval", {"sources": sources})
+
+        collected: list[str] = []
+        try:
+            for delta in llm.chat_stream_messages(messages):
+                collected.append(delta)
+                yield _sse_frame("delta", {"text": delta})
+        except Exception as exc:  # noqa: BLE001 - 流已开始，只能以事件形式报告
+            yield _sse_frame("error", {"message": f"生成中断：{exc}"})
+            return
+
+        reply = "".join(collected)
+        # 生成完成后才落库：中途断流不会留下半截回答
+        chat_service.append_turn(conversation_id, req.message, reply)
+        yield _sse_frame(
+            "done", {"reply": reply, "suggest_ticket": suggest}
+        )
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # 让反向代理不要缓冲，否则客户端会攒一大块才收到
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @chat_router.get(
