@@ -41,5 +41,28 @@ services:
       retries: 5
       start_period: 5s
 
+  # Go 业务服务：订单查询、令牌校验、待确认工单列表（均为只读）。
+  # 后端通过 GO_BUSINESS_URL 调用它；未配置或不可用时 Python 会自动降级。
+  # 需要先启动过一次后端生成 backend/app.db，否则宿主机路径不存在时
+  # Docker 会把它创建成目录，只读挂载会失败。
+  go-business:
+    build: ./go-business
+    container_name: ainew-business
+    restart: unless-stopped
+    environment:
+      ADDR: 0.0.0.0:8082
+      DB_PATH: /data/app.db
+    volumes:
+      # 与 Python 后端共用同一份 SQLite；Go 侧连接本身也是 mode=ro
+      - ./backend/app.db:/data/app.db:ro
+    ports:
+      - "8082:8082"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8082/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
 volumes:
   mysql-data:

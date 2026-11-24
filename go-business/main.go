@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"aibusiness/internal/auth"
 	"aibusiness/internal/db"
 	"aibusiness/internal/orders"
+	"aibusiness/internal/tickets"
 )
 
 const (
@@ -27,7 +29,10 @@ const (
 	shutdownTimeout = 10 * time.Second
 )
 
-var repo *orders.Repository
+var (
+	repo       *orders.Repository
+	ticketRepo *tickets.Repository
+)
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
@@ -42,6 +47,7 @@ func main() {
 	defer conn.Close()
 
 	repo = orders.NewRepository(conn)
+	ticketRepo = tickets.NewRepository(conn)
 
 	addr := os.Getenv("ADDR")
 	if addr == "" {
@@ -53,6 +59,7 @@ func main() {
 	mux.HandleFunc("GET /api/order", handleOrder)
 	mux.HandleFunc("GET /api/orders", handleOrders)
 	mux.HandleFunc("GET /api/auth/verify", handleVerifyToken)
+	mux.HandleFunc("GET /api/tickets/pending", handlePendingTickets)
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -114,6 +121,32 @@ func handleOrders(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.Error("查询订单列表失败", "err", err, "user_id", userID)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "查询订单失败"})
+		return
+	}
+	writeJSON(w, http.StatusOK, data)
+}
+
+// handlePendingTickets 查询待确认草稿列表，对应 Python 的 list_pending_tickets。
+func handlePendingTickets(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	userID := strings.TrimSpace(query.Get("user_id"))
+	includeExpired := query.Get("include_expired") == "true" || query.Get("include_expired") == "1"
+
+	var timeout *int
+	if raw := strings.TrimSpace(query.Get("timeout_seconds")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		// 负数阈值会把所有草稿判成超时，与 Python 一样当场拒绝而不是拉回 0
+		if err != nil || value < 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "timeout_seconds 必须是非负整数"})
+			return
+		}
+		timeout = &value
+	}
+
+	data, err := ticketRepo.ListPending(userID, includeExpired, timeout, nil)
+	if err != nil {
+		slog.Error("查询待确认工单失败", "err", err, "user_id", userID)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "查询工单失败"})
 		return
 	}
 	writeJSON(w, http.StatusOK, data)

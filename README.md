@@ -47,8 +47,8 @@ BM25 与向量双路召回后 RRF 融合；重排全部不过阈值时，先放�
 **⑤ 工程完备度**  
 62 个测试文件覆盖幂等、状态机、租约竞争、迁移、HTTP 全链路；Alembic 管理表结构演进；内置离线检索评测（Precision / Recall / MRR / nDCG）。
 
-**⑥ 按计算特性划分语言边界**  
-检索打分与文档分块是纯 CPU 计算，独立成 Go 服务；业务编排与模型调用留在 Python。
+**⑥ 按能力边界逐步替换语言**  
+纯 CPU 的检索打分与分块最先独立成 Go 服务；随后把订单查询、令牌校验、待确认工单列表这些「只读、无 LLM、无事务、无锁」的查询也迁到 Go 业务服务。写路径（建单、状态流转、幂等与分布式锁）仍留在 Python。
 后端优先调用 Go，连不上或超时自动退回本地实现 —— **远程服务只是加速，不是正确性依赖**。
 
 ## 架构
@@ -63,14 +63,23 @@ BM25 与向量双路召回后 RRF 融合；重排全部不过阈值时，先放�
   ├─ services/   业务：认证 / 订单 / 工单 / 知识 / 对话 / Agent
   ├─ models/     数据模型        schemas/  接口契约
   └─ providers/  模型适配（Chat / Embedding / Rerank）
-          │                                    │ HTTP（可选，失败降级本地）
-    SQLite / MySQL + Alembic            检索服务（Go :8081）
-                                          ├─ /search   BM25 + 向量 + RRF
-                                          ├─ /ingest   分块 + 指纹（worker pool）
-                                          └─ /stream   SSE 分阶段推送
+          │                            │ HTTP（可选，失败降级本地）
+    SQLite / MySQL + Alembic    ┌─────┴──────┐
+                                │            │
+                     检索服务（Go :8081）  业务服务（Go :8082）
+                       ├─ /search  BM25 + 向量 + RRF
+                       ├─ /ingest  分块 + 指纹（worker pool）
+                       └─ /stream  SSE 分阶段推送
+                                             ├─ /api/order
+                                             ├─ /api/orders
+                                             ├─ /api/auth/verify
+                                             └─ /api/tickets/pending
           │
     模型 API（OpenAI 兼容）
 ```
+
+两个 Go 服务相互独立，分别由 `GO_RETRIEVAL_URL` 与 `GO_BUSINESS_URL` 控制，
+可以单独部署、单独回滚；任一不可用都只影响对应的加速路径。
 
 ## 快速开始
 
@@ -107,6 +116,20 @@ docker compose up -d go-retrieval
 
 启动后在 `backend/.env` 里设置 `GO_RETRIEVAL_URL=http://127.0.0.1:8081`，后端即优先使用 Go 计算。
 
+### 可选：启动 Go 业务服务
+
+订单查询与待确认工单列表的只读实现，与检索服务相互独立，同样不是启动硬依赖。
+
+```bash
+# 方式一：直接运行（默认读 ../backend/app.db）
+cd go-business && go run .          # 默认 127.0.0.1:8082
+
+# 方式二：容器（需先启动过一次后端，生成 backend/app.db）
+docker compose up -d go-business
+```
+
+启动后在 `backend/.env` 里设置 `GO_BUSINESS_URL=http://127.0.0.1:8082`，后端即优先使用 Go 的只读查询；未配置或不可用时自动退回本地实现。
+
 ### 可选：切换到 MySQL
 
 ```bash
@@ -138,4 +161,3 @@ docker compose up -d mysql
 pip install -r backend/requirements-dev.txt
 pytest backend/tests -q
 ```
-

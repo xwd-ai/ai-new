@@ -2,4 +2,4 @@ module airetrieval
 
 go 1.27.3
 
-require golang.org/x/sync v0.25.0 // indirect
+require golang.org/x/sync v0.25.0
