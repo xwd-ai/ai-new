@@ -48,8 +48,8 @@ BM25 与向量双路召回后 RRF 融合；重排全部不过阈值时，先放�
 62 个测试文件覆盖幂等、状态机、租约竞争、迁移、HTTP 全链路；Alembic 管理表结构演进；内置离线检索评测（Precision / Recall / MRR / nDCG）。
 
 **⑥ 按能力边界逐步替换语言**  
-纯 CPU 的检索打分、分块与检索后处理最先独立成 Go 检索服务；随后把订单查询、令牌校验、待确认工单列表这些「只读、无 LLM、无事务、无锁」的查询迁到 Go 业务服务；最后加一层 Go 网关作为对外入口，承担反向代理、入口鉴权、限流、SSE 转发、pprof 与优雅关闭。
-写路径（建单、状态流转、幂等与分布式锁）与 LLM 编排仍留在 Python —— 不是搬不动，而是低频写事务与模型适配重写风险高于收益。
+纯 CPU 的检索打分、分块与检索后处理最先独立成 Go 检索服务；随后把订单查询、令牌校验、待确认工单列表这些「只读、无 LLM、无事务」的查询迁到 Go 业务服务；再把工单的 `confirm / cancel / update_status` 三个状态流转也迁过去——它们只涉及规则校验、单表更新与时间线追加，不碰建单的取号与三层幂等锁；最后加一层 Go 网关作为对外入口，承担反向代理、入口鉴权、限流、SSE 转发、pprof 与优雅关闭。
+建单、批量操作与 LLM 编排仍留在 Python —— 建单依赖 `MAX(id)+1` 的应用层取号，跨语言写入必然撞号，要迁必须先把主键分配换成数据库侧保证；模型适配与多轮编排的生态也在 Python。
 所有远程能力都可缺省：未配置或不可用时自动退回 Python 本地实现 —— **远程服务只是加速，不是正确性依赖**。
 
 ## 架构
@@ -83,7 +83,10 @@ BM25 与向量双路召回后 RRF 融合；重排全部不过阈值时，先放�
                                              ├─ /api/order
                                              ├─ /api/orders
                                              ├─ /api/auth/verify
-                                             └─ /api/tickets/pending
+                                             ├─ /api/tickets/pending
+                                             ├─ /api/tickets/confirm ┐
+                                             ├─ /api/tickets/cancel  ├ 状态流转（写 SQLite）
+                                             └─ /api/tickets/status  ┘
           │
     模型 API（OpenAI 兼容）
 ```
@@ -129,7 +132,8 @@ docker compose up -d go-retrieval
 
 ### 可选：启动 Go 业务服务
 
-订单查询与待确认工单列表的只读实现，与检索服务相互独立，同样不是启动硬依赖。
+订单查询、待确认工单列表，以及工单的 `confirm / cancel / update_status` 状态流转。
+与检索服务相互独立，同样不是启动硬依赖。
 
 ```bash
 # 方式一：直接运行（默认读 ../backend/app.db）
@@ -139,7 +143,13 @@ cd go-business && go run .          # 默认 127.0.0.1:8082
 docker compose up -d go-business
 ```
 
-启动后在 `backend/.env` 里设置 `GO_BUSINESS_URL=http://127.0.0.1:8082`，后端即优先使用 Go 的只读查询；未配置或不可用时自动退回本地实现。
+启动后在 `backend/.env` 里设置 `GO_BUSINESS_URL=http://127.0.0.1:8082`。
+后端会优先使用 Go 的查询与状态流转；未配置、连不上、或返回无法识别时自动退回本地实现。
+状态机规则两边一致——非法流转同样返回 `TICKET_INVALID_TRANSITION`，
+未知状态同样按 422 语义拒绝，因此前端不需要知道工单在哪边处理。
+
+写连接只支持 SQLite：Go 侧用 `mode=rw` 打开同一个库文件，与 Python 靠
+`busy_timeout` 协调写锁。切换到 MySQL 部署时不要配置该项，让写路径留在 Python。
 
 ### 可选：启动 Go 网关（推荐作为对外入口）
 

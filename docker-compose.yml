@@ -53,8 +53,10 @@ services:
       ADDR: 0.0.0.0:8082
       DB_PATH: /data/app.db
     volumes:
-      # 与 Python 后端共用同一份 SQLite；Go 侧连接本身也是 mode=ro
-      - ./backend/app.db:/data/app.db:ro
+      # 与 Python 后端共用同一份 SQLite。
+      # 必须可写：工单的 confirm / cancel / update_status 已在 Go 侧执行，
+      # 写连接是 mode=rw；查询仍走另一条 mode=ro 的只读连接。
+      - ./backend/app.db:/data/app.db:rw
     ports:
       - "8082:8082"
     healthcheck:
