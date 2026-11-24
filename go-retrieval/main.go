@@ -13,21 +13,33 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"airetrieval/internal/ingest"
 	"airetrieval/internal/search"
 )
 
 const (
 	defaultAddr     = "127.0.0.1:8081"
 	shutdownTimeout = 10 * time.Second
+
+	// 入库 Worker 的并发度与队列缓冲：并发度对应 CPU 密集的分块计算，
+	// 队列缓冲用于吸收突发请求，满了会让提交方等待（背压）。
+	ingestWorkers   = 4
+	ingestQueueSize = 64
 )
+
+// ingestWorker 是进程级的入库任务处理器，随服务启停。
+var ingestWorker *ingest.Worker
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
+
+	ingestWorker = ingest.New(ingestWorkers, ingestQueueSize)
 
 	addr := os.Getenv("ADDR")
 	if addr == "" {
@@ -37,6 +49,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handleHealth)
 	mux.HandleFunc("POST /search", handleSearch)
+	mux.HandleFunc("POST /ingest", handleIngest)
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -55,6 +68,8 @@ func main() {
 		if err := srv.Shutdown(ctx); err != nil {
 			slog.Error("服务关闭异常", "err", err)
 		}
+		// 停止入库 Worker：等待在途分块任务处理完
+		ingestWorker.Close()
 	}()
 
 	slog.Info("检索服务启动", "addr", addr)
@@ -110,6 +125,62 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, searchResponse{Results: results, Count: len(results)})
+}
+
+// ingestRequest 是批量入库预处理请求。
+//
+// 服务只做「分块 + 指纹」这类 CPU 密集的预处理，落库仍由调用方完成，
+// 因此它不持有任何存储状态。
+type ingestRequest struct {
+	Docs []ingest.Job `json:"docs"`
+}
+
+type ingestResponse struct {
+	Results []ingest.Result `json:"results"`
+	Count   int             `json:"count"`
+}
+
+func handleIngest(w http.ResponseWriter, r *http.Request) {
+	var req ingestRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体不是合法 JSON"})
+		return
+	}
+	if len(req.Docs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "docs 不能为空"})
+		return
+	}
+	for _, job := range req.Docs {
+		if job.ID == "" || strings.TrimSpace(job.Content) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "每个文档都需要 id 与非空 content"})
+			return
+		}
+	}
+
+	// 并发提交给 Worker：并发度由 Worker 的 goroutine 数量控制，
+	// 这里不另起无限协程，队列满时 Submit 会阻塞形成背压。
+	results := make([]ingest.Result, len(req.Docs))
+	errs := make([]error, len(req.Docs))
+	var wg sync.WaitGroup
+
+	for i, job := range req.Docs {
+		wg.Add(1)
+		go func(i int, job ingest.Job) {
+			defer wg.Done()
+			results[i], errs[i] = ingestWorker.Submit(r.Context(), job)
+		}(i, job)
+	}
+	wg.Wait()
+
+	for _, err := range errs {
+		if err != nil {
+			slog.Error("入库预处理失败", "err", err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "入库服务暂不可用"})
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, ingestResponse{Results: results, Count: len(results)})
 }
 
 func writeJSON(w http.ResponseWriter, code int, payload any) {
