@@ -19,6 +19,7 @@ import (
 
 	"airetrieval/internal/ingest"
 	"airetrieval/internal/search"
+	"airetrieval/internal/stream"
 )
 
 const (
@@ -49,6 +50,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handleHealth)
 	mux.HandleFunc("POST /search", handleSearch)
+	mux.HandleFunc("POST /stream", handleStream)
 	mux.HandleFunc("POST /ingest", handleIngest)
 
 	srv := &http.Server{
@@ -125,6 +127,89 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, searchResponse{Results: results, Count: len(results)})
+}
+
+// handleStream 以 SSE 形式把检索过程按阶段实时推给客户端。
+//
+// 与 /search 的区别只在「交付方式」：/search 等全部算完一次返回，
+// /stream 每完成一个阶段就推一条事件，前端可以立刻显示进度。
+// 用 POST 而不是 GET，是因为文档集合随请求体传入、体积可能较大。
+func handleStream(w http.ResponseWriter, r *http.Request) {
+	var req searchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求体不是合法 JSON"})
+		return
+	}
+	if strings.TrimSpace(req.Query) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "query 不能为空"})
+		return
+	}
+	if req.TopK <= 0 {
+		req.TopK = defaultTopK
+	}
+
+	sse, err := stream.NewWriter(w)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	ctx := r.Context()
+	started := time.Now()
+	eventID := 0
+
+	// 客户端断开后 emit 返回 false，后续阶段应立即停止计算而不是继续白跑
+	emit := func(event string, payload any) bool {
+		if ctx.Err() != nil {
+			return false
+		}
+		if err := sse.Send(eventID, event, payload); err != nil {
+			return false
+		}
+		eventID++
+		return true
+	}
+
+	// 心跳保活：长时间无事件时避免被代理或负载均衡当作空闲连接断开
+	stopHeartbeat := make(chan struct{})
+	defer close(stopHeartbeat)
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopHeartbeat:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_ = sse.Comment("keep-alive")
+			}
+		}
+	}()
+
+	if !emit("start", map[string]any{"query": req.Query, "docs": len(req.Docs)}) {
+		return
+	}
+
+	prefetch := req.TopK * 5
+
+	keywordHits := search.KeywordSearch(req.Query, req.Docs, prefetch)
+	if !emit("keyword", map[string]any{"hits": len(keywordHits)}) {
+		return
+	}
+
+	// 本服务未注入 Embedder：如实标注跳过，而不是假装做过向量检索
+	if !emit("vector", map[string]any{"skipped": true, "reason": "未配置 Embedder"}) {
+		return
+	}
+
+	fused := search.FuseRRF(keywordHits, nil, req.TopK, search.DefaultRRFK)
+	if !emit("result", map[string]any{"count": len(fused), "items": fused}) {
+		return
+	}
+
+	emit("done", map[string]any{"elapsed_ms": time.Since(started).Milliseconds()})
 }
 
 // ingestRequest 是批量入库预处理请求。
