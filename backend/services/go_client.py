@@ -200,3 +200,75 @@ def rank(
     if not data or not isinstance(data.get("results"), list):
         return None
     return data["results"]
+
+
+def _business_post(path: str, payload: dict, timeout: float = _TIMEOUT_SECONDS) -> Optional[dict]:
+    """向业务服务发一次 JSON POST，返回 ``{"status": 状态码, "body": 响应体}``。
+
+    与只读接口的关键差异：**4xx 不能当成「服务不可用」直接降级**。
+    「工单不存在」「流转非法」是 Go 给出的业务结论，必须把状态码和响应体
+    一起交给调用方翻译成对应异常；只有连不上、超时、响应不是 JSON 才返回
+    ``None`` 让调用方走本地实现。
+
+    urllib 对 4xx/5xx 抛 HTTPError，而 HTTPError 本身就是可读的响应对象，
+    响应体要在 except 分支里读出来——这是本函数与 ``_post`` 唯一的结构差异。
+    """
+    base = _business_base_url()
+    if base is None:
+        return None
+
+    request = urllib.request.Request(
+        f"{base}{path}",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    try:
+        with _opener.open(request, timeout=timeout) as response:
+            body = json.loads(response.read().decode("utf-8"))
+            return {"status": response.status, "body": body if isinstance(body, dict) else {}}
+    except urllib.error.HTTPError as exc:
+        try:
+            body = json.loads(exc.read().decode("utf-8"))
+        except (ValueError, OSError):
+            return None
+        return {"status": exc.code, "body": body if isinstance(body, dict) else {}}
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+
+
+def confirm_ticket(ticket_id: str, operator: str) -> Optional[dict]:
+    """调用 Go 确认待确认草稿；未配置或不可用返回 None。
+
+    返回 ``{"status": 状态码, "body": 工单或错误体}``，由调用方决定
+    是取工单、抛业务异常，还是降级到本地实现。
+    """
+    if not ticket_id:
+        return None
+    return _business_post(
+        "/api/tickets/confirm",
+        {"ticket_id": ticket_id, "operator": operator},
+    )
+
+
+def cancel_ticket(ticket_id: str, reason: str, operator: str) -> Optional[dict]:
+    """调用 Go 取消待确认草稿；未配置或不可用返回 None。"""
+    if not ticket_id:
+        return None
+    return _business_post(
+        "/api/tickets/cancel",
+        {"ticket_id": ticket_id, "reason": reason, "operator": operator},
+    )
+
+
+def update_ticket_status(ticket_id: str, status: str) -> Optional[dict]:
+    """调用 Go 改工单状态；未配置或不可用返回 None。
+
+    不传操作人：Go 侧与 Python 原实现一致，把该动作的操作人固定为 system。
+    """
+    if not ticket_id:
+        return None
+    return _business_post(
+        "/api/tickets/status",
+        {"ticket_id": ticket_id, "status": status},
+    )

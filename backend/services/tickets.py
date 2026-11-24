@@ -19,6 +19,7 @@ import re
 import time
 from contextlib import contextmanager
 from datetime import datetime
+from typing import NamedTuple, Optional
 
 from sqlalchemy import func, or_, text
 from sqlalchemy.exc import IntegrityError
@@ -326,6 +327,58 @@ def ticket_identity(user: dict | None) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 远程接入层：把 Go 业务服务的写操作响应翻译成本层可处理的结果
+# ---------------------------------------------------------------------------
+
+
+class _RemoteWriteOutcome(NamedTuple):
+    """Go 写操作的解析结果，ticket 与 not_found 互斥。
+
+    「服务不可用」刻意不用本类型表达：那种情况由解析函数返回 None，
+    调用方据此降级到本地实现。「没有结论」与「有结论但结果为空」是两件事，
+    混在一起会让降级判断把「工单不存在」也当成故障重试一遍。
+    """
+
+    ticket: Optional[dict]
+    not_found: bool
+
+
+def _parse_remote_write(result: dict) -> Optional[_RemoteWriteOutcome]:
+    """解析 Go 的写操作响应，三种出口。
+
+    - 返回 outcome：拿到工单，或确认工单不存在；
+    - 直接抛 TicketTransitionError：Go 判定「流转非法 / 状态未知」，
+      异常类型与错误码和本地校验完全一致，接口层不需要为远程来源加分支；
+    - 返回 None：响应无法识别（5xx、未知错误码、结构不完整），
+      由调用方退回本地实现——远程只是加速，不能让它改变错误语义。
+    """
+    status = result.get("status")
+    body = result.get("body")
+    if not isinstance(body, dict):
+        return None
+
+    if status == 200 and isinstance(body.get("id"), str):
+        return _RemoteWriteOutcome(body, False)
+
+    code = body.get("error_code")
+    detail = body.get("error_detail")
+    detail = detail if isinstance(detail, dict) else {}
+
+    if code == TicketErrorCode.NOT_FOUND or status == 404:
+        return _RemoteWriteOutcome(None, True)
+
+    if code in (TicketErrorCode.INVALID_TRANSITION, TicketErrorCode.UNKNOWN_STATUS):
+        raise TicketTransitionError(
+            str(detail.get("from_status", "")),
+            str(detail.get("to_status", "")),
+            message=body.get("error") or None,
+            code=code,
+        )
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # 状态机层：工单状态变更的唯一写入口
 # ---------------------------------------------------------------------------
 
@@ -494,7 +547,19 @@ def confirm_ticket(ticket_id: str, operator: str = DEFAULT_OPERATOR) -> dict | N
     工单不存在时返回 None，由接口层区分「不存在」与「已确认」。
     operator 是确认动作的操作人：带登录身份的调用方传真实用户名，
     时间线据此区分「本人确认」与「系统确认」。
+
+    配置了 GO_BUSINESS_URL 时优先调用 Go 业务服务；未配置、连不上、
+    或响应无法识别时退回下面的本地实现。两条路径的状态机规则与返回结构
+    完全一致，调用方不需要知道工单是哪边流转的。
     """
+    cleaned = _clean_operator(operator)
+
+    remote = go_client.confirm_ticket(ticket_id, cleaned)
+    if remote is not None:
+        outcome = _parse_remote_write(remote)
+        if outcome is not None:
+            return None if outcome.not_found else outcome.ticket
+
     with _ticket_session(write=True) as db:
         t = _load_ticket(db, ticket_id)
         if not t:
@@ -502,7 +567,7 @@ def confirm_ticket(ticket_id: str, operator: str = DEFAULT_OPERATOR) -> dict | N
         # 已非待确认状态视为已确认/已终结，幂等返回，不重复流转
         if t.status != STATUS_PENDING_CONFIRM:
             return t.to_dict()
-        _apply_transition(db, t, STATUS_OPEN, operator=_clean_operator(operator))
+        _apply_transition(db, t, STATUS_OPEN, operator=cleaned)
         return t.to_dict()
 
 
@@ -519,7 +584,18 @@ def cancel_ticket(
     不抛错也不重复流转，原样返回当前工单；工单不存在时返回 None。
     取消说明的来源仍是系统记录，操作人落在时间线上，
     避免把一句系统说明算成一次人工回复。
+
+    与确认一样优先走 Go 业务服务，失败退回本地：取消说明的文案、
+    署名与时间戳口径两边保持一致。
     """
+    cleaned = _clean_operator(operator)
+
+    remote = go_client.cancel_ticket(ticket_id, reason, cleaned)
+    if remote is not None:
+        outcome = _parse_remote_write(remote)
+        if outcome is not None:
+            return None if outcome.not_found else outcome.ticket
+
     with _ticket_session(write=True) as db:
         t = _load_ticket(db, ticket_id)
         if not t:
@@ -533,7 +609,7 @@ def cancel_ticket(
             "at": time.time(),
         }
         _apply_transition(
-            db, t, STATUS_CLOSED, operator=_clean_operator(operator), reply=reply
+            db, t, STATUS_CLOSED, operator=cleaned, reply=reply
         )
         return t.to_dict()
 
@@ -1463,7 +1539,17 @@ def update_status(ticket_id: str, status: str) -> dict | None:
 
     未知状态值或非法流转会抛出 TicketTransitionError，由接口层捕获后
     返回明确错误信息，避免非法状态写入数据库。
+
+    优先走 Go 业务服务：Go 侧「非法流转」返回 409、「未知状态」返回 422，
+    与本地异常的错误码一一对应，因此远程判定失败也会抛出同一个异常类型，
+    接口层的响应格式不会因为工单在哪边处理而改变。
     """
+    remote = go_client.update_ticket_status(ticket_id, status)
+    if remote is not None:
+        outcome = _parse_remote_write(remote)
+        if outcome is not None:
+            return None if outcome.not_found else outcome.ticket
+
     with _ticket_session(write=True) as db:
         t = _load_ticket(db, ticket_id)
         if not t:
