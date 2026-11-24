@@ -30,8 +30,9 @@ const (
 )
 
 var (
-	repo       *orders.Repository
-	ticketRepo *tickets.Repository
+	repo         *orders.Repository
+	ticketRepo   *tickets.Repository
+	ticketWriter *tickets.Writer
 )
 
 func main() {
@@ -39,6 +40,7 @@ func main() {
 		Level: slog.LevelInfo,
 	})))
 
+	// 查询用只读连接：物理上写不了，权限边界落在连接上
 	conn, err := db.Open()
 	if err != nil {
 		slog.Error("数据库连接失败", "err", err)
@@ -46,8 +48,17 @@ func main() {
 	}
 	defer conn.Close()
 
+	// 写操作单独用读写连接：只有工单流转这条路径需要写权限
+	writeConn, err := db.OpenWrite()
+	if err != nil {
+		slog.Error("数据库写连接失败", "err", err)
+		os.Exit(1)
+	}
+	defer writeConn.Close()
+
 	repo = orders.NewRepository(conn)
 	ticketRepo = tickets.NewRepository(conn)
+	ticketWriter = tickets.NewWriter(writeConn)
 
 	addr := os.Getenv("ADDR")
 	if addr == "" {
@@ -60,6 +71,9 @@ func main() {
 	mux.HandleFunc("GET /api/orders", handleOrders)
 	mux.HandleFunc("GET /api/auth/verify", handleVerifyToken)
 	mux.HandleFunc("GET /api/tickets/pending", handlePendingTickets)
+	mux.HandleFunc("POST /api/tickets/confirm", handleConfirmTicket)
+	mux.HandleFunc("POST /api/tickets/cancel", handleCancelTicket)
+	mux.HandleFunc("POST /api/tickets/status", handleUpdateTicketStatus)
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -171,6 +185,109 @@ func handleVerifyToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"valid": true, "claims": claims})
+}
+
+// ticketWriteRequest 是三个写端点共用的请求体。
+//
+// 三个动作的字段互不冲突、数量都很少，共用一个结构体比定义三个几乎一样的
+// 类型更省事；多出来的字段自然被忽略，不需要额外校验「这个字段不该出现」。
+type ticketWriteRequest struct {
+	TicketID string `json:"ticket_id"`
+	Operator string `json:"operator"`
+	Reason   string `json:"reason"`
+	Status   string `json:"status"`
+}
+
+func decodeWriteRequest(w http.ResponseWriter, r *http.Request) (ticketWriteRequest, bool) {
+	var req ticketWriteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":      "请求体不是合法 JSON",
+			"error_code": string(tickets.CodeInvalidPayload),
+		})
+		return req, false
+	}
+	return req, true
+}
+
+// handleConfirmTicket 确认待确认草稿，对应 Python 的 tickets.confirm_ticket。
+func handleConfirmTicket(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeWriteRequest(w, r)
+	if !ok {
+		return
+	}
+	ticket, err := ticketWriter.Confirm(r.Context(), req.TicketID, req.Operator)
+	writeTicketResult(w, req.TicketID, ticket, err)
+}
+
+// handleCancelTicket 取消待确认草稿，对应 Python 的 tickets.cancel_ticket。
+func handleCancelTicket(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeWriteRequest(w, r)
+	if !ok {
+		return
+	}
+	ticket, err := ticketWriter.Cancel(r.Context(), req.TicketID, req.Reason, req.Operator)
+	writeTicketResult(w, req.TicketID, ticket, err)
+}
+
+// handleUpdateTicketStatus 改工单状态，对应 Python 的 tickets.update_status。
+//
+// 操作人固定为 system，不接受请求体指定：这个端点是管理端的显式流转，
+// 与「谁点的确认」不同，人工操作人应由上层审计日志记录，而不是混进时间线。
+func handleUpdateTicketStatus(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeWriteRequest(w, r)
+	if !ok {
+		return
+	}
+	ticket, err := ticketWriter.UpdateStatus(r.Context(), req.TicketID, req.Status)
+	writeTicketResult(w, req.TicketID, ticket, err)
+}
+
+// writeTicketResult 把写操作结果映射成与 Python 一致的 HTTP 响应。
+//
+// 三档区分是刻意的，Python 侧据此还原成同一套异常类型：
+//   - 404 工单不存在；
+//   - 422 入参里的状态值不认识（调用方传错了）；
+//   - 409 状态值合法但这条流转不允许（业务冲突）。
+//
+// 混用会导致前端无法区分「我传错了参数」和「这个动作现在不能做」。
+func writeTicketResult(w http.ResponseWriter, ticketID string, ticket map[string]any, err error) {
+	if err == nil {
+		writeJSON(w, http.StatusOK, ticket)
+		return
+	}
+
+	if errors.Is(err, tickets.ErrNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]any{
+			"error":        "工单不存在",
+			"error_code":   string(tickets.CodeNotFound),
+			"error_detail": map[string]any{"ticket_id": ticketID},
+		})
+		return
+	}
+
+	var transitionErr *tickets.TransitionError
+	if errors.As(err, &transitionErr) {
+		code := http.StatusConflict
+		if transitionErr.Code == tickets.CodeUnknownStatus {
+			code = http.StatusUnprocessableEntity
+		}
+		writeJSON(w, code, map[string]any{
+			"error":      transitionErr.Message,
+			"error_code": string(transitionErr.Code),
+			"error_detail": map[string]any{
+				"from_status": transitionErr.From,
+				"to_status":   transitionErr.To,
+			},
+		})
+		return
+	}
+
+	slog.Error("工单流转失败", "err", err, "ticket_id", ticketID)
+	writeJSON(w, http.StatusInternalServerError, map[string]any{
+		"error":      "工单操作失败",
+		"error_code": "TICKET_INTERNAL",
+	})
 }
 
 func writeJSON(w http.ResponseWriter, code int, payload any) {
