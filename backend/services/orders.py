@@ -32,6 +32,7 @@ import copy
 import math
 import time
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -106,9 +107,20 @@ def _current_timestamp(now=None) -> float:
     return time.time() if current is None else current
 
 
+# 展示型日期的业务时区：固定北京时间（UTC+8）。
+# 不能用本地时区——同一份代码跑在 UTC 容器和 +08 开发机上会给出不同日期，
+# 呈现给用户的「服务期 2023-10-16」不应取决于服务器部署在哪。
+BUSINESS_TZ = timezone(timedelta(hours=8))
+
+
 def _format_day(timestamp: float) -> str:
-    """时间戳转本地日期，仅用于展示。"""
-    return time.strftime("%Y-%m-%d", time.localtime(timestamp))
+    """时间戳转业务时区日期，仅用于展示。
+
+    固定用北京时间而不是 `time.localtime`：展示日期不能跟着部署机器的时区变。
+    同一个时间戳，服务器在 UTC 容器里和在本地 +08 机器上曾经会差一天，
+    Go 侧同一份判定也踩过这个坑，两侧现在统一按 `BUSINESS_TZ` 出日期。
+    """
+    return datetime.fromtimestamp(timestamp, BUSINESS_TZ).strftime("%Y-%m-%d")
 
 
 # ============================ 一、版本与能力映射 ============================

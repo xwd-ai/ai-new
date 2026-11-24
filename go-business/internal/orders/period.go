@@ -121,9 +121,16 @@ func EvaluateServicePeriod(startedAt, expiresAt *float64, now *float64) Period {
 	}
 }
 
-// formatDay 把时间戳转成本地日期，仅用于展示。
+// businessZone 是展示型日期的业务时区：固定北京时间（UTC+8）。
+//
+// 不能用 time.Local：同一份判定跑在 UTC 容器和 +08 开发机上会给出不同日期，
+// 与 Python 侧的 BUSINESS_TZ 必须保持一致。FixedZone 不依赖系统 tzdata，
+// 精简镜像里也不会因为缺时区文件退化成 UTC。
+var businessZone = time.FixedZone("CST", 8*3600)
+
+// formatDay 把时间戳转成业务时区日期，仅用于展示。
 func formatDay(timestamp float64) string {
-	return time.Unix(int64(timestamp), 0).Format("2006-01-02")
+	return time.Unix(int64(timestamp), 0).In(businessZone).Format("2006-01-02")
 }
 
 // roundHalfEven 复现 Python 的 round(x, digits)：**四舍六入五成双**。
