@@ -12,6 +12,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  go-test:
+    name: Go 服务单元测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.3"
+          cache-dependency-path: |
+            go-retrieval/go.sum
+            go-business/go.sum
+
+      - name: 检索服务
+        working-directory: go-retrieval
+        run: go test ./... -race
+
+      - name: 业务服务
+        working-directory: go-business
+        run: go test ./... -race
+
   test:
     name: 测试
     runs-on: ubuntu-latest

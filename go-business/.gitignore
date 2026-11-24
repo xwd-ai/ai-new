@@ -1,6 +1,6 @@
 # 编译产物
 /aibusiness
-/retrieval
+/business
 *.exe
 
 # 测试与覆盖率
