@@ -1,6 +1,6 @@
 from enum import Enum
 
-from sqlalchemy import JSON, Float, Integer, String
+from sqlalchemy import JSON, Float, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base
@@ -262,16 +262,18 @@ def validate_transition(
 class Ticket(Base):
     __tablename__ = "tickets"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    dedup_key: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    dedup_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     # user_id / status / created_at 是列表筛选、超时扫描与统计聚合的高频条件，
     # 各建单列索引让这些查询走索引定位而不是全表扫描
-    user_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    user_name: Mapped[str] = mapped_column(String, nullable=False)
-    description: Mapped[str] = mapped_column(String, nullable=False)
-    tried_steps: Mapped[str] = mapped_column(String, default="")
-    evidence: Mapped[str] = mapped_column(String, default="")
-    status: Mapped[str] = mapped_column(String, default="open", index=True)  # 取值见 TicketStatus
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    user_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 长文本字段：MySQL 下 String 会建成 VARCHAR(255)，问题描述与排查步骤
+    # 都可能超过该长度，必须显式声明为 Text（SQLite 下 Text 与 String 等价）
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    tried_steps: Mapped[str] = mapped_column(Text, default="")
+    evidence: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(255), default="open", index=True)  # 取值见 TicketStatus
     created_at: Mapped[float] = mapped_column(Float, nullable=False, index=True)
     replies: Mapped[list] = mapped_column(JSON, default=list)
 
@@ -301,10 +303,10 @@ class TicketStatusLog(Base):
     __tablename__ = "ticket_status_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    ticket_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    from_status: Mapped[str] = mapped_column(String, default="")
-    to_status: Mapped[str] = mapped_column(String, nullable=False)
-    operator: Mapped[str] = mapped_column(String, default="system")
+    ticket_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    from_status: Mapped[str] = mapped_column(String(255), default="")
+    to_status: Mapped[str] = mapped_column(String(255), nullable=False)
+    operator: Mapped[str] = mapped_column(String(255), default="system")
     changed_at: Mapped[float] = mapped_column(Float, nullable=False)
 
     def to_dict(self) -> dict:

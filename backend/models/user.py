@@ -62,11 +62,11 @@ def _digest_legacy(password: str) -> str:
 class User(Base):
     __tablename__ = "users"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    username: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    username: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String(PASSWORD_HASH_LENGTH), nullable=False)
-    name: Mapped[str] = mapped_column(String, nullable=False)
-    role: Mapped[str] = mapped_column(String, nullable=False)  # admin / customer，取值见 UserRole
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(255), nullable=False)  # admin / customer，取值见 UserRole
 
     # ---- 角色读取：只做判定，不改变账号状态 ----
 
@@ -150,11 +150,11 @@ class User(Base):
 class Session(Base):
     __tablename__ = "sessions"
 
-    token: Mapped[str] = mapped_column(String, primary_key=True)
-    user_id: Mapped[str] = mapped_column(String, nullable=False)
-    username: Mapped[str] = mapped_column(String, nullable=False)
-    name: Mapped[str] = mapped_column(String, nullable=False)
-    role: Mapped[str] = mapped_column(String, nullable=False)
+    token: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    username: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(255), nullable=False)
     # expires_at 是过期清理的扫描条件，建索引避免清一批过期会话也要全表扫
     expires_at: Mapped[float] = mapped_column(Float, nullable=False, index=True)
 
@@ -184,13 +184,13 @@ class RevokedToken(Base):
 
     __tablename__ = "revoked_tokens"
 
-    jti: Mapped[str] = mapped_column(String, primary_key=True)
-    user_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    token_type: Mapped[str] = mapped_column(String, nullable=False)  # access / refresh
+    jti: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    token_type: Mapped[str] = mapped_column(String(255), nullable=False)  # access / refresh
     # expires_at 是过期清理的扫描条件，建索引避免整表扫描
     expires_at: Mapped[float] = mapped_column(Float, nullable=False, index=True)
     revoked_at: Mapped[float] = mapped_column(Float, nullable=False)
-    reason: Mapped[str] = mapped_column(String, nullable=False, default="")
+    reason: Mapped[str] = mapped_column(String(255), nullable=False, default="")
 
     @property
     def expired(self) -> bool:
@@ -218,8 +218,8 @@ class RefreshToken(Base):
 
     __tablename__ = "refresh_tokens"
 
-    token: Mapped[str] = mapped_column(String, primary_key=True)
-    user_id: Mapped[str] = mapped_column(String, nullable=False)
+    token: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False)
     # expires_at 是过期清理的扫描条件，建索引避免整表扫描
     expires_at: Mapped[float] = mapped_column(Float, nullable=False, index=True)
     revoked_at: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
