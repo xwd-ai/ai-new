@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+	"time"
 )
 
 // pyScope 是 Python 的 evaluate_service_scope 在固定输入下的输出，
@@ -136,6 +137,32 @@ func TestHasCapability(t *testing.T) {
 	for _, c := range cases {
 		if got := HasCapability(c.tier, c.feature); got != c.want {
 			t.Errorf("HasCapability(%q,%q) = %v，期望 %v", c.tier, c.feature, got, c.want)
+		}
+	}
+}
+
+// TestFormatDayIgnoresLocalTimezone 锁住「展示日期不随服务器时区漂移」。
+//
+// 之前的实现走 time.Local，CI 容器是 UTC、开发机是 +08，同一笔订单
+// 在两边差一天（2023-10-15 / 2023-10-16），把与 Python 的对比用例打挂。
+// 这里显式把 time.Local 切到 UTC 和 -05:00 各跑一遍，断言的仍是北京日期。
+func TestFormatDayIgnoresLocalTimezone(t *testing.T) {
+	const ts = 1697408000.0 // 2023-10-16 00:00:00 +08:00
+
+	original := time.Local
+	t.Cleanup(func() { time.Local = original })
+
+	cases := map[string]*time.Location{
+		"UTC":       time.UTC,
+		"西五区":       time.FixedZone("EST", -5*3600),
+		"东十二区":      time.FixedZone("NZST", 12*3600),
+		"北京（开发机默认）": businessZone,
+	}
+
+	for name, loc := range cases {
+		time.Local = loc
+		if got := formatDay(ts); got != "2023-10-16" {
+			t.Errorf("%s：formatDay=%s，期望 2023-10-16（应固定按业务时区）", name, got)
 		}
 	}
 }
