@@ -9,6 +9,7 @@
 时间一律由用例显式传入 now，不依赖真实时钟，避免跨零点抖动。
 """
 
+import os
 import time
 
 import pytest
@@ -412,3 +413,31 @@ def test_query_order_falls_back_to_matrix_without_product_row(factory):
     assert result["product_name"] == "专业版"
     assert "批量导出" in result["features"]
     assert len(result["features"]) == len(orders.TIER_FEATURES["pro"])
+
+
+# ============================ 四、展示日期的时区口径 ============================
+
+
+def test_format_day_ignores_local_timezone():
+    """展示日期固定按北京时间，不随部署机器时区漂移。
+
+    曾经的实现走 time.localtime：CI 容器（UTC）和开发机（+08）算出的
+    「服务期起始」差一天，把与 Go 侧的对比用例打挂。这里把进程时区
+    切到 UTC 和西五区各算一遍，结果必须仍是北京日期。
+    """
+    if not hasattr(time, "tzset"):
+        pytest.skip("当前平台不支持切换进程时区")
+
+    timestamp = 1697408000  # 2023-10-16 00:00:00 +08:00
+    original = os.environ.get("TZ")
+    try:
+        for tz in ("UTC", "America/New_York", "Pacific/Kiritimati"):
+            os.environ["TZ"] = tz
+            time.tzset()
+            assert orders._format_day(timestamp) == "2023-10-16", tz
+    finally:
+        if original is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original
+        time.tzset()
