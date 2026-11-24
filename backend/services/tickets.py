@@ -37,7 +37,7 @@ from backend.models.ticket import (
     is_valid_status,
     validate_transition,
 )
-from backend.services import auth as auth_service
+from backend.services import auth as auth_service, go_client
 from backend.services.distlock import distributed_lock
 
 # 状态取值别名：业务代码统一引用这些常量，避免裸字符串分散在各处函数里
@@ -689,10 +689,24 @@ def list_pending_tickets(
     管理员需要全量视图时不传 user_id。列表按建单时间倒序，最新草稿排在最前。
     timeout_seconds 与超时收敛共用同一套校验：负数或非整数直接拒绝，
     避免查询视图和收敛视图对「是否超时」的判断出现分歧。
+
+    优先调用 Go 业务服务的只读实现；未配置、调用失败或结构不符时退回本地查询。
+    两种情形必须走本地：显式传入 now 的离线/测试场景（Go 用自己的时钟，无法对齐
+    注入的时间口径），以及远程返回 None 的降级场景。参数校验始终在远程调用之前，
+    非法入参不会被转发成另一个服务的错误。
     """
     timeout = _pending_timeout(timeout_seconds)
     ts = time.time() if now is None else now
     deadline = ts - timeout
+
+    if now is None:
+        remote = go_client.pending_tickets(
+            user_id=user_id,
+            include_expired=include_expired,
+            timeout_seconds=timeout,
+        )
+        if remote is not None:
+            return remote
 
     db = SessionLocal()
     try:

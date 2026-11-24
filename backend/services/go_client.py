@@ -133,3 +133,36 @@ def order_query(user_id: str) -> Optional[dict]:
         return None
 
     return data if isinstance(data, dict) else None
+
+
+def pending_tickets(
+    user_id: Optional[str] = None,
+    include_expired: bool = False,
+    timeout_seconds: Optional[int] = None,
+) -> Optional[dict]:
+    """调用 Go 业务服务查询待确认工单；未配置或不可用返回 None。
+
+    列表拉取是低频操作，走 HTTP 不构成热点压力，因此接入收益高于认证校验。
+    返回体必须是带 items 列表的对象，结构不完整时同样按不可用处理——
+    远程只是加速，不能把半截结果交给业务层。
+    """
+    base = _business_base_url()
+    if base is None:
+        return None
+
+    params = {"include_expired": "true" if include_expired else "false"}
+    if user_id:
+        params["user_id"] = user_id
+    if timeout_seconds is not None:
+        params["timeout_seconds"] = str(timeout_seconds)
+
+    url = f"{base}/api/tickets/pending?{urllib.parse.urlencode(params)}"
+    try:
+        with _opener.open(url, timeout=_TIMEOUT_SECONDS) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+
+    if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+        return None
+    return data
