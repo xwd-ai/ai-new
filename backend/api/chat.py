@@ -68,7 +68,7 @@ def chat_stream_endpoint(
     本接口牺牲多轮决策换取即时反馈，适合对话类前端。
     """
     user_id = user["id"] if user else "anonymous"
-    messages, sources, conversation_id = chat_service.build_stream_messages(
+    messages, sources, conversation_id, suggest = chat_service.build_stream_messages(
         user_id, req.message
     )
 
@@ -88,7 +88,9 @@ def chat_stream_endpoint(
         reply = "".join(collected)
         # 生成完成后才落库：中途断流不会留下半截回答
         chat_service.append_turn(conversation_id, req.message, reply)
-        yield _sse_frame("done", {"reply": reply})
+        yield _sse_frame(
+            "done", {"reply": reply, "suggest_ticket": suggest}
+        )
 
     return StreamingResponse(
         event_stream(),
