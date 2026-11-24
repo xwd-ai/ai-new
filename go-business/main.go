@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"aibusiness/internal/auth"
 	"aibusiness/internal/db"
 	"aibusiness/internal/orders"
 )
@@ -51,6 +52,7 @@ func main() {
 	mux.HandleFunc("GET /health", handleHealth)
 	mux.HandleFunc("GET /api/order", handleOrder)
 	mux.HandleFunc("GET /api/orders", handleOrders)
+	mux.HandleFunc("GET /api/auth/verify", handleVerifyToken)
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -115,6 +117,27 @@ func handleOrders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, data)
+}
+
+// handleVerifyToken 校验 access token，供 Python 或网关转发校验请求。
+//
+// token 从 Authorization 头读取而不是 query 参数：query 会进入访问日志与
+// 浏览器历史，等于把凭据写进日志。
+func handleVerifyToken(w http.ResponseWriter, r *http.Request) {
+	raw := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	if raw == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 Bearer 令牌"})
+		return
+	}
+
+	claims, err := auth.VerifyAccessToken(raw)
+	if err != nil {
+		// 校验失败是业务结果而不是服务故障，仍返回 200，由 valid 字段表达
+		writeJSON(w, http.StatusOK, map[string]any{"valid": false, "error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"valid": true, "claims": claims})
 }
 
 func writeJSON(w http.ResponseWriter, code int, payload any) {

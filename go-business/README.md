@@ -26,6 +26,25 @@ DB_PATH=/path/to/app.db ADDR=127.0.0.1:9000 go run .
 | GET | `/health` | — |
 | GET | `/api/order?user_id=x` | `orders.query_order` |
 | GET | `/api/orders?user_id=x` | `orders.query_orders` |
+| GET | `/api/auth/verify` | `auth.resolve_token`（仅校验层） |
+
+`/api/auth/verify` 从 `Authorization: Bearer` 头读令牌，不接受 query 参数——
+query 会进入访问日志与浏览器历史，等于把凭据写进日志。
+
+### 关于认证迁移的边界
+
+只迁移了**校验**，没有迁移登录与签发。原因：
+
+1. 登录是低频写操作（要写会话表、bcrypt 哈希），迁移动机不足；
+2. 校验虽然是每请求热点，但它是纯 HMAC 计算，Python 与 Go 都很快；
+   **接进 Python 热路径反而每请求多一次网络往返，比本地计算更慢**。
+
+因此 Go 的校验能力定位为「可独立部署的认证服务」（供网关或其他服务调用），
+Python 主链路默认仍用本地实现。若确需统一到 Go，可在网关层前置，
+而不是在业务请求里逐次转发。
+
+跨语言互认已用 Python 签发的真实令牌验证：access 通过，refresh / 篡改签名 /
+非法格式均被拒绝。
 
 ## 与 Python 的一致性保障
 
