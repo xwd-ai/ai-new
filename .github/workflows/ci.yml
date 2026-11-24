@@ -24,6 +24,7 @@ jobs:
           cache-dependency-path: |
             go-retrieval/go.sum
             go-business/go.sum
+            go-gateway/go.sum
 
       - name: 检索服务
         working-directory: go-retrieval
@@ -31,6 +32,10 @@ jobs:
 
       - name: 业务服务
         working-directory: go-business
+        run: go test ./... -race
+
+      - name: 网关
+        working-directory: go-gateway
         run: go test ./... -race
 
   test:
