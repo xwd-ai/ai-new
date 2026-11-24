@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -543,6 +544,22 @@ def search_knowledge_hybrid(
         top_k=top_k,
         config=cfg,
     )
+
+
+def search_for_chat(query: str, top_k: int = 3) -> list[dict]:
+    """对话链路的统一检索入口：按配置选择混合检索或纯关键词。
+
+    默认走纯关键词。原因是**当前可用的模型供应商没有 embedding 接口**
+    （DeepSeek 返回 404），启用混合检索只会为每次查询增加一次必然失败的调用。
+
+    配置了支持 embedding 的供应商（OpenAI / 智谱 / 本地 BGE 等）之后，
+    设置环境变量 ``RETRIEVAL_MODE=hybrid`` 即可启用「关键词 + 向量 + RRF」。
+    向量路失败时 ``search_knowledge_hybrid`` 内部会退化为纯关键词，不会影响可用性。
+    """
+    mode = (os.getenv("RETRIEVAL_MODE") or "keyword").strip().lower()
+    if mode == "hybrid":
+        return search_knowledge_hybrid(query, top_k=top_k)
+    return search_knowledge(query, top_k=top_k)
 
 
 # ---------------------------------------------------------------------------

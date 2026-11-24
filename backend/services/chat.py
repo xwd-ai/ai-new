@@ -164,7 +164,7 @@ def _build_tools(user_id: str, registry: citations.SourceRegistry) -> tools.Tool
     """
 
     def search_knowledge_tool(query: str = "", **_: object) -> tools.ToolResult:
-        found = knowledge.search_knowledge(query)
+        found = knowledge.search_for_chat(query)
         return tools.ToolResult(success=True, data={"items": found})
 
     def query_order_tool(**_: object) -> tools.ToolResult:
@@ -231,7 +231,7 @@ def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
         )
 
     def _search(query: str) -> list[dict]:
-        found = knowledge.search_knowledge(query)
+        found = knowledge.search_for_chat(query)
         return citations.build_prompt_items(found, registry)
 
     transition = agent.run_loop(state, step_fn=_step, search_fn=_search)
@@ -273,14 +273,14 @@ def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
 
 def build_stream_messages(
     user_id: str, message: str
-) -> tuple[list[dict], list[dict], str]:
-    """为流式回答准备消息、证据与对话 id。
+) -> tuple[list[dict], list[dict], str, bool]:
+    """为流式回答准备消息、证据、对话 id 与转人工建议。
 
     与 build_reply 的差异：**不做 Agent 多轮决策**。边决策边流式无法保证
     输出一致 —— 决策可能要求再检索一轮，而流式内容已经发出去了。
     因此这里一次性完成检索，再让模型基于证据边生成边返回。
 
-    返回 (messages, sources, conversation_id)，由接口层负责流式输出。
+    返回 (messages, sources, conversation_id, suggest_ticket)。
     """
     conversation_id = get_or_create_conversation(user_id)
     compacted = context.compact_history(
@@ -291,7 +291,7 @@ def build_stream_messages(
 
     # 检索结果分配请求内有效的句柄，模型只看到编号，前端按编号回查原文
     registry = citations.SourceRegistry()
-    found = knowledge.search_knowledge(message)
+    found = knowledge.search_for_chat(message)
     prompt_items = citations.build_prompt_items(found, registry)
 
     messages = llm.build_messages(
@@ -301,7 +301,24 @@ def build_stream_messages(
         knowledge=prompt_items,
         allow_action=False,
     )
-    return messages, citations.public_sources(registry), conversation_id
+
+    # 转人工判定与非流式路径保持同一口径
+    prior_unresolved = any(
+        k in m.get("content", "")
+        for m in compacted.messages
+        if m.get("role") == "user"
+        for k in ("还是不行", "还是没用", "没解决", "解决不了")
+    )
+    decision = escalation.decide_escalation(
+        message, order=order, repeated_unresolved=prior_unresolved
+    )
+
+    return (
+        messages,
+        citations.public_sources(registry),
+        conversation_id,
+        decision.suggest,
+    )
 
 
 # 当前执行上下文最近一次完整对话的摘要与判定，作为一组发布。
