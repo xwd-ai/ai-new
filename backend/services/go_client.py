@@ -15,10 +15,13 @@ from __future__ import annotations
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Optional
 
 _URL_ENV = "GO_RETRIEVAL_URL"
+# 业务服务（订单/工单等）的地址，与检索服务分开配置：两者可独立部署与回滚
+_BUSINESS_URL_ENV = "GO_BUSINESS_URL"
 # 超时设得比较短：远程检索只是优化，宁可降级也不要把请求拖住
 _TIMEOUT_SECONDS = 2.0
 
@@ -99,3 +102,34 @@ def chunk_count(title: str, content: str) -> Optional[int]:
     if not isinstance(chunks, list):
         return None
     return len(chunks)
+
+
+def _business_base_url() -> Optional[str]:
+    url = (os.getenv(_BUSINESS_URL_ENV) or "").strip()
+    if not url:
+        return None
+    return url.rstrip("/")
+
+
+def business_enabled() -> bool:
+    """是否配置了 Go 业务服务地址。"""
+    return _business_base_url() is not None
+
+
+def order_query(user_id: str) -> Optional[dict]:
+    """调用 Go 业务服务查询主订单；未配置或不可用返回 None。
+
+    返回结构与 Python 的 orders.query_order 完全一致，调用方无需区分来源。
+    """
+    base = _business_base_url()
+    if base is None or not user_id:
+        return None
+
+    url = f"{base}/api/order?user_id={urllib.parse.quote(user_id)}"
+    try:
+        with _opener.open(url, timeout=_TIMEOUT_SECONDS) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+
+    return data if isinstance(data, dict) else None

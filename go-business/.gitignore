@@ -1,0 +1,8 @@
+# 编译产物
+/aibusiness
+/retrieval
+*.exe
+
+# 测试与覆盖率
+*.test
+*.out

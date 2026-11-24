@@ -39,7 +39,7 @@ from sqlalchemy import func, or_
 
 from backend.database import SessionLocal
 from backend.models import Order, Product
-from backend.services import tools
+from backend.services import go_client, tools
 from backend.models.order import (
     ORDER_STATUS_LABELS,
     VALID_STATUS_VALUES,
@@ -628,7 +628,13 @@ def query_order(user_id: str) -> dict:
     返回字段保持既有契约不变，只把 in_service 的判断交给
     evaluate_service_scope：服务期的起止时间与订单状态一起看，
     服务期尚未开始的订单不再被当成在服务中。
+
+    优先调用 Go 业务服务；未配置或不可用时走本地实现，两者结果等价。
     """
+    remote = go_client.order_query(user_id)
+    if remote is not None:
+        return remote
+
     order = get_order(user_id)
     if not order:
         return {
