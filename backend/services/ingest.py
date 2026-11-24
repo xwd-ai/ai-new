@@ -280,6 +280,12 @@ def ingest(
 
         checkpoint.mark(STAGE_STORED)
         record_checkpoint(fingerprint, STAGE_STORED, doc_id)
+        if created:
+            # 资料集发生变化：递增版本号让检索缓存整体失效。
+            # 局部导入避免与 knowledge 模块形成循环依赖；缓存不可用时为空操作。
+            from backend.services import knowledge as knowledge_service
+
+            knowledge_service.invalidate_search_cache()
         return IngestResult(
             knowledge_id=doc_id,
             created=created,

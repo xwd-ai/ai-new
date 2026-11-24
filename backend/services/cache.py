@@ -88,6 +88,20 @@ def delete(*keys: str) -> int:
         return 0
 
 
+def incr(key: str) -> Optional[int]:
+    """自增计数（不设过期），用于版本号这类单调递增标记。
+
+    返回自增后的值；缓存不可用或异常时返回 None。
+    """
+    client = _get_client()
+    if client is None:
+        return None
+    try:
+        return int(client.incr(key))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def incr_with_window(key: str, window: int) -> Optional[int]:
     """固定窗口计数（限流用）：自增并仅在首次写入时设置过期。
 

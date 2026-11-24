@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 from copy import deepcopy
@@ -23,7 +25,14 @@ from sqlalchemy import text
 from backend.database import SessionLocal
 from backend.logging_conf import log_event
 from backend.models import KnowledgeDoc
+from backend.services import cache
 from backend.services.retrieval_config import RetrievalConfig, load_retrieval_config
+
+# 检索结果缓存：检索是纯函数（同一 query + 同一资料集必得同一结果），
+# 因此整条结果可直接缓存；资料集变化时由版本号让旧缓存自然失效。
+_SEARCH_CACHE_PREFIX = "retrieval:kw"
+_SEARCH_CACHE_TTL = 300
+_CORPUS_VERSION_KEY = "retrieval:corpus_version"
 
 # BM25 参数：k1 控制词频饱和速度，b 控制文档长度归一化强度
 _BM25_K1 = 1.5
@@ -176,11 +185,42 @@ def _normalize(scores: list[float]) -> list[float]:
     return [s / max_score for s in scores]
 
 
+def _corpus_version() -> str:
+    """资料集版本号：入库成功后自增，使旧检索缓存不再命中。"""
+    return cache.get(_CORPUS_VERSION_KEY) or "0"
+
+
+def invalidate_search_cache() -> None:
+    """资料集变化后调用：递增版本号让所有检索缓存失效。
+
+    不用 KEYS/SCAN 批量删除 —— 版本号方案只需一次 INCR，
+    旧 key 由 TTL 自然回收，也不会因为扫全库拖慢 Redis。
+    """
+    cache.incr(_CORPUS_VERSION_KEY)
+
+
+def _search_cache_key(query: str, top_k: int) -> str:
+    """缓存键包含资料集版本：资料变化后同一个 query 会落到新键上。"""
+    digest = hashlib.sha256(f"{query}\x00{top_k}".encode()).hexdigest()[:32]
+    return f"{_SEARCH_CACHE_PREFIX}:v{_corpus_version()}:{digest}"
+
+
 def search_knowledge(query: str, top_k: int = 3) -> list[dict]:
     """按相关性检索知识条目，返回降序的条目字典列表。
 
     只返回分数大于 0 的条目（即至少命中一个查询词元）。
+
+    结果会写入缓存。缓存不可用时行为不变：读不到就直接计算，写不进也不影响返回。
     """
+    cache_key = _search_cache_key(query, top_k)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        try:
+            return json.loads(cached)
+        except ValueError:
+            # 缓存内容损坏：忽略并回源，不让坏数据影响检索结果
+            pass
+
     query_tokens = tokenize(query)
     docs = _all_docs()
     if not docs:
@@ -216,7 +256,11 @@ def search_knowledge(query: str, top_k: int = 3) -> list[dict]:
         hits=len(top),
         top_ids=[r.id for r in top],
     )
-    return [r.to_dict() for r in top]
+
+    payload = [r.to_dict() for r in top]
+    if payload:
+        cache.set(cache_key, json.dumps(payload, ensure_ascii=False), ttl=_SEARCH_CACHE_TTL)
+    return payload
 
 
 def get_knowledge(knowledge_id: str) -> dict | None:
