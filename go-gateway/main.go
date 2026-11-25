@@ -57,14 +57,17 @@ const (
 
 // config 是网关的全部可配置项，全部来自环境变量。
 type config struct {
-	addr            string
-	backendURL      *url.URL // 必需：其余能力都挂在它前面
-	retrievalURL    *url.URL // 可选：提供 /api/retrieval/stream
-	businessURL     *url.URL // 可选：提供入口令牌校验
-	upstreamTimeout time.Duration
-	rateLimit       float64 // 每秒补充的令牌数，<=0 表示关闭入口限流
-	rateBurst       int
-	pprof           bool
+	addr             string
+	backendURL       *url.URL // 必需：其余能力都挂在它前面
+	retrievalURL     *url.URL // 可选：提供 /api/retrieval/stream
+	businessURL      *url.URL // 可选：提供入口令牌校验
+	upstreamTimeout  time.Duration
+	rateLimit        float64 // 每秒补充的令牌数，<=0 表示关闭入口限流
+	rateBurst        int
+	pprof            bool
+	goPendingTickets bool
+	goTicketWrites   bool
+	frontendDir      string
 }
 
 var (
@@ -72,6 +75,7 @@ var (
 	logger *slog.Logger
 
 	backendProxy  *httputil.ReverseProxy
+	businessProxy *httputil.ReverseProxy
 	businessHTTP  *http.Client
 	authGroup     = singleflight.New()
 	entryLimiter  *ratelimit.Limiter
@@ -86,6 +90,9 @@ func main() {
 	cfg = loadConfig()
 
 	backendProxy = newBackendProxy(cfg.backendURL)
+	if (cfg.goPendingTickets || cfg.goTicketWrites) && cfg.businessURL != nil {
+		businessProxy = newBackendProxy(cfg.businessURL)
+	}
 	businessHTTP = &http.Client{Timeout: probeTimeout, Transport: newTransport(false)}
 	streamClient = &http.Client{Transport: newTransport(false)}
 
@@ -163,7 +170,26 @@ func registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
 	}
 
+	if businessProxy != nil {
+		if cfg.goPendingTickets {
+			mux.HandleFunc("GET /api/tickets/pending", proxyPublicTicket)
+		}
+		if cfg.goTicketWrites {
+			for _, operation := range []string{"confirm", "cancel", "status"} {
+				mux.HandleFunc("POST /api/tickets/"+operation, proxyPublicTicket)
+			}
+		}
+	}
+
+	registerFrontendRoutes(mux, cfg.frontendDir)
 	mux.Handle("/", backendProxy)
+}
+
+func proxyPublicTicket(w http.ResponseWriter, r *http.Request) {
+	upstream := r.Clone(r.Context())
+	upstream.URL.Path = "/public" + r.URL.Path
+	upstream.URL.RawPath = ""
+	businessProxy.ServeHTTP(w, upstream)
 }
 
 // handleHealth 聚合三类上游的健康状态，并透传前端依赖的字段。
@@ -498,6 +524,9 @@ func loadConfig() config {
 
 	c.retrievalURL = optionalURL("RETRIEVAL_URL")
 	c.businessURL = optionalURL("GO_BUSINESS_URL")
+	c.frontendDir = strings.TrimSpace(os.Getenv("GATEWAY_FRONTEND_DIR"))
+	c.goPendingTickets = envBool("GATEWAY_GO_PENDING_TICKETS", false)
+	c.goTicketWrites = envBool("GATEWAY_GO_TICKET_WRITES", false)
 
 	c.rateBurst = envInt("GATEWAY_RATE_BURST", int(c.rateLimit))
 	if c.rateLimit > 0 && c.rateBurst <= 0 {

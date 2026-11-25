@@ -16,7 +16,7 @@ from backend.models.user import RefreshToken, RevokedToken
 
 ROOT = Path(__file__).resolve().parents[2]
 OLD_REVISION = "d1178ec7c657"
-HEAD_REVISION = "f28a6c913d72"
+HEAD_REVISION = "c6b2d96e3401"
 
 
 QUERY_INDEXES = {

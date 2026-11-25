@@ -16,6 +16,12 @@ import (
 // 把「查不到」当成「成功但没数据」继续往下走。
 var ErrNotFound = errors.New("工单不存在")
 
+type OwnershipError struct {
+	OwnerID string
+}
+
+func (e *OwnershipError) Error() string { return "无权限" }
+
 const (
 	// DefaultOperator 是没有真实操作人时的兜底名称，与 Python 一致。
 	DefaultOperator = "system"
@@ -63,7 +69,11 @@ func CleanOperator(value string) string {
 // 不报错、不重复流转，直接返回当前工单。重复确认是正常的用户行为
 // （点两次、刷新后重试），不该让用户看到错误。
 func (w *Writer) Confirm(ctx context.Context, ticketID, operator string) (map[string]any, error) {
-	return w.transitionTicket(ctx, ticketID, StatusOpen, CleanOperator(operator), nil, true)
+	return w.ConfirmForOwner(ctx, ticketID, operator, "")
+}
+
+func (w *Writer) ConfirmForOwner(ctx context.Context, ticketID, operator, ownerID string) (map[string]any, error) {
+	return w.transitionTicket(ctx, ticketID, StatusOpen, CleanOperator(operator), nil, true, ownerID)
 }
 
 // Cancel 取消待确认草稿，流转为已关闭，并把取消原因以系统身份记进 replies。
@@ -71,12 +81,16 @@ func (w *Writer) Confirm(ctx context.Context, ticketID, operator string) (map[st
 // 取消说明的署名固定是 system 而不是真实操作人：这条是系统生成的解释文本，
 // 不该在时间线上算成一次「人工回复」，操作人另落在状态时间线里。
 func (w *Writer) Cancel(ctx context.Context, ticketID, reason, operator string) (map[string]any, error) {
+	return w.CancelForOwner(ctx, ticketID, reason, operator, "")
+}
+
+func (w *Writer) CancelForOwner(ctx context.Context, ticketID, reason, operator, ownerID string) (map[string]any, error) {
 	reply := map[string]any{
 		"replier": systemReplier,
 		"content": strings.TrimSpace("取消工单：" + reason),
 		"at":      nowSeconds(),
 	}
-	return w.transitionTicket(ctx, ticketID, StatusClosed, CleanOperator(operator), reply, true)
+	return w.transitionTicket(ctx, ticketID, StatusClosed, CleanOperator(operator), reply, true, ownerID)
 }
 
 // UpdateStatus 把工单流转到指定状态，操作人固定为 system。
@@ -86,7 +100,7 @@ func (w *Writer) Cancel(ctx context.Context, ticketID, reason, operator string) 
 // 传入一个「已经是该状态」的请求通常意味着调用方状态没刷新，
 // 报错比静默成功更有用。
 func (w *Writer) UpdateStatus(ctx context.Context, ticketID, status string) (map[string]any, error) {
-	return w.transitionTicket(ctx, ticketID, Status(status), DefaultOperator, nil, false)
+	return w.transitionTicket(ctx, ticketID, Status(status), DefaultOperator, nil, false, "")
 }
 
 // transitionTicket 是三个写操作的共用骨架：一个事务里完成
@@ -101,6 +115,7 @@ func (w *Writer) transitionTicket(
 	operator string,
 	reply map[string]any,
 	idempotent bool,
+	ownerID string,
 ) (map[string]any, error) {
 	if strings.TrimSpace(ticketID) == "" {
 		return nil, ErrNotFound
@@ -120,6 +135,10 @@ func (w *Writer) transitionTicket(
 			return nil, ErrNotFound
 		}
 		return nil, err
+	}
+
+	if ownerID != "" && t.UserID != ownerID {
+		return nil, &OwnershipError{OwnerID: t.UserID}
 	}
 
 	if idempotent && Status(t.Status) != StatusPendingConfirm {

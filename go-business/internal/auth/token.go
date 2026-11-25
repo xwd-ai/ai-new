@@ -8,6 +8,8 @@ package auth
 import (
 	"errors"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -39,8 +41,20 @@ type Claims struct {
 // ErrWrongType 表示令牌结构合法但用途不是 access。
 var ErrWrongType = errors.New("令牌用途不匹配")
 
+func ClockLeeway() time.Duration {
+	seconds, err := strconv.Atoi(strings.TrimSpace(os.Getenv("AI_NEW_JWT_LEEWAY")))
+	if err != nil || seconds < 0 || seconds > 300 {
+		return clockLeeway
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func HasConfiguredSecret() bool {
+	return strings.TrimSpace(os.Getenv(secretEnv)) != ""
+}
+
 func secret() []byte {
-	if value := os.Getenv(secretEnv); value != "" {
+	if value := strings.TrimSpace(os.Getenv(secretEnv)); value != "" {
 		return []byte(value)
 	}
 	return []byte(devSecret)
@@ -58,7 +72,7 @@ func VerifyAccessToken(raw string) (*Claims, error) {
 		jwt.WithValidMethods([]string{"HS256"}),
 		jwt.WithIssuer(Issuer),
 		jwt.WithAudience(Audience),
-		jwt.WithLeeway(clockLeeway),
+		jwt.WithLeeway(ClockLeeway()),
 		jwt.WithExpirationRequired(),
 	)
 

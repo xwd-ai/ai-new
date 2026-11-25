@@ -3,6 +3,7 @@ import time
 
 from backend.database import SessionLocal
 from backend.models import KnowledgeDoc, Order, Product, Ticket, User
+from backend.services.ticket_number import allocate_ticket_id
 
 # 启动预置数据统一收敛在此模块。
 # 各业务模块不再各自维护 seed 逻辑，进程启动时由 main 调用 seed_all() 一次完成预置。
@@ -174,11 +175,10 @@ def _seed_knowledge(db) -> None:
 def _seed_tickets(db) -> None:
     if db.query(Ticket).first() is not None:
         return
-    # 工单号自增：与 tickets.create_ticket 保持一致，从 T-1001 开始
-    for i, t in enumerate(_SEED_TICKETS, start=1001):
+    for t in _SEED_TICKETS:
         db.add(
             Ticket(
-                id=f"T-{i}",
+                id=allocate_ticket_id(db),
                 dedup_key=_dedup_key(t["user_id"], t["description"]),
                 user_id=t["user_id"],
                 user_name=t["user_name"],

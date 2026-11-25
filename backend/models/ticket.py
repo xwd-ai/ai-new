@@ -1,6 +1,6 @@
 from enum import Enum
 
-from sqlalchemy import JSON, Float, Integer, String, Text
+from sqlalchemy import JSON, BigInteger, Float, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base
@@ -290,6 +290,13 @@ class Ticket(Base):
             "created_at": self.created_at,
             "replies": self.replies,
         }
+
+
+class TicketNumberCounter(Base):
+    __tablename__ = "ticket_number_counter"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    last_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
 class TicketStatusLog(Base):

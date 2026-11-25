@@ -52,13 +52,15 @@ services:
     environment:
       ADDR: 0.0.0.0:8082
       DB_PATH: /data/app.db
+      AI_NEW_JWT_SECRET: ${AI_NEW_JWT_SECRET:-}
+      AI_NEW_JWT_LEEWAY: ${AI_NEW_JWT_LEEWAY:-30}
     volumes:
       # 与 Python 后端共用同一份 SQLite。
       # 必须可写：工单的 confirm / cancel / update_status 已在 Go 侧执行，
       # 写连接是 mode=rw；查询仍走另一条 mode=ro 的只读连接。
       - ./backend/app.db:/data/app.db:rw
     ports:
-      - "8082:8082"
+      - "127.0.0.1:8082:8082"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8082/health"]
       interval: 10s
@@ -79,8 +81,13 @@ services:
       RETRIEVAL_URL: http://go-retrieval:8081
       GO_BUSINESS_URL: http://go-business:8082
       GATEWAY_PPROF: "1"
+      GATEWAY_FRONTEND_DIR: /frontend
+      GATEWAY_GO_PENDING_TICKETS: ${GATEWAY_GO_PENDING_TICKETS:-false}
+      GATEWAY_GO_TICKET_WRITES: ${GATEWAY_GO_TICKET_WRITES:-false}
     ports:
       - "8080:8080"
+    volumes:
+      - ./frontend:/frontend:ro
     extra_hosts:
       # Linux 上 Docker 默认没有 host.docker.internal，需显式映射到宿主机网关
       - "host.docker.internal:host-gateway"

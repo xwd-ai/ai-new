@@ -40,6 +40,7 @@ from backend.models.ticket import (
 )
 from backend.services import auth as auth_service, go_client
 from backend.services.distlock import distributed_lock
+from backend.services.ticket_number import allocate_ticket_id
 
 # 状态取值别名：业务代码统一引用这些常量，避免裸字符串分散在各处函数里
 STATUS_PENDING_CONFIRM = TicketStatus.PENDING_CONFIRM.value
@@ -179,16 +180,6 @@ def advisory_lock(key: str):
             raise
         finally:
             db.close()
-
-
-def _next_id(db) -> str:
-    """工单号自增：基于现有最大序号 +1。"""
-    max_id = db.query(func.max(Ticket.id)).scalar()
-    if not max_id:
-        seq = 1000
-    else:
-        seq = int(max_id.replace("T-", ""))
-    return f"T-{seq + 1}"
 
 
 # ---------------------------------------------------------------------------
@@ -475,7 +466,7 @@ def create_ticket(
                 return existing.to_dict(), False
 
             ticket = Ticket(
-                id=_next_id(db),
+                id=allocate_ticket_id(db),
                 dedup_key=key,
                 user_id=user_id,
                 user_name=user_name,

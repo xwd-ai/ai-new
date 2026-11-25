@@ -71,6 +71,10 @@ func main() {
 	mux.HandleFunc("GET /api/orders", handleOrders)
 	mux.HandleFunc("GET /api/auth/verify", handleVerifyToken)
 	mux.HandleFunc("GET /api/tickets/pending", handlePendingTickets)
+	mux.HandleFunc("GET /public/api/tickets/pending", publicPendingTickets(conn))
+	for _, operation := range []string{"confirm", "cancel", "status"} {
+		mux.HandleFunc("POST /public/api/tickets/"+operation, publicTicketWrite(conn, operation))
+	}
 	mux.HandleFunc("POST /api/tickets/confirm", handleConfirmTicket)
 	mux.HandleFunc("POST /api/tickets/cancel", handleCancelTicket)
 	mux.HandleFunc("POST /api/tickets/status", handleUpdateTicketStatus)

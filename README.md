@@ -2,7 +2,7 @@
 
 > **带证据、能追问、可交接**的售后支持系统 —— 让 AI 客服真正把问题解决到底，而不是只回一句话。
 
-`Python 3.12+` · `FastAPI` · `SQLAlchemy` · `SQLite` · `Alembic` · `3 万行代码` · `62 个测试文件`
+`Python 3.12+` · `FastAPI` · `Go 1.27` · `SQLAlchemy` · `SQLite` · `Alembic` · `3 万行代码` · `62 个测试文件`
 
 ---
 
@@ -47,10 +47,11 @@ BM25 与向量双路召回后 RRF 融合；重排全部不过阈值时，先放�
 **⑤ 工程完备度**  
 62 个测试文件覆盖幂等、状态机、租约竞争、迁移、HTTP 全链路；Alembic 管理表结构演进；内置离线检索评测（Precision / Recall / MRR / nDCG）。
 
-**⑥ 按能力边界逐步替换语言**  
-纯 CPU 的检索打分、分块与检索后处理最先独立成 Go 检索服务；随后把订单查询、令牌校验、待确认工单列表这些「只读、无 LLM、无事务」的查询迁到 Go 业务服务；再把工单的 `confirm / cancel / update_status` 三个状态流转也迁过去——它们只涉及规则校验、单表更新与时间线追加，不碰建单的取号与三层幂等锁；最后加一层 Go 网关作为对外入口，承担反向代理、入口鉴权、限流、SSE 转发、pprof 与优雅关闭。
-建单、批量操作与 LLM 编排仍留在 Python —— 建单依赖 `MAX(id)+1` 的应用层取号，跨语言写入必然撞号，要迁必须先把主键分配换成数据库侧保证；模型适配与多轮编排的生态也在 Python。
-所有远程能力都可缺省：未配置或不可用时自动退回 Python 本地实现 —— **远程服务只是加速，不是正确性依赖**。
+**⑥ 按能力边界划分语言**  
+生产默认拓扑是「Go 网关为唯一对外入口 + 三个 Go 服务」，Python 退为内部服务，只接受网关与内网调用。
+纯 CPU 的检索打分、分块与后处理由 Go 检索服务承担；订单查询、令牌校验、待确认工单列表，以及工单的 `confirm / cancel / update_status` 三个状态流转由 Go 业务服务承担——后者只涉及规则校验、单表更新与时间线追加，不碰建单的取号与三层幂等锁；反向代理、入口鉴权、限流、SSE 转发、pprof 与优雅关闭由 Go 网关承担。
+建单、批量操作与 LLM 编排留在 Python —— 建单依赖 `MAX(id)+1` 的应用层取号，跨语言写入必然撞号，要迁必须先把主键分配换成数据库侧保证；模型适配与多轮编排的生态也在 Python。
+每个远程调用都保留一份本地同语义实现，作为**灰度、故障容错与独立回滚**路径：上游不可用时自动退回，便于按服务粒度排障。降级是可靠性设计，不是「少起几个服务」的默认用法。
 
 ## 架构
 
@@ -59,19 +60,19 @@ BM25 与向量双路召回后 RRF 融合；重排全部不过阈值时，先放�
   ├─ 客户工作台 ── 对话、来源回查、执行过程
   └─ 管理后台 ──── 工单、知识库、检索设置
           │ HTTP
-网关（Go :8080，推荐作为对外入口，可缺省）
+网关（Go :8080）—— 唯一对外入口，生产只暴露此端口
   ├─ 反向代理 → Python
   ├─ 入口鉴权   经业务服务验签，结果用于日志与限流维度
   ├─ 入口限流   token bucket，按用户 / IP 分桶
   ├─ /api/retrieval/stream   SSE 阶段进度转发
   └─ /debug/pprof            性能剖析
           │ HTTP
-后端（FastAPI :8000）—— LLM 编排、写事务与授权判定
+后端（FastAPI :8000，仅内网）—— LLM 编排、写事务与授权判定
   ├─ api/        路由与权限
   ├─ services/   业务：认证 / 订单 / 工单 / 知识 / 对话 / Agent
   ├─ models/     数据模型        schemas/  接口契约
   └─ providers/  模型适配（Chat / Embedding / Rerank）
-          │                            │ HTTP（可选，失败降级本地）
+          │                            │ HTTP（内部调用，失败自动降级）
     SQLite / MySQL + Alembic    ┌─────┴──────┐
                                 │            │
                      检索服务（Go :8081）  业务服务（Go :8082）
@@ -91,74 +92,73 @@ BM25 与向量双路召回后 RRF 融合；重排全部不过阈值时，先放�
     模型 API（OpenAI 兼容）
 ```
 
-网关与两个 Go 服务相互独立，分别由 `BACKEND_URL`、`GO_RETRIEVAL_URL` 与
-`GO_BUSINESS_URL` 控制，可以单独部署、单独回滚；任一不可用都只影响对应的加速路径。
-不启动网关时直接访问 Python 的 8000 端口，行为与之前完全一致。
+生产部署只对外暴露网关的 8080：前端 → 网关 → Python 后端 → 两个 Go 服务构成一条链路，
+Python 监听回环/内网地址，不直接接受公网请求。三个上游地址分别由 `BACKEND_URL`、
+`GO_RETRIEVAL_URL` 与 `GO_BUSINESS_URL` 配置，可按服务粒度单独部署与回滚。
+上游不可用时自动退回同语义的本地实现，用于灰度与故障容错 —— 降级是回滚路径，
+不是「少起几个服务」的默认用法。
 
-## 快速开始
+## 快速开始（生产默认拓扑）
 
-要求已有可用的项目虚拟环境 `.venv`（本地验证使用 Python 3.12）。
+要求已有可用的项目虚拟环境 `.venv`（本地验证使用 Python 3.12）。先启动内部 Python 后端，
+再起三个 Go 服务，对外只访问网关的 8080。
 
 ```bash
-# 1. 安装依赖
+# 1. 安装依赖与配置（已有 backend/.env 时直接核对，避免复制模板覆盖原值）
 pip install -r backend/requirements.txt
+cp backend/.env.example backend/.env     # 填入模型密钥与 GO_* 上游地址
 
-# 2. 配置模型密钥（已有 backend/.env 时直接核对，避免复制模板覆盖原值）
-cp backend/.env.example backend/.env
+# 2. 内部后端：只监听回环地址，不对公网暴露
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 
-# 3. 启动（默认 127.0.0.1:8000）
-python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
+# 3. 一次起三个 Go 服务（compose 中网关经 host.docker.internal 访问 8000）
+docker compose up -d go-retrieval go-business gateway
 ```
 
-打开 <http://127.0.0.1:8000> ，输入「**专业版导出功能一直失败**」，即可看到完整排查链路。
+打开 <http://127.0.0.1:8080> ，输入「**专业版导出功能一直失败**」，即可看到完整排查链路。
+`/health` 会返回网关自身状态、三个上游的健康与能力开关。
 
-启动会初始化 SQLite 并预置演示数据，数据库路径固定为 `backend/app.db`；`--reload` 仅供本地开发。
+启动会初始化 SQLite 并预置演示数据，数据库路径固定为 `backend/app.db`。
 
-> Windows 用户：把 `python` 换成 `.\.venv\Scripts\python.exe`
+> Windows 用户：把 `python` 换成 `.\.venv\Scripts\python.exe`。
+> 仅开发调试时可直连 <http://127.0.0.1:8000> 跳过网关，不要作为部署形态。
 
-### 可选：启动 Go 检索服务
+### 单独运行：Go 检索服务
 
-不启动也能正常使用 —— 后端检测不到该服务时会自动降级为本地实现，只是检索计算慢一些。
+compose 已包含该服务，下列命令用于不启容器时单独调试。
 
 ```bash
-# 方式一：直接运行
 cd go-retrieval && go run .          # 默认 127.0.0.1:8081
-
-# 方式二：容器（连同 MySQL 一起起）
-docker compose up -d go-retrieval
 ```
 
-启动后在 `backend/.env` 里设置 `GO_RETRIEVAL_URL=http://127.0.0.1:8081`，后端即优先使用 Go 计算。
+`backend/.env` 里的 `GO_RETRIEVAL_URL=http://127.0.0.1:8081` 指定它的地址；
+连接失败或超时时自动退回本地同语义实现，用于灰度与故障回滚。
 
-### 可选：启动 Go 业务服务
+### 单独运行：Go 业务服务
 
 订单查询、待确认工单列表，以及工单的 `confirm / cancel / update_status` 状态流转。
-与检索服务相互独立，同样不是启动硬依赖。
+compose 已包含该服务，下列命令用于不启容器时单独调试（需先启动过一次后端生成 `backend/app.db`）。
 
 ```bash
-# 方式一：直接运行（默认读 ../backend/app.db）
-cd go-business && go run .          # 默认 127.0.0.1:8082
-
-# 方式二：容器（需先启动过一次后端，生成 backend/app.db）
-docker compose up -d go-business
+cd go-business && go run .          # 默认 127.0.0.1:8082，读 ../backend/app.db
 ```
 
-启动后在 `backend/.env` 里设置 `GO_BUSINESS_URL=http://127.0.0.1:8082`。
-后端会优先使用 Go 的查询与状态流转；未配置、连不上、或返回无法识别时自动退回本地实现。
+`backend/.env` 里的 `GO_BUSINESS_URL=http://127.0.0.1:8082` 指定它的地址。
+后端优先使用 Go 的查询与状态流转；连不上或响应无法识别时自动退回本地实现。
 状态机规则两边一致——非法流转同样返回 `TICKET_INVALID_TRANSITION`，
 未知状态同样按 422 语义拒绝，因此前端不需要知道工单在哪边处理。
 
 写连接只支持 SQLite：Go 侧用 `mode=rw` 打开同一个库文件，与 Python 靠
 `busy_timeout` 协调写锁。切换到 MySQL 部署时不要配置该项，让写路径留在 Python。
 
-### 可选：启动 Go 网关（推荐作为对外入口）
+### 网关：对外唯一入口
 
 网关把 Python 后端与两个 Go 服务收在同一个入口后面：反向代理、入口鉴权、
-限流、SSE 转发、pprof 与优雅关闭都在这一层完成。**不启动也能正常使用**——
-直接访问 Python 的 8000 端口，行为与之前完全一致。
+限流、SSE 转发、pprof 与优雅关闭都在这一层完成。生产部署只暴露 8080，
+Python 后端仅监听内网地址。
 
 ```bash
-# 先启动 Python 后端（:8000），再起网关
+# 先启动内部 Python 后端（:8000），再起网关
 cd go-gateway && go run .          # 默认 127.0.0.1:8080
 ```
 

@@ -9,6 +9,7 @@
 """
 
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -128,4 +129,41 @@ def test_描述前后空白被清理(db_env):
 
     assert c1 is True
     assert c2 is False
+    assert _count_tickets(db_env) == 1
+
+
+def test_旧库按数字接续且并发建单各取一号(db_env):
+    with db_env.begin() as db:
+        for ticket_id in ("T-9999", "T-10000", "T-legacy"):
+            db.add(Ticket(
+                id=ticket_id, dedup_key=ticket_id, user_id="u-existing",
+                user_name="旧用户", description="旧工单", created_at=1,
+            ))
+
+    def create(index):
+        ticket, created = tickets.create_ticket(
+            "u-new", "新用户", f"不同问题 {index}", "", "",
+        )
+        assert created
+        return ticket["id"]
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        ids = set(executor.map(create, range(8)))
+
+    assert ids == {f"T-{number}" for number in range(10001, 10009)}
+    with db_env() as db:
+        assert all(db.get(Ticket, ticket_id) for ticket_id in ("T-9999", "T-10000", "T-legacy"))
+
+
+def test_建单事务失败时工单号和记录一并回滚(db_env, monkeypatch):
+    def fail_log(*args, **kwargs):
+        raise RuntimeError("模拟时间线写入失败")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(tickets, "_log_status_change", fail_log)
+        with pytest.raises(RuntimeError, match="模拟时间线写入失败"):
+            tickets.create_ticket("u1", "用户", "第一次尝试", "", "")
+
+    ticket, created = tickets.create_ticket("u1", "用户", "重试建单", "", "")
+    assert created and ticket["id"] == "T-1001"
     assert _count_tickets(db_env) == 1
