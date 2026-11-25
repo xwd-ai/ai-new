@@ -44,7 +44,7 @@ func (r *Repository) AdminList(ctx context.Context, filter AdminFilter) (map[str
 		args = append(args, filter.UserID)
 	}
 	if filter.Keyword != "" {
-		from += " AND (id LIKE ? ESCAPE '/' OR user_id LIKE ? ESCAPE '/')"
+		from += " AND (LOWER(id) LIKE LOWER(?) ESCAPE '/' OR LOWER(user_id) LIKE LOWER(?) ESCAPE '/')"
 		keyword := "%" + strings.NewReplacer("/", "//", "%", "/%", "_", "/_").Replace(filter.Keyword) + "%"
 		args = append(args, keyword, keyword)
 	}

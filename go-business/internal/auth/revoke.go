@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"aibusiness/internal/db"
 	"context"
 	"database/sql"
 	"errors"
@@ -50,13 +51,20 @@ func Logout(ctx context.Context, conn *sql.DB, accessToken, refreshToken string)
 		}
 	}
 
-	tx, err := conn.BeginTx(ctx, nil)
+	tx, err := db.BeginWrite(ctx, conn)
 	if err != nil {
 		return result, err
 	}
 	defer tx.Rollback()
 	now := float64(time.Now().UnixNano()) / 1e9
-	result.RevokedAccess, err = revokeToken(ctx, tx, access, now)
+	if refresh != nil && db.IsMySQL(conn) {
+		var existing string
+		err := tx.QueryRowContext(ctx, "SELECT token FROM refresh_tokens WHERE token = ? FOR UPDATE", refreshToken).Scan(&existing)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return result, err
+		}
+	}
+	result.RevokedAccess, err = revokeToken(ctx, conn, tx, access, now)
 	if err != nil {
 		return result, err
 	}
@@ -69,7 +77,7 @@ func Logout(ctx context.Context, conn *sql.DB, accessToken, refreshToken string)
 		return result, err
 	}
 	if refresh != nil {
-		result.RevokedRefresh, err = revokeToken(ctx, tx, refresh, now)
+		result.RevokedRefresh, err = revokeToken(ctx, conn, tx, refresh, now)
 		if err != nil {
 			return result, err
 		}
@@ -102,14 +110,18 @@ func Logout(ctx context.Context, conn *sql.DB, accessToken, refreshToken string)
 	return result, nil
 }
 
-func revokeToken(ctx context.Context, tx *sql.Tx, claims *Claims, now float64) (bool, error) {
+func revokeToken(ctx context.Context, conn *sql.DB, tx *sql.Tx, claims *Claims, now float64) (bool, error) {
 	if claims.ID == "" {
 		return false, nil
 	}
-	result, err := tx.ExecContext(ctx, `
-		INSERT INTO revoked_tokens (jti, user_id, token_type, expires_at, revoked_at, reason)
-		VALUES (?, ?, ?, ?, ?, 'logout') ON CONFLICT (jti) DO NOTHING`,
-		claims.ID, claims.Subject, claims.Typ, claims.ExpiresAt.Unix(), now)
+	query := `INSERT INTO revoked_tokens (jti, user_id, token_type, expires_at, revoked_at, reason)
+		VALUES (?, ?, ?, ?, ?, 'logout')`
+	if db.IsMySQL(conn) {
+		query += " ON DUPLICATE KEY UPDATE jti = revoked_tokens.jti"
+	} else {
+		query += " ON CONFLICT (jti) DO NOTHING"
+	}
+	result, err := tx.ExecContext(ctx, query, claims.ID, claims.Subject, claims.Typ, claims.ExpiresAt.Unix(), now)
 	if err != nil {
 		return false, err
 	}
@@ -130,7 +142,7 @@ func CleanupExpired(ctx context.Context, conn *sql.DB, retention, limit int) (Cl
 	now := float64(time.Now().UnixNano()) / 1e9
 	cutoff := now - float64(retention)
 	result := CleanupResult{Deleted: make(map[string]int64, 3), Cutoff: int64(cutoff), Retention: retention}
-	tx, err := conn.BeginTx(ctx, nil)
+	tx, err := db.BeginWrite(ctx, conn)
 	if err != nil {
 		return result, err
 	}
@@ -146,6 +158,9 @@ func CleanupExpired(ctx context.Context, conn *sql.DB, retention, limit int) (Cl
 		query := fmt.Sprintf(`DELETE FROM %[1]s WHERE %[2]s IN (
 			SELECT %[2]s FROM %[1]s WHERE expires_at < ? ORDER BY expires_at, %[2]s LIMIT ?)`,
 			table.name, table.key)
+		if db.IsMySQL(conn) {
+			query = fmt.Sprintf("DELETE FROM %s WHERE expires_at < ? ORDER BY expires_at, %s LIMIT ?", table.name, table.key)
+		}
 		deleted, err := tx.ExecContext(ctx, query, expiresBefore, limit)
 		if err != nil {
 			return result, err

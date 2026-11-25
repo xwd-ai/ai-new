@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"aibusiness/internal/db"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -55,14 +56,14 @@ func Login(ctx context.Context, conn *sql.DB, username, password string) (Refres
 		}
 	}
 
-	tx, err := conn.BeginTx(ctx, nil)
+	tx, err := db.BeginWrite(ctx, conn)
 	if err != nil {
 		return result, err
 	}
 	defer tx.Rollback()
 
 	var currentHash string
-	err = tx.QueryRowContext(ctx, loginAccount+" WHERE id = ? AND username = ?", account.ID, username).
+	err = tx.QueryRowContext(ctx, db.LockRows(conn, loginAccount+" WHERE id = ? AND username = ?"), account.ID, username).
 		Scan(&account.ID, &account.Username, &account.Name, &account.Role, &currentHash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return result, ErrInvalidCredentials

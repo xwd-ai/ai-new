@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"aibusiness/internal/db"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -49,12 +50,18 @@ func RefreshAccess(ctx context.Context, conn *sql.DB, raw string) (RefreshResult
 		return result, err
 	}
 	// The SQLite write transaction serializes the revocation checks and new session insert.
-	tx, err := conn.BeginTx(ctx, nil)
+	tx, err := db.BeginWrite(ctx, conn)
 	if err != nil {
 		return result, err
 	}
 	defer tx.Rollback()
 
+	var owner string
+	var expires float64
+	var revokedAt sql.NullFloat64
+	err = tx.QueryRowContext(ctx, db.LockRows(conn, `
+		SELECT user_id, expires_at, revoked_at FROM refresh_tokens WHERE token = ?`),
+		raw).Scan(&owner, &expires, &revokedAt)
 	var revoked bool
 	if err := tx.QueryRowContext(ctx, `
 		SELECT EXISTS (SELECT 1 FROM revoked_tokens WHERE jti = ? AND jti <> '')`,
@@ -65,12 +72,6 @@ func RefreshAccess(ctx context.Context, conn *sql.DB, raw string) (RefreshResult
 		return result, ErrRefreshRevoked
 	}
 
-	var owner string
-	var expires float64
-	var revokedAt sql.NullFloat64
-	err = tx.QueryRowContext(ctx, `
-		SELECT user_id, expires_at, revoked_at FROM refresh_tokens WHERE token = ?`,
-		raw).Scan(&owner, &expires, &revokedAt)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return result, ErrRefreshUnknown

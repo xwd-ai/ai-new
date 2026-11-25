@@ -31,6 +31,12 @@ func databasePath() string {
 
 // Open 打开只读连接。路径优先取 DB_PATH，缺省用仓库内开发库。
 func Open() (*sql.DB, error) {
+	if os.Getenv("DB_DRIVER") == "mysql" || os.Getenv("MYSQL_DSN") != "" {
+		return openMySQL()
+	}
+	if driver := os.Getenv("DB_DRIVER"); driver != "" && driver != "sqlite" {
+		return nil, fmt.Errorf("不支持的 DB_DRIVER: %s", driver)
+	}
 	// mode=ro：物理只读，业务代码即使写错 SQL 也无法改数据
 	dsn := fmt.Sprintf("file:%s?mode=ro", databasePath())
 	conn, err := sql.Open("sqlite", dsn)
@@ -58,6 +64,12 @@ func Open() (*sql.DB, error) {
 // 连接池限制为 1：SQLite 单写者，多个连接同时写只会互相等锁。
 // 工单流转是低频操作，串行化的代价远小于自锁风险。
 func OpenWrite() (*sql.DB, error) {
+	if os.Getenv("DB_DRIVER") == "mysql" || os.Getenv("MYSQL_DSN") != "" {
+		return openMySQL()
+	}
+	if driver := os.Getenv("DB_DRIVER"); driver != "" && driver != "sqlite" {
+		return nil, fmt.Errorf("不支持的 DB_DRIVER: %s", driver)
+	}
 	path := databasePath()
 	if _, err := os.Stat(path); err != nil {
 		return nil, fmt.Errorf("数据库文件不存在: %w", err)

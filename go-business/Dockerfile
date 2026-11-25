@@ -14,11 +14,11 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /business .
 
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates && mkdir /data && chown 65534:65534 /data
 
 COPY --from=builder /business /usr/local/bin/business
 
-# 容器内必须监听 0.0.0.0；数据库文件由 compose 只读挂载到 /data/app.db
+# Compose 通过 DB_DRIVER=mysql 连接内部 MySQL。
 ENV ADDR=0.0.0.0:8082
 ENV DB_PATH=/data/app.db
 EXPOSE 8082

@@ -6,5 +6,5 @@ greenlet
 sqlalchemy
 alembic
 bcrypt
-pymysql
+pymysql[rsa]
 redis

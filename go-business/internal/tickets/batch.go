@@ -1,6 +1,7 @@
 package tickets
 
 import (
+	"aibusiness/internal/db"
 	"context"
 	"database/sql"
 	"errors"
@@ -38,13 +39,13 @@ func (w *Writer) BatchTransition(ctx context.Context, ids []string, transfer boo
 		}
 	}
 
-	tx, err := w.db.BeginTx(ctx, nil)
+	tx, err := db.BeginWrite(ctx, w.db)
 	if err != nil {
 		return result, err
 	}
 	defer tx.Rollback()
 	for _, id := range ids {
-		ticket, err := loadForWrite(ctx, tx, id)
+		ticket, err := w.loadForWrite(ctx, tx, id)
 		if errors.Is(err, sql.ErrNoRows) {
 			result.Failures = append(result.Failures, BatchFailure{TicketID: id, Code: CodeNotFound, Reason: "工单不存在"})
 			continue

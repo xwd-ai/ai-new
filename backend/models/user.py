@@ -4,10 +4,10 @@ import time
 from enum import Enum
 from typing import Optional
 
-from sqlalchemy import Float, String
+from sqlalchemy import String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from backend.database import Base
+from backend.database import Base, DB_TIMESTAMP, DB_TOKEN
 from backend.services.password import (
     hash_password,
     is_bcrypt_hash,
@@ -16,7 +16,7 @@ from backend.services.password import (
 )
 
 # password_hash 字段存 bcrypt 哈希串，固定 60 字符：$2b$ + 两位成本 + 53 位盐与摘要
-PASSWORD_HASH_LENGTH = 60
+PASSWORD_HASH_LENGTH = 64
 
 
 class UserRole(str, Enum):
@@ -64,7 +64,7 @@ class User(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     username: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
-    password_hash: Mapped[str] = mapped_column(String(PASSWORD_HASH_LENGTH), nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(60).with_variant(String(PASSWORD_HASH_LENGTH), "mysql"), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(255), nullable=False)  # admin / customer，取值见 UserRole
 
@@ -150,13 +150,13 @@ class User(Base):
 class Session(Base):
     __tablename__ = "sessions"
 
-    token: Mapped[str] = mapped_column(String(64), primary_key=True)
+    token: Mapped[str] = mapped_column(DB_TOKEN, primary_key=True)
     user_id: Mapped[str] = mapped_column(String(255), nullable=False)
     username: Mapped[str] = mapped_column(String(255), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(255), nullable=False)
     # expires_at 是过期清理的扫描条件，建索引避免清一批过期会话也要全表扫
-    expires_at: Mapped[float] = mapped_column(Float, nullable=False, index=True)
+    expires_at: Mapped[float] = mapped_column(DB_TIMESTAMP, nullable=False, index=True)
 
     def to_dict(self) -> dict:
         return {
@@ -188,8 +188,8 @@ class RevokedToken(Base):
     user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     token_type: Mapped[str] = mapped_column(String(255), nullable=False)  # access / refresh
     # expires_at 是过期清理的扫描条件，建索引避免整表扫描
-    expires_at: Mapped[float] = mapped_column(Float, nullable=False, index=True)
-    revoked_at: Mapped[float] = mapped_column(Float, nullable=False)
+    expires_at: Mapped[float] = mapped_column(DB_TIMESTAMP, nullable=False, index=True)
+    revoked_at: Mapped[float] = mapped_column(DB_TIMESTAMP, nullable=False)
     reason: Mapped[str] = mapped_column(String(255), nullable=False, default="")
 
     @property
@@ -218,11 +218,11 @@ class RefreshToken(Base):
 
     __tablename__ = "refresh_tokens"
 
-    token: Mapped[str] = mapped_column(String(64), primary_key=True)
+    token: Mapped[str] = mapped_column(DB_TOKEN, primary_key=True)
     user_id: Mapped[str] = mapped_column(String(255), nullable=False)
     # expires_at 是过期清理的扫描条件，建索引避免整表扫描
-    expires_at: Mapped[float] = mapped_column(Float, nullable=False, index=True)
-    revoked_at: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    expires_at: Mapped[float] = mapped_column(DB_TIMESTAMP, nullable=False, index=True)
+    revoked_at: Mapped[Optional[float]] = mapped_column(DB_TIMESTAMP, nullable=True)
 
     @property
     def expired(self) -> bool:

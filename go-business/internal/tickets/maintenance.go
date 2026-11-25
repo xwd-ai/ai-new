@@ -1,6 +1,7 @@
 package tickets
 
 import (
+	"aibusiness/internal/db"
 	"context"
 	"database/sql"
 	"errors"
@@ -8,12 +9,12 @@ import (
 )
 
 func (w *Writer) Reply(ctx context.Context, id, replier, content string) (map[string]any, error) {
-	tx, err := w.db.BeginTx(ctx, nil)
+	tx, err := db.BeginWrite(ctx, w.db)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
-	ticket, err := loadForWrite(ctx, tx, id)
+	ticket, err := w.loadForWrite(ctx, tx, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -51,14 +52,14 @@ type ExpirationResult struct {
 func (w *Writer) ExpirePending(ctx context.Context, timeout, limit int) (ExpirationResult, error) {
 	now := nowSeconds()
 	result := ExpirationResult{TimeoutSeconds: timeout, Deadline: now - float64(timeout), ClosedIDs: []string{}}
-	tx, err := w.db.BeginTx(ctx, nil)
+	tx, err := db.BeginWrite(ctx, w.db)
 	if err != nil {
 		return result, err
 	}
 	defer tx.Rollback()
 
 	const filter = " FROM tickets WHERE status = ? AND created_at <= ?"
-	rows, err := tx.QueryContext(ctx, "SELECT id"+filter+" ORDER BY created_at, id LIMIT ?",
+	rows, err := tx.QueryContext(ctx, db.LockRows(w.db, "SELECT id"+filter+" ORDER BY created_at, id LIMIT ?"),
 		StatusPendingConfirm, result.Deadline, limit)
 	if err != nil {
 		return result, err
@@ -78,7 +79,7 @@ func (w *Writer) ExpirePending(ctx context.Context, timeout, limit int) (Expirat
 		return result, err
 	}
 	for _, id := range result.ClosedIDs {
-		ticket, err := loadForWrite(ctx, tx, id)
+		ticket, err := w.loadForWrite(ctx, tx, id)
 		if err != nil {
 			return result, err
 		}

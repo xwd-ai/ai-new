@@ -1,7 +1,7 @@
-from sqlalchemy import Float, String, Text
+from sqlalchemy import String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from backend.database import Base
+from backend.database import Base, DB_TIMESTAMP
 
 
 class Conversation(Base):
@@ -10,8 +10,8 @@ class Conversation(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(255), nullable=False)
     title: Mapped[str] = mapped_column(String(255), default="")
-    created_at: Mapped[float] = mapped_column(Float, nullable=False)
-    updated_at: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[float] = mapped_column(DB_TIMESTAMP, nullable=False)
+    updated_at: Mapped[float] = mapped_column(DB_TIMESTAMP, nullable=False)
 
     def to_dict(self) -> dict:
         return {
@@ -23,6 +23,12 @@ class Conversation(Base):
         }
 
 
+class ConversationCreationLock(Base):
+    __tablename__ = "conversation_creation_locks"
+
+    user_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+
+
 class Message(Base):
     __tablename__ = "messages"
 
@@ -31,7 +37,7 @@ class Message(Base):
     role: Mapped[str] = mapped_column(String(255), nullable=False)  # user / assistant
     # 消息正文可能远超 VARCHAR(255)，MySQL 下必须显式声明为 Text
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    at: Mapped[float] = mapped_column(Float, nullable=False)
+    at: Mapped[float] = mapped_column(DB_TIMESTAMP, nullable=False)
 
     def to_dict(self) -> dict:
         return {
@@ -49,7 +55,7 @@ class TriedStep(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(255), nullable=False)
     step: Mapped[str] = mapped_column(String(255), nullable=False)
-    at: Mapped[float] = mapped_column(Float, nullable=False)
+    at: Mapped[float] = mapped_column(DB_TIMESTAMP, nullable=False)
 
     def to_dict(self) -> dict:
         return {"id": self.id, "user_id": self.user_id, "step": self.step, "at": self.at}

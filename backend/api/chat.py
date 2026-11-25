@@ -152,9 +152,11 @@ def conversation(
         return empty
     db = SessionLocal()
     try:
-        db.execute(text('BEGIN'))
-        if paged:
-            connection = db.connection()
+        connection = db.connection()
+        sqlite = connection.dialect.name == "sqlite"
+        if sqlite:
+            db.execute(text('BEGIN'))
+        if paged and sqlite:
             # 先固定读取快照。data_version 检测其他连接的提交，
             # total_changes 补足当前物理连接执行的写入。
             version = connection.exec_driver_sql("PRAGMA main.data_version").scalar_one()
@@ -178,8 +180,8 @@ def conversation(
         if paged:
             start = 0 if offset is None else offset
             size = 100 if limit is None else limit
-            cache_key = (version, changes, conv.id)
-            cached = connection.info.get("conversation_history_revision")
+            cache_key = (version, changes, conv.id) if sqlite else None
+            cached = connection.info.get("conversation_history_revision") if sqlite else None
             if cached is not None and cached[0] == cache_key:
                 _, total, revision = cached
                 messages = query.offset(start).limit(size).all() if start < total else []
@@ -195,7 +197,8 @@ def conversation(
                         messages.append(row)
                     total += 1
                 revision = digest.hexdigest()
-                connection.info["conversation_history_revision"] = (cache_key, total, revision)
+                if sqlite:
+                    connection.info["conversation_history_revision"] = (cache_key, total, revision)
             pagination = {
                 "total": total,
                 "conversation_id": conv.id,

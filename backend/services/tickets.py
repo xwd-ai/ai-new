@@ -40,7 +40,7 @@ from backend.models.ticket import (
 )
 from backend.services import auth as auth_service, go_client
 from backend.services.distlock import distributed_lock
-from backend.services.ticket_number import allocate_ticket_id
+from backend.services.ticket_number import allocate_ticket_id, lock_mysql_ticket_counter
 
 # 状态取值别名：业务代码统一引用这些常量，避免裸字符串分散在各处函数里
 STATUS_PENDING_CONFIRM = TicketStatus.PENDING_CONFIRM.value
@@ -207,7 +207,7 @@ def _ticket_session(write: bool = False):
         db.close()
 
 
-def _load_ticket(db, ticket_id: str):
+def _load_ticket(db, ticket_id: str, *, for_update=False):
     """按工单号取单条记录，不存在返回 None。
 
     工单号不是字符串时直接按「查不到」返回：请求体里混进对象、数组这类值
@@ -216,7 +216,10 @@ def _load_ticket(db, ticket_id: str):
     """
     if not isinstance(ticket_id, str):
         return None
-    return db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    query = db.query(Ticket).filter(Ticket.id == ticket_id)
+    if for_update and db.get_bind().dialect.name == "mysql":
+        query = query.with_for_update()
+    return query.first()
 
 
 # ---------------------------------------------------------------------------
@@ -457,7 +460,12 @@ def create_ticket(
     try:
         # 建单临界区：SQLite 用库级写锁串行化；MySQL/PG 由 dedup_key 唯一约束兜底
         with advisory_lock(key) as db:
-            existing = db.query(Ticket).filter(Ticket.dedup_key == key).first()
+            mysql = db.get_bind().dialect.name == "mysql"
+            query = db.query(Ticket).filter(Ticket.dedup_key == key)
+            if mysql:
+                lock_mysql_ticket_counter(db)
+                query = query.with_for_update()
+            existing = query.first()
             if existing:
                 if existing.status != STATUS_RESOLVED:
                     return existing.to_dict(), False
@@ -558,7 +566,7 @@ def confirm_ticket(ticket_id: str, operator: str = DEFAULT_OPERATOR) -> dict | N
             return None if outcome.not_found else outcome.ticket
 
     with _ticket_session(write=True) as db:
-        t = _load_ticket(db, ticket_id)
+        t = _load_ticket(db, ticket_id, for_update=True)
         if not t:
             return None
         # 已非待确认状态视为已确认/已终结，幂等返回，不重复流转
@@ -594,7 +602,7 @@ def cancel_ticket(
             return None if outcome.not_found else outcome.ticket
 
     with _ticket_session(write=True) as db:
-        t = _load_ticket(db, ticket_id)
+        t = _load_ticket(db, ticket_id, for_update=True)
         if not t:
             return None
         # 已非待确认状态视为已终结，幂等返回，不重复流转
@@ -688,13 +696,15 @@ def expire_pending_tickets(
     deadline = ts - timeout
 
     with advisory_lock(_EXPIRE_LOCK_KEY) as db:
-        candidates = (
+        query = (
             db.query(Ticket)
             .filter(Ticket.status == STATUS_PENDING_CONFIRM, Ticket.created_at <= deadline)
             .order_by(Ticket.created_at.asc())
             .limit(batch)
-            .all()
         )
+        if db.get_bind().dialect.name == "mysql":
+            query = query.with_for_update()
+        candidates = query.all()
         closed_ids = []
         for t in candidates:
             # 锁内重查的状态为最终依据，已被确认或取消的工单不再处理
@@ -1518,7 +1528,7 @@ def add_reply(ticket_id: str, replier: str, content: str) -> dict | None:
     其余非处理中状态由流转校验拒绝；已在处理中的工单只追加回复，不再产生流转。
     """
     with _ticket_session(write=True) as db:
-        t = _load_ticket(db, ticket_id)
+        t = _load_ticket(db, ticket_id, for_update=True)
         if not t:
             return None
         reply = {"replier": replier, "content": content, "at": time.time()}
@@ -1548,7 +1558,7 @@ def update_status(ticket_id: str, status: str) -> dict | None:
             return None if outcome.not_found else outcome.ticket
 
     with _ticket_session(write=True) as db:
-        t = _load_ticket(db, ticket_id)
+        t = _load_ticket(db, ticket_id, for_update=True)
         if not t:
             return None
         _apply_transition(db, t, status, operator="system")
@@ -1571,7 +1581,7 @@ def transfer_to_human(
     状态变更统一经过状态机入口，非法来源状态（已关闭、待确认等）由流转校验拒绝。
     """
     with _ticket_session(write=True) as db:
-        t = _load_ticket(db, ticket_id)
+        t = _load_ticket(db, ticket_id, for_update=True)
         if not t:
             return None
 
@@ -1687,7 +1697,7 @@ def _batch_transition(
 
     with _ticket_session(write=True) as db:
         for ticket_id in ids:
-            t = _load_ticket(db, ticket_id)
+            t = _load_ticket(db, ticket_id, for_update=True)
             if not t:
                 failures.append(
                     {

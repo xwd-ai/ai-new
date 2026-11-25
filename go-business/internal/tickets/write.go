@@ -1,6 +1,7 @@
 package tickets
 
 import (
+	"aibusiness/internal/db"
 	"bytes"
 	"context"
 	"database/sql"
@@ -121,7 +122,7 @@ func (w *Writer) transitionTicket(
 		return nil, ErrNotFound
 	}
 
-	tx, err := w.db.BeginTx(ctx, nil)
+	tx, err := db.BeginWrite(ctx, w.db)
 	if err != nil {
 		return nil, fmt.Errorf("开启事务失败: %w", err)
 	}
@@ -129,7 +130,7 @@ func (w *Writer) transitionTicket(
 	// 这样三条出口（异常、幂等返回、成功提交）都不需要各自记得清理。
 	defer tx.Rollback()
 
-	t, err := loadForWrite(ctx, tx, ticketID)
+	t, err := w.loadForWrite(ctx, tx, ticketID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -159,8 +160,8 @@ func (w *Writer) transitionTicket(
 //
 // 与查询路径分开而不是复用 Repository：这里读的是即将被改写的那一行，
 // 必须落在同一个写事务里，否则读到的是快照，写回去可能覆盖别人的修改。
-func loadForWrite(ctx context.Context, tx *sql.Tx, id string) (*Ticket, error) {
-	return scanTicket(tx.QueryRowContext(ctx, ticketSelect+" WHERE id = ?", id))
+func (w *Writer) loadForWrite(ctx context.Context, tx *sql.Tx, id string) (*Ticket, error) {
+	return scanTicket(tx.QueryRowContext(ctx, db.LockRows(w.db, ticketSelect+" WHERE id = ?"), id))
 }
 
 const ticketSelect = `SELECT id, dedup_key, user_id, user_name, description, tried_steps, evidence, status, created_at, replies FROM tickets`

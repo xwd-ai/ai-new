@@ -51,9 +51,13 @@ def append_message(conversation_id: str, role: str, content: str) -> None:
 
 def append_turn(conversation_id: str, message: str, reply: str) -> None:
     """同事务保存一轮消息与更新时间，异常时整轮回滚。"""
-    user_at = time.time()
-    assistant_at = max(time.time(), math.nextafter(user_at, math.inf))
     with SessionLocal() as db, db.begin():
+        query = db.query(Conversation).filter(Conversation.id == conversation_id)
+        if db.get_bind().dialect.name == "mysql":
+            query = query.with_for_update()
+        conv = query.first()
+        user_at = max(time.time(), math.nextafter(conv.updated_at, math.inf)) if conv else time.time()
+        assistant_at = max(time.time(), math.nextafter(user_at, math.inf))
         db.add_all([
             Message(
                 id=uuid.uuid4().hex, conversation_id=conversation_id,
@@ -63,7 +67,6 @@ def append_turn(conversation_id: str, message: str, reply: str) -> None:
                 ("user", message, user_at), ("assistant", reply, assistant_at),
             )
         ])
-        conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
         if conv:
             conv.updated_at = assistant_at
 
@@ -116,8 +119,15 @@ def get_or_create_conversation(user_id: str) -> str:
         # 空结果不能作为创建依据：释放读事务后取得 SQLite 写锁，再查一次。
         # 锁仅覆盖首次创建，不覆盖模型回答或后续消息写入。
         db.rollback()
-        db.execute(text("BEGIN IMMEDIATE"))
-        conv = query.first()
+        if db.get_bind().dialect.name == "mysql":
+            db.execute(text("""
+                INSERT INTO conversation_creation_locks (user_id) VALUES (:user_id)
+                ON DUPLICATE KEY UPDATE user_id = conversation_creation_locks.user_id
+            """), {"user_id": user_id})
+            conv = query.with_for_update().first()
+        else:
+            db.execute(text("BEGIN IMMEDIATE"))
+            conv = query.first()
         if conv:
             return conv.id
         now = time.time()

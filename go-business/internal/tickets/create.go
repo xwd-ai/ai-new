@@ -1,6 +1,7 @@
 package tickets
 
 import (
+	"aibusiness/internal/db"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -27,13 +28,18 @@ func (w *Writer) Create(ctx context.Context, input CreateInput) (map[string]any,
 		return nil, false, ErrEmptyDescription
 	}
 	key := fmt.Sprintf("%x", sha256.Sum256([]byte(input.UserID+"::"+description)))
-	tx, err := w.db.BeginTx(ctx, nil)
+	tx, err := db.BeginWrite(ctx, w.db)
 	if err != nil {
 		return nil, false, fmt.Errorf("开启建单事务: %w", err)
 	}
 	defer tx.Rollback()
 
-	existing, err := scanTicket(tx.QueryRowContext(ctx, ticketSelect+" WHERE dedup_key = ?", key))
+	if db.IsMySQL(w.db) {
+		if err := lockMySQLCounter(ctx, tx); err != nil {
+			return nil, false, err
+		}
+	}
+	existing, err := scanTicket(tx.QueryRowContext(ctx, db.LockRows(w.db, ticketSelect+" WHERE dedup_key = ?"), key))
 	switch {
 	case err == nil && existing.Status != string(StatusResolved):
 		return existing.payload(), false, nil
@@ -54,7 +60,7 @@ func (w *Writer) Create(ctx context.Context, input CreateInput) (map[string]any,
 			return nil, false, err
 		}
 	}
-	id, err := allocateTicketID(ctx, tx)
+	id, err := allocateTicketID(ctx, tx, db.IsMySQL(w.db))
 	if err != nil {
 		return nil, false, fmt.Errorf("分配工单号: %w", err)
 	}
@@ -100,7 +106,29 @@ func recordedSteps(ctx context.Context, tx *sql.Tx, userID string) (string, erro
 }
 
 // Uses the same singleton counter and bootstrap rules as Python.
-func allocateTicketID(ctx context.Context, tx *sql.Tx) (string, error) {
+func lockMySQLCounter(ctx context.Context, tx *sql.Tx) error {
+	var number int64
+	err := tx.QueryRowContext(ctx, "SELECT last_number FROM ticket_number_counter WHERE id = 1 FOR UPDATE").Scan(&number)
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO ticket_number_counter (id, last_number)
+		SELECT 1, GREATEST(1000, COALESCE(MAX(CAST(SUBSTRING(id,3) AS UNSIGNED)),0))
+		FROM tickets WHERE REGEXP_LIKE(id, '^T-[0-9]+$', 'c')
+		ON DUPLICATE KEY UPDATE last_number = ticket_number_counter.last_number`)
+	return err
+}
+
+func allocateTicketID(ctx context.Context, tx *sql.Tx, mysql bool) (string, error) {
+	if mysql {
+		if _, err := tx.ExecContext(ctx, "UPDATE ticket_number_counter SET last_number = last_number + 1 WHERE id = 1"); err != nil {
+			return "", err
+		}
+		var number int64
+		err := tx.QueryRowContext(ctx, "SELECT last_number FROM ticket_number_counter WHERE id = 1").Scan(&number)
+		return "T-" + strconv.FormatInt(number, 10), err
+	}
 	var number int64
 	err := tx.QueryRowContext(ctx, "UPDATE ticket_number_counter SET last_number = last_number + 1 WHERE id = 1 RETURNING last_number").Scan(&number)
 	if errors.Is(err, sql.ErrNoRows) {

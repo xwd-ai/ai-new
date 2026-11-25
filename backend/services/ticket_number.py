@@ -12,7 +12,7 @@ _FIRST_NUMBER = 1001
 _NUMBERED_TICKET = re.compile(r"T-([0-9]+)")
 
 
-def allocate_ticket_id(db) -> str:
+def _initialize_counter(db, lock: bool) -> None:
     """保留 T-数字 格式，首次从旧库最大数字序号继续。
 
     并发初始化由主键和 upsert 仲裁。之后每次直接更新计数器行，
@@ -20,7 +20,7 @@ def allocate_ticket_id(db) -> str:
     """
     counter = TicketNumberCounter.__table__
     current = select(counter.c.last_number).where(counter.c.id == _COUNTER_ID)
-    if db.execute(current).scalar_one_or_none() is None:
+    if db.execute(current.with_for_update() if lock else current).scalar_one_or_none() is None:
         last_number = _FIRST_NUMBER - 1
         for ticket_id in db.execute(select(Ticket.id)).scalars():
             match = _NUMBERED_TICKET.fullmatch(ticket_id)
@@ -39,6 +39,16 @@ def allocate_ticket_id(db) -> str:
             initialize = insert.on_conflict_do_nothing(index_elements=[counter.c.id])
         db.execute(initialize)
 
+
+def lock_mysql_ticket_counter(db) -> None:
+    _initialize_counter(db, lock=True)
+
+
+def allocate_ticket_id(db) -> str:
+    """取号与业务写入在同一事务提交。"""
+    _initialize_counter(db, lock=db.get_bind().dialect.name == "mysql")
+    counter = TicketNumberCounter.__table__
+    current = select(counter.c.last_number).where(counter.c.id == _COUNTER_ID)
     db.execute(
         update(counter)
         .where(counter.c.id == _COUNTER_ID)

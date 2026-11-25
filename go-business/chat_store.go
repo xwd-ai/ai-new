@@ -1,6 +1,7 @@
 package main
 
 import (
+	"aibusiness/internal/db"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -69,11 +70,17 @@ func (s chatStore) prepare(ctx context.Context, userID string) (string, []chatMe
 }
 
 func (s chatStore) createConversation(ctx context.Context, userID string) (string, error) {
-	tx, err := s.write.BeginTx(ctx, nil)
+	tx, err := db.BeginWrite(ctx, s.write)
 	if err != nil {
 		return "", err
 	}
 	defer tx.Rollback()
+	if db.IsMySQL(s.write) {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO conversation_creation_locks (user_id) VALUES (?)
+			ON DUPLICATE KEY UPDATE user_id = conversation_creation_locks.user_id`, userID); err != nil {
+			return "", err
+		}
+	}
 	var id string
 	err = tx.QueryRowContext(ctx, latestConversation, userID).Scan(&id)
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -89,14 +96,14 @@ func (s chatStore) createConversation(ctx context.Context, userID string) (strin
 }
 
 func (s chatStore) saveTurn(ctx context.Context, userID, id, message, reply, step string) error {
-	tx, err := s.write.BeginTx(ctx, nil)
+	tx, err := db.BeginWrite(ctx, s.write)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	var previous float64
-	if err := tx.QueryRowContext(ctx, `
-		SELECT updated_at FROM conversations WHERE id = ? AND user_id = ?`, id, userID).Scan(&previous); err != nil {
+	if err := tx.QueryRowContext(ctx, db.LockRows(s.write, `
+		SELECT updated_at FROM conversations WHERE id = ? AND user_id = ?`), id, userID).Scan(&previous); err != nil {
 		return err
 	}
 	userAt := max(chatNow(), math.Nextafter(previous, math.Inf(1)))

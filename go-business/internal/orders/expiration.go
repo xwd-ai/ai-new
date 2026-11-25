@@ -1,20 +1,21 @@
 package orders
 
 import (
+	"aibusiness/internal/db"
 	"context"
 	"database/sql"
 	"fmt"
 )
 
 func ExpireOverdue(ctx context.Context, conn *sql.DB, limit int) (map[string]any, error) {
-	tx, err := conn.BeginTx(ctx, nil)
+	tx, err := db.BeginWrite(ctx, conn)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `
+	rows, err := tx.QueryContext(ctx, db.LockRows(conn, `
 		SELECT id FROM orders WHERE status = 'active' AND expires_at <= ?
-		ORDER BY expires_at, id LIMIT ?`, nowSeconds(), limit+1)
+		ORDER BY expires_at, id LIMIT ?`), nowSeconds(), limit+1)
 	if err != nil {
 		return nil, err
 	}

@@ -1,10 +1,10 @@
 from enum import Enum
 from typing import Optional
 
-from sqlalchemy import JSON, Float, String
+from sqlalchemy import JSON, String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from backend.database import Base
+from backend.database import Base, DB_TIMESTAMP
 
 
 class OrderStatus(str, Enum):
@@ -261,8 +261,8 @@ class Order(Base):
     user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     product_tier: Mapped[str] = mapped_column(String(255), nullable=False)  # basic / pro
     status: Mapped[str] = mapped_column(String(255), nullable=False, index=True)  # 取值见 OrderStatus
-    started_at: Mapped[float] = mapped_column(Float, nullable=False)
-    expires_at: Mapped[float] = mapped_column(Float, nullable=False, index=True)
+    started_at: Mapped[float] = mapped_column(DB_TIMESTAMP, nullable=False)
+    expires_at: Mapped[float] = mapped_column(DB_TIMESTAMP, nullable=False, index=True)
 
     def to_dict(self) -> dict:
         return {

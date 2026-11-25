@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"aibusiness/internal/db"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -49,7 +50,7 @@ func Register(ctx context.Context, conn *sql.DB, username, password, name string
 	var id [5]byte
 	rand.Read(id[:])
 	user := Account{ID: "u-" + hex.EncodeToString(id[:]), Username: username, Name: name, Role: "customer"}
-	tx, err := conn.BeginTx(ctx, nil)
+	tx, err := db.BeginWrite(ctx, conn)
 	if err != nil {
 		return Account{}, err
 	}
@@ -64,6 +65,9 @@ func Register(ctx context.Context, conn *sql.DB, username, password, name string
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO users (id, username, name, role, password_hash) VALUES (?, ?, ?, ?, ?)`,
 		user.ID, user.Username, user.Name, user.Role, string(hash)); err != nil {
+		if db.IsDuplicate(err) {
+			return Account{}, ErrUsernameTaken
+		}
 		return Account{}, err
 	}
 	if err := tx.Commit(); err != nil {

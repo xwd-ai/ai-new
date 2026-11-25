@@ -69,10 +69,7 @@ query 会进入访问日志与浏览器历史，等于把凭据写进日志。
 开启 `GATEWAY_GO_TICKET_CREATE=true` 后，网关将 `POST /api/tickets` 转给 Go。
 Go 从会话身份确定归属，缺省时从同一数据库读取排查步骤。Python Agent 内部调用仍使用原有建单逻辑。
 
-启用前先升级 SQLite 到最新 Alembic 版本，并在 Go 与 Python 配置相同的
-`AI_NEW_JWT_SECRET`。Compose 共用数据库所在目录，使 SQLite 的日志文件也能共享。
-若使用独立目录，将 `SQLITE_DATA_DIR` 指向该目录，并让 Python 的 `DATABASE_URL`
-指向目录中的 `app.db`。
+启用前先升级数据库到最新 Alembic 版本，并在 Go 与 Python 配置相同的 `AI_NEW_JWT_SECRET`。
 
 三个写接口的语义与 Python 严格对齐：
 
@@ -211,11 +208,11 @@ Go 校验现有 bcrypt 哈希和旧版 SHA-256 摘要，签发的两个令牌在
 - 知识来源原文、知识条目列表、待恢复入库记录列表及检索设置
 - 工单列表与详情、统计、回复、单张转人工与规则判定、批量关闭与转人工，以及超时待确认工单关闭
 
-当前 Go 业务服务使用共享 SQLite。Agent、模型调用、知识入库编排与恢复及检索诊断由 Python 提供。
+Compose 默认让 Go 与 Python 连接同一个 MySQL 8 数据库。本地单独运行也支持 SQLite。Agent、模型调用、知识入库编排与恢复及检索诊断由 Python 提供。
 
 
 设置 `GATEWAY_GO_PRIMARY=true` 可一次启用所有已迁移的 Go 路由。
 显式设置任一分项开关为 `false` 可把该组请求切回 Python。
-启用前配置共享 SQLite、JWT 密钥及内部 Agent 地址和令牌，并升级数据库到当前 Alembic 版本。
+启用前配置共享数据库、JWT 密钥及内部 Agent 地址和令牌，并升级数据库到当前 Alembic 版本。
 
-Compose 中 Go 将检索设置写到共享目录的 `retrieval_settings.json`。使用自定义 `SQLITE_DATA_DIR` 时，将 Python 的 `RETRIEVAL_SETTINGS_PATH` 指向同一个文件。
+Compose 通过共享卷存储检索设置。单独运行时，可以为两个服务指定相同的 `RETRIEVAL_SETTINGS_PATH`。

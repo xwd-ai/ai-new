@@ -1,8 +1,8 @@
-from sqlalchemy import Float, Integer, JSON, String, Text
+from sqlalchemy import Integer, JSON, String, Text
 from sqlalchemy.dialects.mysql import MEDIUMTEXT
 from sqlalchemy.orm import Mapped, mapped_column
 
-from backend.database import Base
+from backend.database import Base, DB_TIMESTAMP
 
 
 class KnowledgeDoc(Base):
@@ -35,7 +35,7 @@ class KnowledgeIngestLease(Base):
 
     fingerprint: Mapped[str] = mapped_column(String(64), primary_key=True)
     owner: Mapped[str] = mapped_column(String(255), nullable=False)
-    expires_at: Mapped[float] = mapped_column(Float, nullable=False)
+    expires_at: Mapped[float] = mapped_column(DB_TIMESTAMP, nullable=False)
 
 
 class KnowledgeIngestJournal(Base):
@@ -46,4 +46,4 @@ class KnowledgeIngestJournal(Base):
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
     stage: Mapped[str] = mapped_column(String(255), nullable=False)
     chunk_count: Mapped[int] = mapped_column(Integer, nullable=False)
-    updated_at: Mapped[float] = mapped_column(Float, nullable=False)
+    updated_at: Mapped[float] = mapped_column(DB_TIMESTAMP, nullable=False)

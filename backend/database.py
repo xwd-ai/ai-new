@@ -1,11 +1,15 @@
 import os
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import Float, String, create_engine
+from sqlalchemy.dialects.mysql import DOUBLE, VARCHAR
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 # 数据库连接：默认 SQLite（零外部依赖），可通过 DATABASE_URL 切换到 MySQL。
 # 例：mysql+pymysql://ainew:ainew@127.0.0.1:3307/ainew?charset=utf8mb4
+DB_TIMESTAMP = Float().with_variant(DOUBLE(asdecimal=False), "mysql")
+DB_TOKEN = String(64).with_variant(VARCHAR(2048, charset="ascii", collation="ascii_bin"), "mysql")
+
 _DB_FILE = Path(__file__).resolve().parent / "app.db"
 
 
@@ -14,6 +18,15 @@ def _build_database_url() -> str:
     url = os.getenv("DATABASE_URL", "").strip()
     if url:
         return url
+    if os.getenv("DB_DRIVER") == "mysql":
+        from sqlalchemy.engine import URL
+
+        return URL.create(
+            "mysql+pymysql",
+            username=os.getenv("MYSQL_USER", "ainew"), password=os.getenv("MYSQL_PASSWORD", "ainew"),
+            host=os.getenv("MYSQL_HOST", "127.0.0.1"), port=int(os.getenv("MYSQL_PORT", "3307")),
+            database=os.getenv("MYSQL_DATABASE", "ainew"), query={"charset": "utf8mb4"},
+        ).render_as_string(hide_password=False)
     return f"sqlite:///{_DB_FILE}"
 
 

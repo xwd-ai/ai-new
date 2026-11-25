@@ -1,9 +1,9 @@
 from enum import Enum
 
-from sqlalchemy import JSON, BigInteger, Float, Integer, String, Text
+from sqlalchemy import JSON, BigInteger, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from backend.database import Base
+from backend.database import Base, DB_TIMESTAMP
 
 
 class TicketStatus(str, Enum):
@@ -274,7 +274,7 @@ class Ticket(Base):
     tried_steps: Mapped[str] = mapped_column(Text, default="")
     evidence: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(255), default="open", index=True)  # 取值见 TicketStatus
-    created_at: Mapped[float] = mapped_column(Float, nullable=False, index=True)
+    created_at: Mapped[float] = mapped_column(DB_TIMESTAMP, nullable=False, index=True)
     replies: Mapped[list] = mapped_column(JSON, default=list)
 
     def to_dict(self) -> dict:
@@ -314,7 +314,7 @@ class TicketStatusLog(Base):
     from_status: Mapped[str] = mapped_column(String(255), default="")
     to_status: Mapped[str] = mapped_column(String(255), nullable=False)
     operator: Mapped[str] = mapped_column(String(255), default="system")
-    changed_at: Mapped[float] = mapped_column(Float, nullable=False)
+    changed_at: Mapped[float] = mapped_column(DB_TIMESTAMP, nullable=False)
 
     def to_dict(self) -> dict:
         return {

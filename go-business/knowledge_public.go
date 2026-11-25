@@ -69,8 +69,8 @@ func publicKnowledgeItems(conn *sql.DB) http.HandlerFunc {
 		args := []any{}
 		if title = strings.TrimSpace(title); title != "" {
 			// LIKE 与 SQLite 上原接口一致，显式转义字面通配符。
-			filter += " AND title LIKE '%' || ? || '%' ESCAPE '/'"
-			args = append(args, strings.NewReplacer("/", "//", "%", "/%", "_", "/_").Replace(title))
+			filter += " AND LOWER(title) LIKE LOWER(?) ESCAPE '/'"
+			args = append(args, "%"+strings.NewReplacer("/", "//", "%", "/%", "_", "/_").Replace(title)+"%")
 		}
 		if kind != "" {
 			filter += " AND kind = ?"

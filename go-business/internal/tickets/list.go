@@ -26,7 +26,7 @@ func (r *Repository) Page(ctx context.Context, filter ListFilter) ([]map[string]
 		}
 	}
 	if filter.Keyword != "" {
-		where += " AND (id LIKE ? ESCAPE '/' OR description LIKE ? ESCAPE '/' OR user_name LIKE ? ESCAPE '/')"
+		where += " AND (LOWER(id) LIKE LOWER(?) ESCAPE '/' OR LOWER(description) LIKE LOWER(?) ESCAPE '/' OR LOWER(user_name) LIKE LOWER(?) ESCAPE '/')"
 		keyword := "%" + strings.NewReplacer("/", "//", "%", "/%", "_", "/_").Replace(filter.Keyword) + "%"
 		args = append(args, keyword, keyword, keyword)
 	}

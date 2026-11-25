@@ -1,6 +1,7 @@
 package tickets
 
 import (
+	"aibusiness/internal/db"
 	"context"
 	"database/sql"
 	"errors"
@@ -127,12 +128,12 @@ func evaluateTransfer(ticket *Ticket, orderRepo *orders.Repository, input Transf
 
 func (w *Writer) Transfer(ctx context.Context, orderRepo *orders.Repository, input TransferInput) (map[string]any, TransferDecision, error) {
 	var decision TransferDecision
-	tx, err := w.db.BeginTx(ctx, nil)
+	tx, err := db.BeginWrite(ctx, w.db)
 	if err != nil {
 		return nil, decision, err
 	}
 	defer tx.Rollback()
-	ticket, err := loadForWrite(ctx, tx, input.ID)
+	ticket, err := w.loadForWrite(ctx, tx, input.ID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, decision, ErrNotFound
 	}

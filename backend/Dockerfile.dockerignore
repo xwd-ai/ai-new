@@ -1,0 +1,16 @@
+*
+!alembic.ini
+!alembic/
+!alembic/**
+!backend/
+!backend/**
+!frontend/
+!frontend/**
+**/.env
+**/.env.*
+**/*.db
+**/*.db-*
+**/__pycache__/
+backend/tests/
+backend/retrieval_settings.json
+backend/ingest_checkpoints.json

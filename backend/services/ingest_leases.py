@@ -1,4 +1,4 @@
-"""同一 SQLite 数据库内，按资料指纹协调入库执行者。"""
+"""通过共享数据库按资料指纹协调入库执行者。"""
 
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -7,7 +7,8 @@ import logging
 import threading
 import uuid
 
-from sqlalchemy import delete, func, update
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -40,11 +41,17 @@ class Lease:
         """检查所有权并续租；调用方提交事务前持续持有 SQLite 写锁。"""
         if self.lost.is_set():
             raise IngestLeaseLostError("资料处理租约已失效，请稍后重试")
+        mysql = db.get_bind().dialect.name == "mysql"
+        if mysql:
+            db.execute(select(KnowledgeIngestLease.owner).where(
+                KnowledgeIngestLease.fingerprint == self.fingerprint,
+            ).with_for_update()).first()
+        db_now = func.unix_timestamp(func.current_timestamp(6)) if mysql else _DB_NOW
         result = db.execute(update(KnowledgeIngestLease).where(
             KnowledgeIngestLease.fingerprint == self.fingerprint,
             KnowledgeIngestLease.owner == self.owner,
-            KnowledgeIngestLease.expires_at > _DB_NOW,
-        ).values(expires_at=_DB_NOW + LEASE_SECONDS))
+            KnowledgeIngestLease.expires_at > db_now,
+        ).values(expires_at=db_now + LEASE_SECONDS))
         if result.rowcount != 1:
             self.lost.set()
             raise IngestLeaseLostError("资料处理租约已失效，请稍后重试")
@@ -78,14 +85,28 @@ def _heartbeat(lease: Lease, stopped: threading.Event) -> None:
 @contextmanager
 def hold(fingerprint: str, session_factory):
     owner = uuid.uuid4().hex
-    statement = insert(KnowledgeIngestLease).values(
-        fingerprint=fingerprint, owner=owner, expires_at=_DB_NOW + LEASE_SECONDS,
-    ).on_conflict_do_update(
-        index_elements=["fingerprint"],
-        set_={"owner": owner, "expires_at": _DB_NOW + LEASE_SECONDS},
-        where=KnowledgeIngestLease.expires_at <= _DB_NOW,
-    )
     with session_factory() as db:
+        if db.get_bind().dialect.name == "mysql":
+            acquire = mysql_insert(KnowledgeIngestLease).values(
+                fingerprint=fingerprint, owner=owner, expires_at=0,
+            )
+            db.execute(acquire.on_duplicate_key_update(
+                fingerprint=KnowledgeIngestLease.fingerprint,
+            ))
+            # 先锁指纹行，再读取当前时间，避免用等待锁之前的时间续租。
+            now = func.unix_timestamp(func.current_timestamp(6))
+            statement = update(KnowledgeIngestLease).where(
+                KnowledgeIngestLease.fingerprint == fingerprint,
+                KnowledgeIngestLease.expires_at <= now,
+            ).values(owner=owner, expires_at=now + LEASE_SECONDS)
+        else:
+            statement = insert(KnowledgeIngestLease).values(
+                fingerprint=fingerprint, owner=owner, expires_at=_DB_NOW + LEASE_SECONDS,
+            ).on_conflict_do_update(
+                index_elements=["fingerprint"],
+                set_={"owner": owner, "expires_at": _DB_NOW + LEASE_SECONDS},
+                where=KnowledgeIngestLease.expires_at <= _DB_NOW,
+            )
         result = db.execute(statement)
         db.commit()
         if result.rowcount != 1:

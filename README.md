@@ -100,28 +100,34 @@ Python 监听回环/内网地址，不直接接受公网请求。三个上游地
 
 ## 快速开始（生产默认拓扑）
 
-要求已有可用的项目虚拟环境 `.venv`（本地验证使用 Python 3.12）。先启动内部 Python 后端，
-再起三个 Go 服务，对外只访问网关的 8080。
+Docker Compose 默认启动 MySQL 8、Python Agent 和三个 Go 服务。先在仓库根目录的
+`.env` 配置相同供 Go 与 Python 使用的 `AI_NEW_JWT_SECRET` 和 `AGENT_INTERNAL_TOKEN`。
+模型配置沿用 `backend/.env`。
 
 ```bash
-# 1. 安装依赖与配置（已有 backend/.env 时直接核对，避免复制模板覆盖原值）
-pip install -r backend/requirements.txt
-cp backend/.env.example backend/.env     # 填入模型密钥与 GO_* 上游地址
-
-# 2. 内部后端：只监听回环地址，不对公网暴露
-python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
-
-# 3. 一次起三个 Go 服务（compose 中网关经 host.docker.internal 访问 8000）
-docker compose up -d go-retrieval go-business gateway
+docker compose up -d --build
 ```
 
-打开 <http://127.0.0.1:8080> ，输入「**专业版导出功能一直失败**」，即可看到完整排查链路。
-`/health` 会返回网关自身状态、三个上游的健康与能力开关。
+浏览器访问 <http://127.0.0.1:8080>。Python 容器启动前执行 Alembic 升级。
+设置 `GATEWAY_GO_PRIMARY=true` 可启用所有已迁移路由。
 
-启动会初始化 SQLite 并预置演示数据，数据库路径固定为 `backend/app.db`。
+### 从已有 SQLite 导入
 
-> Windows 用户：把 `python` 换成 `.\.venv\Scripts\python.exe`。
-> 仅开发调试时可直连 <http://127.0.0.1:8000> 跳过网关，不要作为部署形态。
+先停掉使用旧 SQLite 的应用写入。在空 MySQL 库上先升级、后导入，再启动应用，
+以防演示种子数据占用目标表。下面使用 Compose 默认用户、密码和本地映射端口；
+如设置了自定义 MySQL 配置，宿主机运行的命令使用同样的 `MYSQL_*` 环境变量
+（宿主机端口用 `MYSQL_PORT`，对应 Compose 的 `MYSQL_PUBLISHED_PORT`）。
+
+```bash
+docker compose up -d --wait mysql
+DB_DRIVER=mysql python -m alembic upgrade head
+DB_DRIVER=mysql python -m scripts.import_sqlite_to_mysql backend/app.db
+docker compose up -d --build
+```
+
+导入使用只读 SQLite 快照与单个 MySQL 写事务，目标业务表已有数据时拒绝执行。
+既有 MySQL 里有数据时，用新的空 schema 进行导入。源 SQLite 可作为迁移前的备份。
+Go 与 Python 必须连接同一 MySQL schema。
 
 ### 单独运行：Go 检索服务
 
@@ -148,8 +154,7 @@ cd go-business && go run .          # 默认 127.0.0.1:8082，读 ../backend/app
 状态机规则两边一致——非法流转同样返回 `TICKET_INVALID_TRANSITION`，
 未知状态同样按 422 语义拒绝，因此前端不需要知道工单在哪边处理。
 
-写连接只支持 SQLite：Go 侧用 `mode=rw` 打开同一个库文件，与 Python 靠
-`busy_timeout` 协调写锁。切换到 MySQL 部署时不要配置该项，让写路径留在 Python。
+本地可用 SQLite 单独调试。连接 MySQL 时设置 `DB_DRIVER=mysql` 并提供 `MYSQL_*` 连接参数。
 
 ### 网关：对外唯一入口
 
@@ -179,15 +184,11 @@ cd go-gateway && go run .          # 默认 127.0.0.1:8080
 不写进转发给 Python 的请求头 —— 授权仍只有 Python 一处权威。
 这样即使 Python 被直接暴露，也不存在可伪造的身份来源。
 
-### 可选：切换到 MySQL
+### 本地单独运行 Python
 
-```bash
-docker compose up -d mysql
-# 在 backend/.env 里设置：
-# DATABASE_URL=mysql+pymysql://ainew:ainew@127.0.0.1:3307/ainew?charset=utf8mb4
-```
-
-首次部署执行 `python -m alembic upgrade head` 建表；不设置则继续使用本地 SQLite。
+直接运行 Python 时，默认使用 `backend/app.db`。设置 `DB_DRIVER=mysql` 会使用本机
+MySQL，或显式设置 `DATABASE_URL` 指定 Python 的连接。Go 服务使用 `MYSQL_*`
+连接参数，也可以通过 `MYSQL_DSN` 指定连接。
 
 ## 演示账号
 

@@ -108,7 +108,8 @@ def list_document_summaries(
             total = len(rows)
         else:
             # SQLite 的默认驱动模式不会为 SELECT 自动发出 BEGIN。
-            db.execute(text("BEGIN"))
+            if db.get_bind().dialect.name == "sqlite":
+                db.execute(text("BEGIN"))
             total = db.query(KnowledgeDoc.id).filter(*filters).count()
             # 先比较总数，避免超大 offset 传入 SQLite 的整数绑定。
             rows = query.offset(offset).limit(limit).all() if offset < total else []

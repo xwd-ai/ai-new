@@ -365,7 +365,8 @@ def pending_ingests() -> list[dict]:
 def pending_ingest_page(*, offset: int, limit: int, stage: str | None = None) -> dict:
     """在一次 SQLite 读事务内读取待恢复总数和当前页。"""
     with SessionLocal() as db:
-        db.execute(text('BEGIN'))
+        if db.get_bind().dialect.name == 'sqlite':
+            db.execute(text('BEGIN'))
         query = _pending_summary_query(db, stage)
         total = query.order_by(None).count()
         # 超出末页时直接返回，避免绑定超出 SQLite 整数范围的偏移量。

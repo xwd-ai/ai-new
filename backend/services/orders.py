@@ -832,6 +832,8 @@ def change_order_status(
         query = db.query(Order).filter(Order.id == key)
         if user_id is not None:
             query = query.filter(Order.user_id == user_id)
+        if db.get_bind().dialect.name == "mysql":
+            query = query.with_for_update()
         order = query.first()
         if order is None:
             raise OrderNotFoundError(order_id=key)
