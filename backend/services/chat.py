@@ -190,10 +190,22 @@ def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
     # 失败或尚未完成的调用不应继续暴露上一次的摘要。
     _last_execution.set(None)
     conversation_id = get_or_create_conversation(user_id)
+    reply, sources, suggest, step, execution = generate_reply(
+        user_id, message, history(conversation_id)
+    )
+    append_turn(conversation_id, message, reply)
+    if step:
+        append_tried_step(user_id, step)
+    _last_execution.set(execution)
+    return reply, sources, suggest
+
+
+def generate_reply(user_id: str, message: str, prior_messages: list[dict]):
+    """运行 Agent，返回回复及本轮元数据，由调用方保存消息。"""
     # 历史里的引用标记会被剥离：上轮引用过的来源不构成本轮回答的证据
     # 再按预算压缩，保留最近若干轮完整对话，避免长历史稀释当前问题
     compacted = context.compact_history(
-        citations.history_as_context(history(conversation_id))
+        citations.history_as_context(prior_messages)
     )
     context_messages = compacted.messages
 
@@ -248,10 +260,7 @@ def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
     # 编造或未注册的编号会被丢弃，避免出现无出处的引用
     reply = citations.decode_refs(reply, registry)
 
-    append_turn(conversation_id, message, reply)
-
-    if first_items:
-        append_tried_step(user_id, f"按《{first_items[0]['title']}》排查")
+    step = f"按《{first_items[0]['title']}》排查" if first_items else None
 
     # 转人工判定：按服务范围与排查情况给结论，并留下判定原因
     prior_unresolved = any(
@@ -267,8 +276,7 @@ def build_reply(user_id: str, message: str) -> tuple[str, list[dict], bool]:
     )
     suggest = decision.suggest
     sources = citations.public_sources(registry)
-    _last_execution.set((summary, decision))
-    return reply, sources, suggest
+    return reply, sources, suggest, step, (summary, decision)
 
 
 def build_stream_messages(
@@ -283,8 +291,14 @@ def build_stream_messages(
     返回 (messages, sources, conversation_id, suggest_ticket)。
     """
     conversation_id = get_or_create_conversation(user_id)
+    messages, sources, suggest = prepare_stream(user_id, message, history(conversation_id))
+    return messages, sources, conversation_id, suggest
+
+
+def prepare_stream(user_id: str, message: str, prior_messages: list[dict]):
+    """准备流式模型输入，由调用方提供历史并保存完整回复。"""
     compacted = context.compact_history(
-        citations.history_as_context(history(conversation_id))
+        citations.history_as_context(prior_messages)
     )
 
     order = orders.query_order(user_id) if user_id != "anonymous" else None
@@ -316,7 +330,6 @@ def build_stream_messages(
     return (
         messages,
         citations.public_sources(registry),
-        conversation_id,
         decision.suggest,
     )
 

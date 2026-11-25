@@ -25,15 +25,17 @@ func TestPublicTicketAuthorization(t *testing.T) {
 		CREATE TABLE users (id TEXT, username TEXT, role TEXT, name TEXT);
 		CREATE TABLE sessions (token TEXT, user_id TEXT, username TEXT, expires_at REAL);
 		CREATE TABLE revoked_tokens (jti TEXT);
-		CREATE TABLE tickets (id TEXT, dedup_key TEXT, user_id TEXT, user_name TEXT,
+		CREATE TABLE ticket_number_counter (id INTEGER PRIMARY KEY, last_number BIGINT NOT NULL);
+		CREATE TABLE tried_steps (user_id TEXT, step TEXT, at REAL);
+		CREATE TABLE tickets (id TEXT, dedup_key TEXT UNIQUE, user_id TEXT, user_name TEXT,
 			description TEXT, tried_steps TEXT, evidence TEXT, status TEXT, created_at REAL, replies TEXT);
 		CREATE TABLE ticket_status_logs (ticket_id TEXT, from_status TEXT, to_status TEXT, operator TEXT, changed_at REAL);
 		INSERT INTO users VALUES ('u1', 'customer', 'customer', '客户'), ('u2', 'admin', 'admin', '管理员');
 		INSERT INTO sessions VALUES ('legacy', 'u1', 'customer', unixepoch() + 60);
 		INSERT INTO revoked_tokens VALUES ('revoked');
 		INSERT INTO tickets VALUES
-			('T1', '', 'u1', '', '', '', '', 'pending_confirm', unixepoch(), '[]'),
-			('T2', '', 'u2', '', '', '', '', 'pending_confirm', unixepoch(), '[]');
+			('T1', 'old1', 'u1', '', '', '', '', 'pending_confirm', unixepoch(), '[]'),
+			('T2', 'old2', 'u2', '', '', '', '', 'pending_confirm', unixepoch(), '[]');
 	`)
 	if err != nil {
 		t.Fatal(err)
@@ -140,6 +142,41 @@ func TestPublicTicketAuthorization(t *testing.T) {
 	var operator string
 	if err := conn.QueryRow("SELECT operator FROM ticket_status_logs WHERE ticket_id = 'T1' AND to_status = 'open'").Scan(&operator); err != nil || operator != "客户" {
 		t.Fatalf("expected authenticated operator, got %q (%v)", operator, err)
+	}
+
+	for index, tc := range []struct {
+		token, body string
+		status      int
+		created     bool
+	}{
+		{"", `{"description":"新问题"}`, 401, false},
+		{"legacy", `{"description":" "}`, 422, false},
+		{"legacy", `{"description":"新问题","user_id":"u2","tried_steps":"重启"}`, 200, true},
+		{"legacy", `{"description":" 新问题 "}`, 200, false},
+	} {
+		r := httptest.NewRequest("POST", "/public/api/tickets", strings.NewReader(tc.body))
+		if tc.token != "" {
+			r.Header.Set("Authorization", "Bearer "+tc.token)
+		}
+		w := httptest.NewRecorder()
+		publicTicketCreate(conn).ServeHTTP(w, r)
+		if w.Code != tc.status {
+			t.Fatalf("case %d status %d, body %s", index, w.Code, w.Body.String())
+		}
+		if w.Code != 200 {
+			continue
+		}
+		var result struct {
+			Ticket   map[string]any
+			Created  bool
+			Identity ticketUser
+			Message  string
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || result.Identity.ID != "u1" ||
+			result.Ticket["user_id"] != "u1" || result.Ticket["id"] != "T-1001" ||
+			result.Ticket["tried_steps"] != "重启" || result.Created != tc.created || result.Message == "" {
+			t.Fatalf("case %d unexpected response: %s", index, w.Body.String())
+		}
 	}
 
 }

@@ -41,7 +41,10 @@ def chat_rate_limit(
 
     作为 FastAPI 依赖使用，与路由的 current_user 依赖共享同一次解析结果。
     """
-    identity = user["id"] if user else "anonymous"
+    enforce_chat_rate(user["id"] if user else "anonymous")
+
+
+def enforce_chat_rate(identity: str) -> None:
     limit = _limit()
     key = f"rate:chat:{identity}"
 

@@ -14,11 +14,8 @@ import (
 
 func publicTicketWrite(conn *sql.DB, operation string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		body := http.MaxBytesReader(w, r.Body, 1<<20)
-		decoder := json.NewDecoder(body)
-		var fields map[string]json.RawMessage
-		if err := decoder.Decode(&fields); err != nil || fields == nil || decoder.Decode(new(json.RawMessage)) != io.EOF {
-			writeTicketInputError(w, "请求体必须是 JSON 对象")
+		fields, ok := decodePublicTicketBody(w, r)
+		if !ok {
 			return
 		}
 
@@ -86,6 +83,23 @@ func publicTicketWrite(conn *sql.DB, operation string) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, response)
 	}
+}
+
+func decodePublicTicketBody(w http.ResponseWriter, r *http.Request) (map[string]json.RawMessage, bool) {
+	fields, ok := decodePublicObject(w, r)
+	if !ok {
+		writeTicketInputError(w, "请求体必须是 JSON 对象")
+	}
+	return fields, ok
+}
+
+func decodePublicObject(w http.ResponseWriter, r *http.Request) (map[string]json.RawMessage, bool) {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	var fields map[string]json.RawMessage
+	if err := decoder.Decode(&fields); err != nil || fields == nil || decoder.Decode(new(json.RawMessage)) != io.EOF {
+		return nil, false
+	}
+	return fields, true
 }
 
 func ticketString(raw json.RawMessage) (string, bool) {

@@ -1,13 +1,10 @@
-// Package auth 实现 access token 的校验，与 Python 的
-// backend/services/auth.py 使用同一套算法、密钥与声明约定。
-//
-// 迁移范围刻意限定为**校验**：签发与登录仍留在 Python。理由是登录是低频写操作，
-// 迁移动机不足；而校验是每个请求都会走的热点，且是纯计算，最容易独立部署。
+// Package auth 使用与 Python 相同的 JWT 算法、密钥和声明约定。
 package auth
 
 import (
 	"errors"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -21,7 +18,8 @@ const (
 	Audience = "ai-new-web"
 
 	// TokenTypeAccess 是 access token 的 typ 声明值；refresh token 不允许通过本校验。
-	TokenTypeAccess = "access"
+	TokenTypeAccess  = "access"
+	TokenTypeRefresh = "refresh"
 
 	secretEnv = "AI_NEW_JWT_SECRET"
 	// 与 Python 的内置开发密钥保持一致：本地调试时两边可互认令牌
@@ -65,18 +63,54 @@ func secret() []byte {
 // 校验项与 Python 对齐：算法固定 HS256、签名、iss、aud、exp（含 30 秒时钟偏差）、
 // 以及 typ 必须为 access —— 与 Python 一样，refresh token 不能顶替 access token。
 func VerifyAccessToken(raw string) (*Claims, error) {
+	return verifyToken(raw, TokenTypeAccess, true)
+}
+
+func VerifyRefreshToken(raw string) (*Claims, error) {
+	claims, err := verifyToken(raw, TokenTypeRefresh, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidateIdentityClaims(claims); err != nil {
+		return nil, err
+	}
+	return claims, nil
+}
+
+func ValidateIdentityClaims(claims *Claims) error {
+	if err := validateTokenFields(claims); err != nil {
+		return err
+	}
+	if claims.IssuedAt.After(time.Now().Add(ClockLeeway())) {
+		return jwt.ErrTokenUsedBeforeIssued
+	}
+	return nil
+}
+
+func validateTokenFields(claims *Claims) error {
+	if claims.Subject == "" || claims.IssuedAt == nil || claims.ExpiresAt == nil ||
+		!claims.ExpiresAt.After(claims.IssuedAt.Time) {
+		return jwt.ErrTokenInvalidClaims
+	}
+	return nil
+}
+
+func verifyToken(raw, expectedType string, verifyTime bool) (*Claims, error) {
 	claims := &Claims{}
 
-	parser := jwt.NewParser(
+	options := []jwt.ParserOption{
 		// 只允许 HS256：防止 alg=none 或非对称算法降级攻击
 		jwt.WithValidMethods([]string{"HS256"}),
 		jwt.WithIssuer(Issuer),
 		jwt.WithAudience(Audience),
 		jwt.WithLeeway(ClockLeeway()),
 		jwt.WithExpirationRequired(),
-	)
+	}
+	if !verifyTime {
+		options = append(options, jwt.WithoutClaimsValidation())
+	}
 
-	token, err := parser.ParseWithClaims(raw, claims, func(*jwt.Token) (any, error) {
+	token, err := jwt.NewParser(options...).ParseWithClaims(raw, claims, func(*jwt.Token) (any, error) {
 		return secret(), nil
 	})
 	if err != nil {
@@ -85,8 +119,16 @@ func VerifyAccessToken(raw string) (*Claims, error) {
 	if !token.Valid {
 		return nil, errors.New("令牌无效")
 	}
-	if claims.Typ != TokenTypeAccess {
+	if claims.Typ != expectedType {
 		return nil, ErrWrongType
+	}
+	if !verifyTime {
+		if claims.Issuer != Issuer || !slices.Contains(claims.Audience, Audience) {
+			return nil, jwt.ErrTokenInvalidClaims
+		}
+		if err := validateTokenFields(claims); err != nil {
+			return nil, err
+		}
 	}
 	return claims, nil
 }

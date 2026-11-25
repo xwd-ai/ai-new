@@ -457,13 +457,19 @@ def create_ticket(
     try:
         # 建单临界区：SQLite 用库级写锁串行化；MySQL/PG 由 dedup_key 唯一约束兜底
         with advisory_lock(key) as db:
-            existing = (
-                db.query(Ticket)
-                .filter(Ticket.dedup_key == key, Ticket.status != STATUS_RESOLVED)
-                .first()
-            )
+            existing = db.query(Ticket).filter(Ticket.dedup_key == key).first()
             if existing:
-                return existing.to_dict(), False
+                if existing.status != STATUS_RESOLVED:
+                    return existing.to_dict(), False
+                (
+                    db.query(Ticket)
+                    .filter(
+                        Ticket.id == existing.id,
+                        Ticket.dedup_key == key,
+                        Ticket.status == STATUS_RESOLVED,
+                    )
+                    .update({Ticket.dedup_key: f"resolved:{existing.id}"}, synchronize_session=False)
+                )
 
             ticket = Ticket(
                 id=allocate_ticket_id(db),

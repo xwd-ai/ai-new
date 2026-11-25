@@ -20,12 +20,7 @@ func NewRepository(db *sql.DB) *Repository {
 //
 // 把确定口径放在取数层，上层挑选与展示都不必再依赖数据库返回顺序。
 func (r *Repository) List(userID string) ([]Order, error) {
-	rows, err := r.db.Query(`
-		SELECT id, user_id, product_tier, status, started_at, expires_at
-		FROM orders
-		WHERE user_id = ?
-		ORDER BY expires_at DESC, id ASC
-	`, userID)
+	rows, err := r.db.Query(orderSelect+" FROM orders WHERE user_id = ? ORDER BY expires_at DESC, id ASC", userID)
 	if err != nil {
 		return nil, fmt.Errorf("查询订单失败: %w", err)
 	}
@@ -33,8 +28,8 @@ func (r *Repository) List(userID string) ([]Order, error) {
 
 	orders := make([]Order, 0, 4)
 	for rows.Next() {
-		var o Order
-		if err := rows.Scan(&o.ID, &o.UserID, &o.ProductTier, &o.Status, &o.StartedAt, &o.ExpiresAt); err != nil {
+		o, err := scanOrder(rows)
+		if err != nil {
 			return nil, fmt.Errorf("解析订单失败: %w", err)
 		}
 		orders = append(orders, o)

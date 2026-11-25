@@ -167,3 +167,17 @@ def test_建单事务失败时工单号和记录一并回滚(db_env, monkeypatch
     ticket, created = tickets.create_ticket("u1", "用户", "重试建单", "", "")
     assert created and ticket["id"] == "T-1001"
     assert _count_tickets(db_env) == 1
+
+
+def test_已解决工单允许同问题重新建单(db_env):
+    first, _ = tickets.create_ticket("u1", "用户", "导出失败", "", "")
+    with db_env.begin() as db:
+        db.get(Ticket, first["id"]).status = tickets.STATUS_RESOLVED
+
+    second, created = tickets.create_ticket("u1", "用户", "导出失败", "", "")
+    repeated, repeated_created = tickets.create_ticket("u1", "用户", "导出失败", "", "")
+
+    assert created and second["id"] != first["id"]
+    assert not repeated_created and repeated["id"] == second["id"]
+    with db_env() as db:
+        assert db.get(Ticket, first["id"]).status == tickets.STATUS_RESOLVED

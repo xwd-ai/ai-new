@@ -72,6 +72,13 @@ def chat_stream_endpoint(
         user_id, req.message
     )
 
+    return stream_response(
+        messages, sources, suggest,
+        lambda reply: chat_service.append_turn(conversation_id, req.message, reply),
+    )
+
+
+def stream_response(messages, sources, suggest, save=None) -> StreamingResponse:
     def event_stream():
         # 来源先发：前端在第一个字到达前就能渲染证据列表
         yield _sse_frame("retrieval", {"sources": sources})
@@ -87,7 +94,8 @@ def chat_stream_endpoint(
 
         reply = "".join(collected)
         # 生成完成后才落库：中途断流不会留下半截回答
-        chat_service.append_turn(conversation_id, req.message, reply)
+        if save is not None:
+            save(reply)
         yield _sse_frame(
             "done", {"reply": reply, "suggest_ticket": suggest}
         )

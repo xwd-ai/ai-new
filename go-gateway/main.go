@@ -57,17 +57,23 @@ const (
 
 // config 是网关的全部可配置项，全部来自环境变量。
 type config struct {
-	addr             string
-	backendURL       *url.URL // 必需：其余能力都挂在它前面
-	retrievalURL     *url.URL // 可选：提供 /api/retrieval/stream
-	businessURL      *url.URL // 可选：提供入口令牌校验
-	upstreamTimeout  time.Duration
-	rateLimit        float64 // 每秒补充的令牌数，<=0 表示关闭入口限流
-	rateBurst        int
-	pprof            bool
-	goPendingTickets bool
-	goTicketWrites   bool
-	frontendDir      string
+	addr                 string
+	backendURL           *url.URL // 必需：其余能力都挂在它前面
+	retrievalURL         *url.URL // 可选：提供 /api/retrieval/stream
+	businessURL          *url.URL // 可选：提供入口令牌校验
+	upstreamTimeout      time.Duration
+	rateLimit            float64 // 每秒补充的令牌数，<=0 表示关闭入口限流
+	rateBurst            int
+	pprof                bool
+	goPendingTickets     bool
+	goTicketWrites       bool
+	goTicketCreate       bool
+	goChat               bool
+	goSessionReadRefresh bool
+	goLogin              bool
+	goSessionRevocation  bool
+	goBusinessAPI        bool
+	frontendDir          string
 }
 
 var (
@@ -90,7 +96,7 @@ func main() {
 	cfg = loadConfig()
 
 	backendProxy = newBackendProxy(cfg.backendURL)
-	if (cfg.goPendingTickets || cfg.goTicketWrites) && cfg.businessURL != nil {
+	if (cfg.goPendingTickets || cfg.goTicketWrites || cfg.goTicketCreate || cfg.goChat || cfg.goSessionReadRefresh || cfg.goLogin || cfg.goSessionRevocation || cfg.goBusinessAPI) && cfg.businessURL != nil {
 		businessProxy = newBackendProxy(cfg.businessURL)
 	}
 	businessHTTP = &http.Client{Timeout: probeTimeout, Transport: newTransport(false)}
@@ -160,6 +166,7 @@ func main() {
 // 会先于兜底的 "/" 命中，不需要额外的前缀判断。
 func registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /health", handleHealth)
+	mux.Handle("/internal/agent/", http.NotFoundHandler())
 	mux.HandleFunc("POST /api/retrieval/stream", handleRetrievalStream)
 
 	if cfg.pprof {
@@ -171,12 +178,48 @@ func registerRoutes(mux *http.ServeMux) {
 	}
 
 	if businessProxy != nil {
+		if cfg.goBusinessAPI {
+			for _, pattern := range []string{
+				"POST /api/register", "GET /api/sources/{source_id}", "GET /api/knowledge/items",
+				"GET /api/knowledge/ingest/pending", "GET /api/knowledge/settings", "PUT /api/knowledge/settings",
+				"GET /api/order", "GET /api/order/list",
+				"GET /api/order/scope", "GET /api/order/feature-scope", "GET /api/order/renewal",
+				"GET /api/order/admin", "GET /api/order/admin/{order_id}",
+				"POST /api/order/expire", "GET /api/tickets", "GET /api/tickets/stats",
+				"POST /api/tickets/reply", "POST /api/tickets/expire",
+				"POST /api/tickets/batch-close", "POST /api/tickets/batch-transfer", "POST /api/tickets/transfer",
+				"GET /api/tickets/{ticket_id}", "GET /api/tickets/{ticket_id}/transfer-decision",
+			} {
+				mux.HandleFunc(pattern, proxyBusinessPublic)
+			}
+		}
+		if cfg.goSessionRevocation {
+			mux.HandleFunc("POST /api/logout", proxyBusinessPublic)
+			mux.HandleFunc("POST /api/sessions/cleanup", proxyBusinessPublic)
+		}
+		if cfg.goLogin {
+			mux.HandleFunc("POST /api/login", proxyBusinessPublic)
+		}
+		if cfg.goSessionReadRefresh {
+			mux.HandleFunc("GET /api/me", proxyBusinessPublic)
+			mux.HandleFunc("POST /api/refresh", proxyBusinessPublic)
+		}
+		if cfg.goChat {
+			mux.HandleFunc("GET /api/conversation", proxyBusinessPublic)
+			mux.HandleFunc("POST /api/chat", proxyBusinessPublic)
+			mux.HandleFunc("POST /api/chat/stream", proxyBusinessPublic)
+		}
 		if cfg.goPendingTickets {
-			mux.HandleFunc("GET /api/tickets/pending", proxyPublicTicket)
+			mux.HandleFunc("GET /api/tickets/pending", proxyBusinessPublic)
+		} else if cfg.goBusinessAPI {
+			mux.Handle("GET /api/tickets/pending", backendProxy)
+		}
+		if cfg.goTicketCreate {
+			mux.HandleFunc("POST /api/tickets", proxyBusinessPublic)
 		}
 		if cfg.goTicketWrites {
 			for _, operation := range []string{"confirm", "cancel", "status"} {
-				mux.HandleFunc("POST /api/tickets/"+operation, proxyPublicTicket)
+				mux.HandleFunc("POST /api/tickets/"+operation, proxyBusinessPublic)
 			}
 		}
 	}
@@ -185,7 +228,7 @@ func registerRoutes(mux *http.ServeMux) {
 	mux.Handle("/", backendProxy)
 }
 
-func proxyPublicTicket(w http.ResponseWriter, r *http.Request) {
+func proxyBusinessPublic(w http.ResponseWriter, r *http.Request) {
 	upstream := r.Clone(r.Context())
 	upstream.URL.Path = "/public" + r.URL.Path
 	upstream.URL.RawPath = ""
@@ -525,8 +568,15 @@ func loadConfig() config {
 	c.retrievalURL = optionalURL("RETRIEVAL_URL")
 	c.businessURL = optionalURL("GO_BUSINESS_URL")
 	c.frontendDir = strings.TrimSpace(os.Getenv("GATEWAY_FRONTEND_DIR"))
-	c.goPendingTickets = envBool("GATEWAY_GO_PENDING_TICKETS", false)
-	c.goTicketWrites = envBool("GATEWAY_GO_TICKET_WRITES", false)
+	goPrimary := envBool("GATEWAY_GO_PRIMARY", false)
+	c.goPendingTickets = envBool("GATEWAY_GO_PENDING_TICKETS", goPrimary)
+	c.goTicketWrites = envBool("GATEWAY_GO_TICKET_WRITES", goPrimary)
+	c.goTicketCreate = envBool("GATEWAY_GO_TICKET_CREATE", goPrimary)
+	c.goChat = envBool("GATEWAY_GO_CHAT", goPrimary)
+	c.goSessionReadRefresh = envBool("GATEWAY_GO_SESSION_REFRESH", goPrimary)
+	c.goLogin = envBool("GATEWAY_GO_LOGIN", goPrimary)
+	c.goSessionRevocation = envBool("GATEWAY_GO_SESSION_REVOCATION", goPrimary)
+	c.goBusinessAPI = envBool("GATEWAY_GO_BUSINESS_API", goPrimary)
 
 	c.rateBurst = envInt("GATEWAY_RATE_BURST", int(c.rateLimit))
 	if c.rateLimit > 0 && c.rateBurst <= 0 {

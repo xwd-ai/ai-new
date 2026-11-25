@@ -151,6 +151,9 @@ def load_retrieval_config() -> RetrievalConfig:
 
 
 def _settings_path() -> Path:
+    configured = (os.getenv("RETRIEVAL_SETTINGS_PATH") or "").strip()
+    if configured:
+        return Path(configured)
     return Path(__file__).resolve().parent.parent / "retrieval_settings.json"
 
 
@@ -170,6 +173,8 @@ def save_settings(settings: RetrievalSettings) -> RetrievalSettings:
     ) as output:
         output.write(settings.model_dump_json(indent=2))
         output.flush()
+        if hasattr(os, "fchmod"):
+            os.fchmod(output.fileno(), 0o644)
         os.fsync(output.fileno())
         temporary = output.name
     os.replace(temporary, target)

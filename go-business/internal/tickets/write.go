@@ -160,10 +160,12 @@ func (w *Writer) transitionTicket(
 // 与查询路径分开而不是复用 Repository：这里读的是即将被改写的那一行，
 // 必须落在同一个写事务里，否则读到的是快照，写回去可能覆盖别人的修改。
 func loadForWrite(ctx context.Context, tx *sql.Tx, id string) (*Ticket, error) {
-	row := tx.QueryRowContext(ctx, `
-		SELECT id, dedup_key, user_id, user_name, description, tried_steps, evidence, status, created_at, replies
-		FROM tickets WHERE id = ?`, id)
+	return scanTicket(tx.QueryRowContext(ctx, ticketSelect+" WHERE id = ?", id))
+}
 
+const ticketSelect = `SELECT id, dedup_key, user_id, user_name, description, tried_steps, evidence, status, created_at, replies FROM tickets`
+
+func scanTicket(row interface{ Scan(...any) error }) (*Ticket, error) {
 	var t Ticket
 	var rawReplies any
 	if err := row.Scan(
@@ -206,12 +208,8 @@ func applyTransition(
 	}
 
 	from := t.Status
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO ticket_status_logs (ticket_id, from_status, to_status, operator, changed_at)
-		VALUES (?, ?, ?, ?, ?)`,
-		t.ID, from, string(target), operator, nowSeconds(),
-	); err != nil {
-		return fmt.Errorf("写入状态时间线失败: %w", err)
+	if err := logTransition(ctx, tx, t.ID, from, string(target), operator); err != nil {
+		return err
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -224,6 +222,16 @@ func applyTransition(
 	// 内存里的副本同步更新：调用方拿到的 payload 必须是提交后的状态
 	t.Status = string(target)
 	t.Replies = replies
+	return nil
+}
+
+func logTransition(ctx context.Context, tx *sql.Tx, id, from, target, operator string) error {
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO ticket_status_logs (ticket_id, from_status, to_status, operator, changed_at)
+		VALUES (?, ?, ?, ?, ?)`, id, from, target, operator, nowSeconds())
+	if err != nil {
+		return fmt.Errorf("写入状态时间线失败: %w", err)
+	}
 	return nil
 }
 

@@ -31,6 +31,8 @@ func newTestWriter(t *testing.T) (*Writer, *sql.DB) {
 	t.Cleanup(func() { conn.Close() })
 
 	schema := []string{
+		`CREATE TABLE ticket_number_counter (id INTEGER PRIMARY KEY, last_number BIGINT NOT NULL)`,
+		`CREATE TABLE tried_steps (user_id TEXT NOT NULL, step TEXT NOT NULL, at REAL NOT NULL)`,
 		`CREATE TABLE tickets (
 			id TEXT PRIMARY KEY,
 			dedup_key TEXT NOT NULL UNIQUE,

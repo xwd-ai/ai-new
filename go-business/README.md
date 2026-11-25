@@ -1,7 +1,7 @@
 # 业务服务（Go）
 
 把 Python 后端里**边界清晰、不依赖 LLM 编排**的部分逐步迁移到 Go：
-订单与服务范围判定、令牌校验、待确认工单列表，以及工单的三个状态流转。
+订单与服务范围判定、令牌校验、待确认工单列表，以及建单和工单状态流转。
 
 ## 为什么按这个顺序迁
 
@@ -10,13 +10,14 @@
 | 订单 / 服务范围 | 只读 `orders` / `products` | 查询与判定全量 |
 | 令牌校验 | HMAC + 声明 | 仅校验层（登录与签发留 Python） |
 | 待确认工单 | 只读 `tickets` | 仅列表查询 |
+| 建单 | SQLite 事务、工单号计数器 | 创建待确认草稿、重复请求返回原工单 |
 | 工单状态流转 | 单表更新 + 时间线追加 | `confirm` / `cancel` / `update_status` |
 
 共同点：验收标准明确（返回结构与 Python 逐字段一致）、失败可无损回滚
 （去掉环境变量即恢复原路径）。
 
 工单号由数据库表 `ticket_number_counter` 分配，保留 `T-数字` 格式和已有工单号。
-首次取号从历史工单的最大数字序号接续。Python 建单与演示数据共用此计数器；
+首次取号从历史工单的最大数字序号接续。Go、Python 建单与演示数据共用此计数器；
 取号、工单记录和初始时间线在同一个建单事务内提交。已有库可通过 Alembic 升级。
 
 ## 运行
@@ -65,7 +66,13 @@ query 会进入访问日志与浏览器历史，等于把凭据写进日志。
 ### 关于工单迁移的边界
 
 已迁：待确认列表（读）、`confirm` / `cancel` / `update_status`（写）。
-Python 仍负责建单、批量操作、超时收敛和转人工判定。
+开启 `GATEWAY_GO_TICKET_CREATE=true` 后，网关将 `POST /api/tickets` 转给 Go。
+Go 从会话身份确定归属，缺省时从同一数据库读取排查步骤。Python Agent 内部调用仍使用原有建单逻辑。
+
+启用前先升级 SQLite 到最新 Alembic 版本，并在 Go 与 Python 配置相同的
+`AI_NEW_JWT_SECRET`。Compose 共用数据库所在目录，使 SQLite 的日志文件也能共享。
+若使用独立目录，将 `SQLITE_DATA_DIR` 指向该目录，并让 Python 的 `DATABASE_URL`
+指向目录中的 `app.db`。
 
 三个写接口的语义与 Python 严格对齐：
 
@@ -162,3 +169,53 @@ internal/tickets/
   transition.go            状态机：流转表、校验与错误码
   write.go                 confirm / cancel / update_status
 ```
+
+
+## Go 对话入口
+
+开启 `GATEWAY_GO_CHAT=true` 后，网关将 `POST /api/chat`、`POST /api/chat/stream`
+和 `GET /api/conversation` 转给 Go。Go 使用共享 SQLite 读取历史并保存完整对话轮次，
+Python 提供 Agent、模型和原有对话限流。流式路径仍使用单轮检索与模型生成。
+
+在 Python 进程和 Compose 中设置相同的 `AGENT_INTERNAL_TOKEN`；
+`AGENT_INTERNAL_URL` 指向 Python 服务地址（Compose 默认使用宿主机的 8000 端口）。
+登录态需要 Go 和 Python 使用同一 `AI_NEW_JWT_SECRET`。
+
+
+## Go 会话查询与续期
+
+开启 `GATEWAY_GO_SESSION_REFRESH=true` 后，网关将 `GET /api/me` 和
+`POST /api/refresh` 转给 Go。设置与 Python 相同的 `AI_NEW_JWT_SECRET`、
+`AI_NEW_JWT_TTL` 和 `AI_NEW_JWT_LEEWAY`，两者共用 SQLite 会话数据。
+续期仍回传原 refresh token 和原到期时间，新签发的 access token 登记到会话表。
+
+
+开启 `GATEWAY_GO_LOGIN=true` 后，网关将 `POST /api/login` 转给 Go。
+Go 校验现有 bcrypt 哈希和旧版 SHA-256 摘要，签发的两个令牌在同一事务登记。
+使用与 Python 相同的签名密钥、令牌有效期及 `BCRYPT_COST`，即可在 Go 登录后
+继续使用 Python 认证与登出路径。
+
+
+开启 `GATEWAY_GO_SESSION_REVOCATION=true` 后，网关将 `POST /api/logout` 和
+`POST /api/sessions/cleanup` 交给 Go。登出事务会删除对应会话并登记作废状态，
+清理接口只允许管理员调用，在 JWT 时钟偏差窗口内保留作废记录。
+
+
+## Go 业务接口
+
+开启 `GATEWAY_GO_BUSINESS_API=true`，通过原有 API 使用这些 Go 实现。
+订单与工单按登录身份限制查询范围，知识管理列表、回复和批量归档按原权限执行。
+
+- 账号注册
+- 主订单、订单列表、单订单与跨订单服务范围、续费提醒、管理端订单详情与列表、到期订单归档
+- 知识来源原文、知识条目列表、待恢复入库记录列表及检索设置
+- 工单列表与详情、统计、回复、单张转人工与规则判定、批量关闭与转人工，以及超时待确认工单关闭
+
+当前 Go 业务服务使用共享 SQLite。Agent、模型调用、知识入库编排与恢复及检索诊断由 Python 提供。
+
+
+设置 `GATEWAY_GO_PRIMARY=true` 可一次启用所有已迁移的 Go 路由。
+显式设置任一分项开关为 `false` 可把该组请求切回 Python。
+启用前配置共享 SQLite、JWT 密钥及内部 Agent 地址和令牌，并升级数据库到当前 Alembic 版本。
+
+Compose 中 Go 将检索设置写到共享目录的 `retrieval_settings.json`。使用自定义 `SQLITE_DATA_DIR` 时，将 Python 的 `RETRIEVAL_SETTINGS_PATH` 指向同一个文件。

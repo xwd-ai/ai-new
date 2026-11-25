@@ -41,10 +41,8 @@ services:
       retries: 5
       start_period: 5s
 
-  # Go 业务服务：订单查询、令牌校验、待确认工单列表（均为只读）。
-  # 后端通过 GO_BUSINESS_URL 调用它；未配置或不可用时 Python 会自动降级。
-  # 需要先启动过一次后端生成 backend/app.db，否则宿主机路径不存在时
-  # Docker 会把它创建成目录，只读挂载会失败。
+  # Go 与 Python 写同一份 SQLite，需共享数据库文件及其日志所在目录。
+  # 如果用独立目录，通过 SQLITE_DATA_DIR 指向该目录，同时配置 Python 的 DATABASE_URL。
   go-business:
     build: ./go-business
     container_name: ainew-business
@@ -52,13 +50,24 @@ services:
     environment:
       ADDR: 0.0.0.0:8082
       DB_PATH: /data/app.db
+      RETRIEVAL_SETTINGS_PATH: /data/retrieval_settings.json
+      RETRIEVAL_PREFETCH_FLOOR: ${RETRIEVAL_PREFETCH_FLOOR:-50}
+      RETRIEVAL_PREFETCH_MULTIPLIER: ${RETRIEVAL_PREFETCH_MULTIPLIER:-5}
+      RETRIEVAL_RRF_K: ${RETRIEVAL_RRF_K:-60}
+      RETRIEVAL_VECTOR_WEIGHT: ${RETRIEVAL_VECTOR_WEIGHT:-0.7}
+      RETRIEVAL_KEYWORD_WEIGHT: ${RETRIEVAL_KEYWORD_WEIGHT:-0.3}
+      RETRIEVAL_MMR_LAMBDA: ${RETRIEVAL_MMR_LAMBDA:-0.7}
       AI_NEW_JWT_SECRET: ${AI_NEW_JWT_SECRET:-}
       AI_NEW_JWT_LEEWAY: ${AI_NEW_JWT_LEEWAY:-30}
+      AI_NEW_JWT_TTL: ${AI_NEW_JWT_TTL:-1800}
+      AI_NEW_JWT_REFRESH_TTL: ${AI_NEW_JWT_REFRESH_TTL:-2592000}
+      BCRYPT_COST: ${BCRYPT_COST:-12}
+      AGENT_INTERNAL_URL: ${AGENT_INTERNAL_URL:-http://host.docker.internal:8000}
+      AGENT_INTERNAL_TOKEN: ${AGENT_INTERNAL_TOKEN:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
-      # 与 Python 后端共用同一份 SQLite。
-      # 必须可写：工单的 confirm / cancel / update_status 已在 Go 侧执行，
-      # 写连接是 mode=rw；查询仍走另一条 mode=ro 的只读连接。
-      - ./backend/app.db:/data/app.db:rw
+      - ${SQLITE_DATA_DIR:-./backend}:/data:rw
     ports:
       - "127.0.0.1:8082:8082"
     healthcheck:
@@ -82,8 +91,15 @@ services:
       GO_BUSINESS_URL: http://go-business:8082
       GATEWAY_PPROF: "1"
       GATEWAY_FRONTEND_DIR: /frontend
-      GATEWAY_GO_PENDING_TICKETS: ${GATEWAY_GO_PENDING_TICKETS:-false}
-      GATEWAY_GO_TICKET_WRITES: ${GATEWAY_GO_TICKET_WRITES:-false}
+      GATEWAY_GO_PRIMARY: ${GATEWAY_GO_PRIMARY:-false}
+      GATEWAY_GO_PENDING_TICKETS: ${GATEWAY_GO_PENDING_TICKETS:-}
+      GATEWAY_GO_TICKET_WRITES: ${GATEWAY_GO_TICKET_WRITES:-}
+      GATEWAY_GO_TICKET_CREATE: ${GATEWAY_GO_TICKET_CREATE:-}
+      GATEWAY_GO_CHAT: ${GATEWAY_GO_CHAT:-}
+      GATEWAY_GO_SESSION_REFRESH: ${GATEWAY_GO_SESSION_REFRESH:-}
+      GATEWAY_GO_LOGIN: ${GATEWAY_GO_LOGIN:-}
+      GATEWAY_GO_SESSION_REVOCATION: ${GATEWAY_GO_SESSION_REVOCATION:-}
+      GATEWAY_GO_BUSINESS_API: ${GATEWAY_GO_BUSINESS_API:-}
     ports:
       - "8080:8080"
     volumes:

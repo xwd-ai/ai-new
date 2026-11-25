@@ -55,7 +55,7 @@ import time
 import uuid
 from typing import Optional
 
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from backend.database import SessionLocal
@@ -345,6 +345,12 @@ def register_user(
             role=normalize_role(role),
         )
         user.set_password(password)
+        if db.get_bind().dialect.name == "sqlite":
+            # 与 Go 共用 SQLite 写锁，防止仅大小写不同的用户名并发注册。
+            db.rollback()
+            db.execute(text("BEGIN IMMEDIATE"))
+            if _username_exists(db, account_name):
+                raise UsernameTakenError("用户名已被占用")
         db.add(user)
         db.commit()
         return _account(user)
@@ -1171,9 +1177,6 @@ def _blacklist_token(
 
 # 吊销检查的缓存：前缀 + 两种 TTL
 _REVOKED_CACHE_PREFIX = "auth:revoked:"
-# 未吊销只缓存 60 秒：登出时虽会主动删除该键，这里的 TTL 是兜底，
-# 避免「吊销已落库但缓存删除失败」造成长时间错误放行
-_REVOKED_NOT_FOUND_TTL = 60
 # 已吊销是终态，缓存 1 小时（过期回源仍会命中数据库记录）
 _REVOKED_FOUND_TTL = 3600
 
@@ -1184,17 +1187,16 @@ def is_token_revoked(jti: Optional[str]) -> bool:
     只按 jti 判定，不看有效期：名单里的记录本身就是「这条令牌不该再用」的结论。
     缺少 jti 的令牌返回 False——它无从被登记，只能靠时效约束。
 
-    这是每个请求都会走的热点判断，而吊销是低频写入，因此结果可缓存。
-    未吊销结果只缓存短时间，且登出时主动删除对应键，保证登出即时生效；
-    已吊销是终态，可以缓存更久。
+    只缓存已作废结果。Go 可以直接写入共享数据库，未作废结果必须回源，
+    包括迁移前留在缓存里的旧结果。
     """
     if not jti:
         return False
 
     cache_key = f"{_REVOKED_CACHE_PREFIX}{jti}"
     cached = cache.get(cache_key)
-    if cached is not None:
-        return cached == "1"
+    if cached == "1":
+        return True
 
     db = SessionLocal()
     try:
@@ -1204,11 +1206,8 @@ def is_token_revoked(jti: Optional[str]) -> bool:
     finally:
         db.close()
 
-    cache.set(
-        cache_key,
-        "1" if revoked else "0",
-        ttl=_REVOKED_FOUND_TTL if revoked else _REVOKED_NOT_FOUND_TTL,
-    )
+    if revoked:
+        cache.set(cache_key, "1", ttl=_REVOKED_FOUND_TTL)
     return revoked
 
 
@@ -1362,7 +1361,9 @@ def purge_expired_sessions(
             ("refresh_tokens", RefreshToken, RefreshToken.token, RefreshToken.expires_at),
             ("revoked_tokens", RevokedToken, RevokedToken.jti, RevokedToken.expires_at),
         ):
-            keys = [row[0] for row in db.query(key).filter(column < cutoff).limit(batch)]
+            # 时钟偏差窗口内，访问令牌仍可能通过签名校验，保留作废标记。
+            expires_before = min(cutoff, current - jwt_clock_leeway()) if name == "revoked_tokens" else cutoff
+            keys = [row[0] for row in db.query(key).filter(column < expires_before).limit(batch)]
             if keys:
                 db.query(model).filter(key.in_(keys)).delete(synchronize_session=False)
             deleted[name] = len(keys)
