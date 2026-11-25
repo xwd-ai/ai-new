@@ -13,6 +13,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from sqlalchemy.dialects import mysql
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
@@ -184,9 +185,11 @@ def test_low_cost_hash_is_rehashed_at_current_cost(factory):
 
 
 def test_hash_delivered_length_fits_column():
-    # 字段长度按 bcrypt 固定长度定义，升级后的哈希必须装得下
-    assert PASSWORD_HASH_LENGTH == 60
-    assert len(hash_password(PASSWORD, cost=4)) == PASSWORD_HASH_LENGTH
+    bcrypt_hash = hash_password(PASSWORD, cost=4)
+    assert len(bcrypt_hash) == PASSWORD_HASH_LENGTH == 60
+    column = User.__table__.c.password_hash.type
+    assert column.length == PASSWORD_HASH_LENGTH
+    assert column.dialect_impl(mysql.dialect()).length >= len(_legacy_digest(PASSWORD))
 
 
 # ---- 升级失败不影响登录 ----

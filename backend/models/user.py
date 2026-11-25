@@ -15,8 +15,9 @@ from backend.services.password import (
     verify_password,
 )
 
-# password_hash 字段存 bcrypt 哈希串，固定 60 字符：$2b$ + 两位成本 + 53 位盐与摘要
-PASSWORD_HASH_LENGTH = 64
+# bcrypt 哈希固定为 60 字符；MySQL 列需兼容 64 字符的旧 SHA-256 十六进制摘要。
+PASSWORD_HASH_LENGTH = 60
+_MYSQL_PASSWORD_HASH_COLUMN_LENGTH = 64
 
 
 class UserRole(str, Enum):
@@ -64,7 +65,10 @@ class User(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     username: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
-    password_hash: Mapped[str] = mapped_column(String(60).with_variant(String(PASSWORD_HASH_LENGTH), "mysql"), nullable=False)
+    password_hash: Mapped[str] = mapped_column(
+        String(PASSWORD_HASH_LENGTH).with_variant(String(_MYSQL_PASSWORD_HASH_COLUMN_LENGTH), "mysql"),
+        nullable=False,
+    )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(255), nullable=False)  # admin / customer，取值见 UserRole
 
