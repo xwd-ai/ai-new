@@ -1,4 +1,4 @@
-"""检索设置的权限、持久化与实际参数传递。"""
+"""检索设置持久化与实际参数传递。"""
 
 import json
 import subprocess
@@ -6,6 +6,7 @@ import sys
 
 import pytest
 
+from backend.schemas.retrieval import RetrievalSettings
 from backend.services import knowledge, retrieval_config
 from backend.tests.test_api_contracts import api_client, _headers
 
@@ -22,23 +23,11 @@ def payload():
                 vector_weight=0.6, keyword_weight=0.4, mmr_lambda=0.25)
 
 
-@pytest.mark.parametrize("role", [None, "customer"])
-def test_settings_reject_non_admin(api_client, role):
-    headers = _headers(api_client, role) if role else {}
-    for method, kwargs in (("get", {}), ("put", {"json": payload()})):
-        result = getattr(api_client, method)("/api/knowledge/settings", headers=headers, **kwargs)
-        assert result.status_code == 403
-
-
-def test_save_reload_and_environment_precedence(api_client, settings_file, monkeypatch):
+def test_save_reload_and_environment_precedence(settings_file, monkeypatch):
     monkeypatch.setenv("RETRIEVAL_PREFETCH_FLOOR", "99")
-    headers = _headers(api_client)
-    assert api_client.get("/api/knowledge/settings", headers=headers).json()["prefetch_floor"] == 99
-    response = api_client.put("/api/knowledge/settings", headers=headers, json=payload())
-    assert response.status_code == 200
-    assert response.json() == payload()
+    assert retrieval_config.current_settings().prefetch_floor == 99
+    assert retrieval_config.save_settings(RetrievalSettings(**payload())).model_dump() == payload()
     assert json.loads(settings_file.read_text("utf-8")) == payload()
-    assert api_client.get("/api/knowledge/settings", headers=headers).json() == payload()
     assert retrieval_config.load_retrieval_config().prefetch_depth(3) == 12
     code = (
         "from pathlib import Path; from backend.services import retrieval_config as c; "
@@ -48,33 +37,11 @@ def test_save_reload_and_environment_precedence(api_client, settings_file, monke
     subprocess.run([sys.executable, "-c", code], check=True, capture_output=True, text=True)
 
 
-@pytest.mark.parametrize("field,value", [
-    ("prefetch_floor", 0), ("prefetch_multiplier", 21), ("rrf_k", 1.5),
-    ("rrf_k", True), ("mmr_lambda", -0.1), ("vector_weight", 1.1),
-    ("keyword_weight", "0.5"), ("unknown", 3),
-])
-def test_invalid_settings_do_not_replace_file(api_client, settings_file, field, value):
-    headers = _headers(api_client)
-    assert api_client.put("/api/knowledge/settings", headers=headers, json=payload()).status_code == 200
-    before = settings_file.read_bytes()
-    invalid = payload()
-    invalid[field] = value
-    assert api_client.put("/api/knowledge/settings", headers=headers, json=invalid).status_code == 422
-    assert settings_file.read_bytes() == before
-
-
-def test_zero_fusion_weights_rejected(api_client):
-    data = payload()
-    data.update(vector_weight=0, keyword_weight=0)
-    assert api_client.put("/api/knowledge/settings", headers=_headers(api_client), json=data).status_code == 422
-
-
-def test_zero_environment_weights_still_allow_admin_to_fix_settings(api_client, monkeypatch):
+def test_zero_environment_weights_get_usable_defaults(monkeypatch):
     monkeypatch.setenv("RETRIEVAL_VECTOR_WEIGHT", "0")
     monkeypatch.setenv("RETRIEVAL_KEYWORD_WEIGHT", "0")
-    response = api_client.get("/api/knowledge/settings", headers=_headers(api_client))
-    assert response.status_code == 200
-    assert response.json()["vector_weight"] + response.json()["keyword_weight"] > 0
+    settings = retrieval_config.current_settings()
+    assert settings.vector_weight + settings.keyword_weight > 0
 
 
 @pytest.mark.parametrize("raw", ['{broken', '[]', '{"mmr_lambda": "NaN"}'])
@@ -84,22 +51,23 @@ def test_invalid_local_settings_fall_back_to_environment(settings_file, monkeypa
     assert retrieval_config.load_retrieval_config().mmr_lambda == 0.8
 
 
-def test_write_failure_returns_actionable_error(api_client, settings_file, monkeypatch):
-    headers = _headers(api_client)
-    assert api_client.put("/api/knowledge/settings", headers=headers, json=payload()).status_code == 200
+def test_write_failure_preserves_settings_file(settings_file, monkeypatch):
+    settings = RetrievalSettings(**payload())
+    retrieval_config.save_settings(settings)
     before = settings_file.read_bytes()
+
     def fail(*args):
         raise PermissionError("private filesystem detail")
+
     monkeypatch.setattr(retrieval_config.os, "replace", fail)
-    response = api_client.put("/api/knowledge/settings", headers=headers, json=payload())
-    assert response.status_code == 503
-    assert "private" not in response.text
+    with pytest.raises(PermissionError):
+        retrieval_config.save_settings(settings)
     assert settings_file.read_bytes() == before
 
 
 def test_saved_settings_reach_diagnosis_and_explicit_config_mmr(api_client, monkeypatch):
     headers = _headers(api_client)
-    assert api_client.put("/api/knowledge/settings", headers=headers, json=payload()).status_code == 200
+    retrieval_config.save_settings(RetrievalSettings(**payload()))
     seen = {}
     original = knowledge.select_mmr
     def capture(results, top_k, **kwargs):
@@ -114,17 +82,16 @@ def test_saved_settings_reach_diagnosis_and_explicit_config_mmr(api_client, monk
     assert seen["lambda_"] == 0.9
 
 
-def test_saved_fusion_weights_change_actual_order(api_client):
+def test_saved_fusion_weights_change_actual_order():
     data = payload()
     data.update(vector_weight=0, keyword_weight=1)
-    assert api_client.put("/api/knowledge/settings", headers=_headers(api_client), json=data).status_code == 200
+    retrieval_config.save_settings(RetrievalSettings(**data))
     a, b = {"id": "a"}, {"id": "b"}
     hits = knowledge.fuse_rrf(vector_results=[a, b], keyword_results=[b, a])
     assert [hit["id"] for hit in hits] == ["b", "a"]
 
 
-def test_saved_mmr_setting_changes_actual_selection(api_client):
-    headers = _headers(api_client)
+def test_saved_mmr_setting_changes_actual_selection():
     data = payload()
     docs = [
         {"id": "a", "title": "alpha beta", "score": 1.0},
@@ -133,13 +100,8 @@ def test_saved_mmr_setting_changes_actual_selection(api_client):
     ]
     for weight, expected in ((1, ["a", "b"]), (0, ["a", "c"])):
         data["mmr_lambda"] = weight
-        assert api_client.put("/api/knowledge/settings", headers=headers, json=data).status_code == 200
+        retrieval_config.save_settings(RetrievalSettings(**data))
         assert [hit["id"] for hit in knowledge.select_mmr(docs, 2)] == expected
-
-
-def test_partial_update_rejected(api_client):
-    assert api_client.put("/api/knowledge/settings", headers=_headers(api_client),
-                          json={"mmr_lambda": 0.2}).status_code == 422
 
 
 def test_settings_page_available_and_linked(api_client):

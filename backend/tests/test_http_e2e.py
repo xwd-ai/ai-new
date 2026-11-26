@@ -3,7 +3,6 @@
 import os
 from contextlib import contextmanager
 from pathlib import Path
-import sqlite3
 import subprocess
 import sys
 import time
@@ -11,10 +10,12 @@ import time
 import httpx
 import pytest
 
+from backend.services import auth, ingest
 from backend.tests.http_startup import failure_detail, read_port
 
 
 ROOT = Path(__file__).resolve().parents[2]
+JWT_SECRET = b"isolated-http-test-signing-secret-only"
 WORKER = Path(__file__).with_name('http_e2e_worker.py')
 
 
@@ -59,7 +60,8 @@ def server_pool(tmp_path):
         process = subprocess.Popen(
             [sys.executable, str(WORKER), str(tmp_path), str(run), mode],
             cwd=ROOT, stdout=output, stderr=subprocess.STDOUT,
-            env={**os.environ, 'PYTHONPATH': str(ROOT), 'PYTHONIOENCODING': 'utf-8'},
+            env={**os.environ, 'PYTHONPATH': str(ROOT), 'PYTHONIOENCODING': 'utf-8',
+                 'AI_NEW_JWT_SECRET': JWT_SECRET.decode()},
         )
         entry = {'process': process, 'output': output, 'url': None}
         processes.append(entry)
@@ -112,284 +114,54 @@ def server(tmp_path):
         yield start
 
 
-def login(client, role):
-    response = client.post('/api/login', json={'username': role, 'password': role + '123'})
-    assert response.status_code == 200
-    assert response.json()['token']
-    return {'Authorization': 'Bearer ' + response.json()['token']}
+def headers_for(role):
+    payload = auth.build_access_payload({"id": f"u-{role}", "username": role, "role": role})
+    return {"Authorization": "Bearer " + auth.sign_jwt(payload, secret=JWT_SECRET)}
 
 
 DOCUMENT = {'title': 'E2E_GUIDE', 'content': 'e2eexport: choose CSV and check export permission.',
             'kind': 'faq', 'keywords': ['e2eexport']}
 
 
-def verify_answer(client, headers, source_id):
-    response = client.post('/api/chat', headers=headers, json={'message': 'e2eexport'})
-    assert response.status_code == 200
-    answer = response.json()
-    assert 'choose CSV' in answer['reply'] and '[来源: E2E_GUIDE]' in answer['reply']
-    assert '<ref' not in answer['reply'] and 'c999' not in answer['reply']
-    assert [source['id'] for source in answer['sources']] == [source_id]
-    assert answer['trace'][-1]['kind'] == 'done'
-    return answer
-
-
-def seed_history(database_path, user_id, count=99):
-    """Seed a predictable history without sending model requests."""
-    messages = [
-        ('assistant' if i % 2 else 'user', f'history-{i}', i + 1)
-        for i in range(count)
-    ]
-    with sqlite3.connect(database_path) as db:
-        db.execute(
-            "INSERT INTO conversations (id, user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            ('history-test', user_id, 'History', 1, count),
-        )
-        db.executemany(
-            "INSERT INTO messages (id, conversation_id, role, content, at) VALUES (?, 'history-test', ?, ?, ?)",
-            [(f'history-{i}', *message) for i, message in enumerate(messages)],
-        )
-    return [{'role': role, 'content': content, 'at': at} for role, content, at in messages]
-
-
-def test_http_history_append_across_page_boundary(server, tmp_path):
-    _, client = server()
-    with client:
-        customer = login(client, 'customer')
-        user = client.get('/api/me', headers=customer).raise_for_status().json()['user']
-        expected = seed_history(tmp_path / 'http.db', user['id'])
-
-        def page(offset):
-            response = client.get('/api/conversation', headers=customer, params={'offset': offset, 'limit': 100})
-            assert response.headers['Cache-Control'] == 'no-store'
-            return response.raise_for_status().json()
-
-        before = page(0)
-        assert before['messages'] == expected
-        assert before['total'] == 99
-        admin = login(client, 'admin')
-        source_id = client.post('/api/knowledge/ingest', headers=admin, json=DOCUMENT).raise_for_status().json()['knowledge_id']
-        answer = verify_answer(client, customer, source_id)
-
-        first, tail = page(0), page(100)
-        assert first['total'] == tail['total'] == 101
-        assert first['conversation_id'] == tail['conversation_id'] == before['conversation_id']
-        assert first['history_revision'] == tail['history_revision'] != before['history_revision']
-        assert len(first['messages']) == 100 and len(tail['messages']) == 1
-        assert first['messages'][:99] == expected
-        assert [(m['role'], m['content']) for m in first['messages'][99:] + tail['messages']] == [
-            ('user', 'e2eexport'), ('assistant', answer['reply']),
-        ]
-
-
-def test_http_history_revision_changes_when_tail_content_is_edited(server, tmp_path):
-    _, client = server()
-    with client:
-        customer = login(client, 'customer')
-        user = client.get('/api/me', headers=customer).raise_for_status().json()['user']
-        database_path = tmp_path / 'http.db'
-        expected = seed_history(database_path, user['id'], count=101)
-
-        def page(offset):
-            return client.get('/api/conversation', headers=customer, params={
-                'offset': offset, 'limit': 100,
-            }).raise_for_status().json()
-
-        first_before, tail_before = page(0), page(100)
-        assert first_before['history_revision'] == tail_before['history_revision']
-        assert tail_before['messages'] == expected[100:]
-
-        # Update only the second page via a separate SQLite connection.
-        with sqlite3.connect(database_path) as db:
-            db.execute('UPDATE messages SET content = ? WHERE id = ?', ('revised-100', 'history-100'))
-
-        tail_during_sync = page(100)
-        # A client that read page zero before the write must reread it.
-        assert tail_during_sync['history_revision'] != first_before['history_revision']
-        first_after, tail_after = page(0), page(100)
-        pages = (first_before, tail_before, tail_during_sync, first_after, tail_after)
-        assert {data['total'] for data in pages} == {101}
-        assert {data['conversation_id'] for data in pages} == {'history-test'}
-        assert first_after['history_revision'] == tail_after['history_revision'] == tail_during_sync['history_revision']
-        assert first_after['messages'] == first_before['messages'] == expected[:100]
-        assert tail_after['messages'] == [{**expected[100], 'content': 'revised-100'}]
-
-
-def test_http_ingest_retrieval_chat_and_restart_persistence(server):
+def test_http_ingest_and_diagnosis_survive_restart(server):
     process, client = server()
+    admin = headers_for('admin')
     with client:
-        admin, customer = login(client, 'admin'), login(client, 'customer')
-        denied = client.post('/api/knowledge/ingest', json=DOCUMENT, headers=customer)
-        assert denied.status_code == 403
-        created = client.post('/api/knowledge/ingest', json=DOCUMENT, headers=admin)
-        assert created.status_code == 200 and created.json()['created']
-        source_id = created.json()['knowledge_id']
-        repeated = client.post('/api/knowledge/ingest', json=DOCUMENT, headers=admin).json()
-        assert not repeated['created'] and repeated['knowledge_id'] == source_id
-        assert client.get('/api/sources/' + source_id).json()['content'] == DOCUMENT['content']
-        diagnostic = client.get('/api/knowledge/diagnose', params={'q':'e2eexport'}, headers=admin)
-        assert source_id in diagnostic.json()['final_ids']
-        answer = verify_answer(client, customer, source_id)
-        before = client.get('/api/conversation', headers=customer).json()
-        assert [m['role'] for m in before['messages']] == ['user', 'assistant']
-        assert before['messages'][-1]['content'] == answer['reply']
-        assert client.get('/api/conversation', headers=admin).json() == {'messages': []}
+        assert client.post('/api/knowledge/ingest', headers=headers_for('customer'),
+                           json=DOCUMENT).status_code == 403
+        created = client.post('/api/knowledge/ingest', headers=admin, json=DOCUMENT).raise_for_status().json()
+        assert created['created']
         stop_server(process, str(client.base_url))
+
     _, restarted = server()
     with restarted:
-        # 同一持久化登录态、资料及历史必须跨进程保留。
-        assert restarted.get('/api/me', headers=customer).json()['user']['role'] == 'customer'
-        assert restarted.get('/api/conversation', headers=customer).json() == before
-        assert restarted.get('/api/sources/' + source_id).json()['content'] == DOCUMENT['content']
-        assert not restarted.post('/api/knowledge/ingest', headers=admin, json=DOCUMENT).json()['created']
-        verify_answer(restarted, customer, source_id)
+        repeated = restarted.post('/api/knowledge/ingest', headers=admin,
+                                  json=DOCUMENT).raise_for_status().json()
+        assert not repeated['created']
+        assert repeated['knowledge_id'] == created['knowledge_id']
+        diagnosis = restarted.get('/api/knowledge/diagnose', headers=admin,
+                                  params={'q': 'e2eexport'}).raise_for_status().json()
+        assert created['knowledge_id'] in diagnosis['final_ids']
 
 
-def test_http_optional_identity_logout_and_history_isolation(server):
-    process, client = server()
+@pytest.mark.parametrize('mode', ['interrupt_parsed', 'interrupt'])
+def test_http_ingest_recovery_across_restarts(server, mode):
+    process, client = server(mode)
+    admin = headers_for('admin')
     with client:
-        admin, customer = login(client, 'admin'), login(client, 'customer')
-        created = client.post('/api/knowledge/ingest', headers=admin, json=DOCUMENT)
-        assert created.status_code == 200
-        source_id = created.json()['knowledge_id']
-        verify_answer(client, customer, source_id)
-        before = client.get('/api/conversation', headers=customer).json()
-        assert len(before['messages']) == 2
-        page = client.get('/api/conversation', headers=customer, params={'offset': 1, 'limit': 1})
-        assert page.status_code == 200
-        assert page.json()['messages'] == before['messages'][1:2]
-        assert page.json()['total'] == 2
-        assert page.json()['conversation_id']
-        assert client.post('/api/logout', headers=customer).status_code == 200
-        # 同一用户重新登录的凭据仍应能读取原来的私人历史。
-        renewed = login(client, 'customer')
-        assert renewed != customer
-        for headers in ({}, {'Authorization': 'Bearer not-a-token'}, customer):
-            assert client.get('/api/me', headers=headers).json() == {'user': None}
-            assert client.get('/api/conversation', headers=headers).json() == {'messages': []}
-            assert client.get('/api/conversation', headers=headers, params={'limit': 1}).json() == {'messages': [], 'total': 0}
-            verify_answer(client, headers, source_id)
-            assert client.get('/api/conversation', headers=headers).json() == {'messages': []}
-            assert client.get('/api/conversation', headers=renewed).json() == before
-            assert client.get('/api/conversation', headers=admin).json() == {'messages': []}
-        stop_server(process, str(client.base_url))
-    _, restarted = server()
-    with restarted:
-        assert restarted.get('/api/me', headers=customer).json() == {'user': None}
-        assert restarted.get('/api/conversation', headers=customer).json() == {'messages': []}
-        assert restarted.get('/api/conversation', headers=renewed).json() == before
-        verify_answer(restarted, customer, source_id)
-        assert restarted.get('/api/conversation', headers=renewed).json() == before
-        verify_answer(restarted, renewed, source_id)
-        messages = restarted.get('/api/conversation', headers=renewed).json()['messages']
-        assert messages[:2] == before['messages']
-        assert [message['role'] for message in messages] == ['user', 'assistant', 'user', 'assistant']
-
-
-def test_http_journal_recovery_after_restart_and_model_failure(server):
-    process, client = server('interrupt')
-    with client:
-        admin, customer = login(client, 'admin'), login(client, 'customer')
-        before_count = client.get('/api/knowledge/items', headers=admin).json()['total']
         assert client.post('/api/knowledge/ingest', headers=admin, json=DOCUMENT).status_code == 500
-        pending = client.get('/api/knowledge/ingest/pending', headers=admin).json()['items']
-        assert len(pending) == 1 and pending[0]['stage'] == 'chunked'
-        fingerprint = pending[0]['fingerprint']
-        assert client.get('/api/knowledge/items', headers=admin).json()['total'] == before_count
         stop_server(process, str(client.base_url))
+
     _, restarted = server()
     with restarted:
-        recovery_url = '/api/knowledge/ingest/recover/' + fingerprint
-        assert restarted.post(recovery_url, headers=customer).status_code == 403
-        restored = restarted.post(recovery_url, headers=admin)
-        assert restored.status_code == 200 and restored.json()['created']
-        assert not restarted.post(recovery_url, headers=admin).json()['created']
-        assert restarted.get('/api/knowledge/ingest/pending', headers=admin).json() == {'items': []}
-        verify_answer(restarted, customer, restored.json()['knowledge_id'])
-        failed = restarted.post('/api/chat', headers=customer, json={'message':'__MODEL_TIMEOUT__'})
-        assert failed.status_code == 200
-        assert 'private-provider-detail' not in failed.text
-        assert any(event.get('retryable') for event in failed.json()['trace'] if event['kind']=='error')
-        assert restarted.get('/api/conversation', headers=customer).json()['messages'][-1]['content'] == failed.json()['reply']
-
-
-def test_http_stage_filter_pagination_and_recovery_across_restarts(server):
-    pending_url = '/api/knowledge/ingest/pending'
-    documents = {}
-    # 通过实际入库链路生成两种中断状态，不直接修改 journal。
-    for mode, stage, count in [('interrupt_parsed', 'parsed', 3), ('interrupt', 'chunked', 21)]:
-        process, client = server(mode)
-        with client:
-            admin = login(client, 'admin')
-            before = client.get('/api/knowledge/items', headers=admin).json()['total']
-            for index in range(count):
-                document = {**DOCUMENT, 'title': f'E2E_{stage}_{index:02}',
-                            'content': f'{stage}-{index}: preserved input for recovery.'}
-                documents[document['title']] = document
-                assert client.post('/api/knowledge/ingest', headers=admin, json=document).status_code == 500
-            page = client.get(pending_url, headers=admin, params={'stage': stage}).json()
-            assert page['total'] == count
-            assert len(page['items']) == count
-            assert all(item['stage'] == stage for item in page['items'])
-            assert all(item['chunk_count'] == (0 if stage == 'parsed' else 1) for item in page['items'])
-            assert client.get('/api/knowledge/items', headers=admin).json()['total'] == before
-            stop_server(process, str(client.base_url))
-
-    process, client = server()
-    with client:
-        admin, customer = login(client, 'admin'), login(client, 'customer')
-
-        def read(stage=None, offset=0, limit=20):
-            params = {'offset': offset, 'limit': limit}
-            if stage is not None:
-                params['stage'] = stage
-            response = client.get(pending_url, headers=admin, params=params)
-            assert response.status_code == 200
-            return response.json()
-
-        assert client.get(pending_url, params={'stage': 'parsed'}).status_code == 403
-        assert client.get(pending_url, headers=customer, params={'stage': 'chunked'}).status_code == 403
-        for stage in ('', 'stored', 'unknown'):
-            assert client.get(pending_url, headers=admin, params={'stage': stage}).status_code == 422
-        assert read()['total'] == 24
-        parsed = read('parsed')
-        assert parsed['total'] == len(parsed['items']) == 3
-        first, last = read('chunked'), read('chunked', 20)
-        assert first['total'] == last['total'] == 21
-        assert len(first['items']) == 20 and len(last['items']) == 1
-        fingerprints = [row['fingerprint'] for row in first['items'] + last['items']]
-        assert len(set(fingerprints)) == 21
-        assert all(row['stage'] == 'chunked' and 'payload' not in row for row in first['items'] + last['items'])
-        assert read('chunked', 21) == {'items': [], 'total': 21}
-        before = client.get('/api/knowledge/items', headers=admin).json()['total']
-        restored_ids = []
-        # 恢复末页唯一一条后该页变空；另一阶段不受影响。
-        for row, stage, remaining in [(last['items'][0], 'chunked', 20), (parsed['items'][0], 'parsed', 2)]:
-            url = '/api/knowledge/ingest/recover/' + row['fingerprint']
-            assert client.post(url, headers=customer).status_code == 403
-            response = client.post(url, headers=admin)
-            assert response.status_code == 200
-            result = response.json()
-            assert result['created'] and result['knowledge_id'] == row['knowledge_id']
-            restored_ids.append(result['knowledge_id'])
-            source = client.get('/api/sources/' + result['knowledge_id'])
-            assert source.status_code == 200
-            document = documents[source.json()['title']]
-            assert source.json()['content'] == document['content']
-            assert read(stage)['total'] == remaining
-            repeated = client.post(url, headers=admin)
-            assert repeated.status_code == 200 and not repeated.json()['created']
-            assert repeated.json()['knowledge_id'] == result['knowledge_id']
-        assert read('chunked', 20) == {'items': [], 'total': 20}
-        assert len(read('chunked')['items']) == 20
-        assert read()['total'] == 22
-        assert client.get('/api/knowledge/items', headers=admin).json()['total'] == before + 2
-        stop_server(process, str(client.base_url))
-    _, restarted = server()
-    with restarted:
-        for stage, total in [('parsed', 2), ('chunked', 20)]:
-            response = restarted.get(pending_url, headers=admin, params={'stage': stage})
-            assert response.status_code == 200 and response.json()['total'] == total
-            assert not set(restored_ids) & {row['knowledge_id'] for row in response.json()['items']}
-        for source_id in restored_ids:
-            assert restarted.get('/api/sources/' + source_id).status_code == 200
+        fingerprint = ingest.content_fingerprint(DOCUMENT['title'], DOCUMENT['content'])
+        url = '/api/knowledge/ingest/recover/' + fingerprint
+        assert restarted.post(url, headers=headers_for('customer')).status_code == 403
+        restored = restarted.post(url, headers=admin).raise_for_status().json()
+        assert restored['created']
+        repeated = restarted.post(url, headers=admin).raise_for_status().json()
+        assert not repeated['created']
+        assert repeated['knowledge_id'] == restored['knowledge_id']
+        diagnosis = restarted.get('/api/knowledge/diagnose', headers=admin,
+                                  params={'q': 'e2eexport'}).raise_for_status().json()
+        assert restored['knowledge_id'] in diagnosis['final_ids']

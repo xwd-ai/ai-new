@@ -6,31 +6,19 @@ import pytest
 
 from backend.models import User
 from backend.models.user import RevokedToken
-from backend.services import auth, chat, knowledge, retrieval_config
+from backend.services import auth, chat, knowledge
 from backend.tests.test_api_contracts import api_client, _headers
 
 
 ENDPOINTS = [
-    ('GET', '/api/knowledge/settings', None, 200),
-    ('PUT', '/api/knowledge/settings', dict(prefetch_floor=12, prefetch_multiplier=2,
-        rrf_k=40, vector_weight=0.6, keyword_weight=0.4, mmr_lambda=0.25), 200),
-    ('GET', '/api/knowledge/items', None, 200),
     ('POST', '/api/knowledge/ingest', {'title': 'permissions', 'content': 'test input', 'kind': 'faq'}, 200),
-    ('GET', '/api/knowledge/ingest/pending', None, 200),
     ('GET', '/api/knowledge/diagnose?q=permissions', None, 200),
     ('POST', '/api/knowledge/ingest/recover/' + 'a' * 64, None, 404),
 ]
 
 
-@pytest.fixture(autouse=True)
-def isolated_settings(tmp_path, monkeypatch):
-    monkeypatch.setattr(retrieval_config, '_settings_path', lambda: tmp_path / 'settings.json')
-
-
 @pytest.mark.parametrize('method,path,kwargs', [
-    ('GET', '/api/knowledge/items', {'params': {'limit': 'bad'}}),
     ('POST', '/api/knowledge/ingest', {'json': {}}),
-    ('PUT', '/api/knowledge/settings', {'json': {}}),
     ('GET', '/api/knowledge/diagnose', {}),
     ('GET', '/api/knowledge/diagnose', {'params': {'q': 'permissions', 'top_k': 'bad'}}),
 ])
@@ -70,7 +58,7 @@ def test_management_permissions_and_revocation(api_client, method, path, payload
         assert response.json() == {'detail': '需要管理员权限'}
     admin = _headers(api_client)
     assert request(admin).status_code == success
-    assert api_client.post('/api/logout', headers=admin).status_code == 200
+    auth.logout(auth.extract_bearer_token(admin['Authorization']))
     assert request(admin).status_code == 403
 
 

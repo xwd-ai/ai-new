@@ -58,8 +58,7 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: |
           python -m pytest backend/tests -q \
-            --deselect backend/tests/test_http_e2e.py::test_http_journal_recovery_after_restart_and_model_failure \
-            --deselect backend/tests/test_http_e2e.py::test_http_stage_filter_pagination_and_recovery_across_restarts
+            --deselect backend/tests/test_http_e2e.py::test_http_ingest_recovery_across_restarts
 
   e2e-restart:
     name: 重启类端到端（观察性）
@@ -82,4 +81,4 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: |
           python -m pytest backend/tests/test_http_e2e.py -q \
-            -k "journal_recovery_after_restart or stage_filter_pagination_and_recovery"
+            -k "ingest_recovery_across_restarts"

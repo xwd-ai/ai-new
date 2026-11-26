@@ -3,7 +3,6 @@
 from pathlib import Path
 import faulthandler
 import json
-import re
 import socket
 import sys
 import time
@@ -39,23 +38,9 @@ def main():
         connection.commit()
 
     with stage('services'):
-        from backend.services import chat, ingest, llm, retrieval_config
+        from backend.services import ingest, llm, retrieval_config
     ingest._checkpoint_path = lambda: root / 'checkpoints.json'
     retrieval_config._settings_path = lambda: root / 'retrieval_settings.json'
-
-    class LocalProvider:
-        def chat(self, messages):
-            if messages[-1]['content'] == '__MODEL_TIMEOUT__':
-                raise TimeoutError('private-provider-detail')
-            evidence = '\n'.join(m['content'] for m in messages if m['role']=='system'
-                                 and m['content'].startswith('以下是相关知识库资料'))
-            match = re.search(r'\[(c\d+)\] E2E_GUIDE\n([^\n]+)', evidence)
-            if match is None:
-                raise AssertionError('没有收到真实召回的测试资料')
-            return f'{match[2]} <ref id="{match[1]}"/> <ref id="c999"/>'
-
-    provider = LocalProvider()
-    chat._chat_provider = llm._default_provider = provider
 
     def reject_external_provider():
         raise AssertionError('HTTP 测试禁止装配外部模型')
@@ -76,9 +61,7 @@ def main():
 
     with stage('app_init'):
         from backend.main import app
-        from backend.tests.reference_api.app import mount_reference_routes
         import uvicorn
-        mount_reference_routes(app)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         with stage('listener'):
             listener.bind(('127.0.0.1', 0))

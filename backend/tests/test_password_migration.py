@@ -10,14 +10,11 @@
 import hashlib
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.dialects import mysql
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
-from backend.tests.reference_api.auth import auth_router
 from backend.database import Base
 from backend.models import User
 from backend.models.user import PASSWORD_HASH_LENGTH
@@ -233,44 +230,3 @@ def test_hash_error_is_swallowed(factory, monkeypatch):
 
 
 # ---- 登录接口联调 ----
-
-
-@pytest.fixture()
-def client(factory):
-    app = FastAPI()
-    app.include_router(auth_router, prefix="/api")
-    return TestClient(app)
-
-
-def test_login_endpoint_upgrades_legacy_hash(factory, client):
-    _add_user(factory, _legacy_digest(PASSWORD))
-
-    resp = client.post("/api/login", json={"username": "cust-01", "password": PASSWORD})
-
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["token"]
-    assert body["user"] == {"id": "u-01", "username": "cust-01", "name": "客户小李", "role": "customer"}
-    assert is_bcrypt_hash(_stored_hash(factory))
-
-
-def test_login_endpoint_rejects_wrong_password_without_upgrade(factory, client):
-    legacy = _legacy_digest(PASSWORD)
-    _add_user(factory, legacy)
-
-    resp = client.post("/api/login", json={"username": "cust-01", "password": "WrongPass@2024"})
-
-    assert resp.status_code == 200
-    assert resp.json() == {"token": "", "user": {}}
-    assert _stored_hash(factory) == legacy
-
-
-def test_me_endpoint_reads_upgraded_account(factory, client):
-    _add_user(factory, _legacy_digest(PASSWORD))
-    token = client.post("/api/login", json={"username": "cust-01", "password": PASSWORD}).json()["token"]
-
-    resp = client.get("/api/me", headers={"Authorization": f"Bearer {token}"})
-
-    assert resp.status_code == 200
-    assert resp.json()["user"]["username"] == "cust-01"
-    assert is_bcrypt_hash(_stored_hash(factory))

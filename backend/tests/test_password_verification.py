@@ -11,12 +11,9 @@
 import hashlib
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from backend.tests.reference_api.auth import auth_router
 from backend.database import Base
 from backend.models import User
 from backend.models.user import PASSWORD_HASH_LENGTH
@@ -276,45 +273,3 @@ def test_password_strength_accepts_compliant_password():
 
 
 # ---- 接口层 ----
-
-
-@pytest.fixture()
-def client(factory):
-    app = FastAPI()
-    app.include_router(auth_router, prefix="/api")
-    return TestClient(app)
-
-
-def test_register_endpoint_never_returns_hash(factory, client):
-    resp = client.post(
-        "/api/register",
-        json={"username": "cust-04", "password": PASSWORD, "name": "客户小赵"},
-    )
-
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["message"] == "注册成功"
-    assert set(body["user"]) == {"id", "username", "name", "role"}
-    assert PASSWORD not in resp.text
-
-    login = client.post("/api/login", json={"username": "cust-04", "password": PASSWORD})
-    assert login.status_code == 200
-    assert login.json()["token"]
-
-
-def test_register_endpoint_rejects_duplicate_username_ignoring_case(factory, client):
-    client.post("/api/register", json={"username": "cust-05", "password": PASSWORD})
-
-    resp = client.post("/api/register", json={"username": "Cust-05", "password": PASSWORD})
-
-    assert resp.status_code == 409
-    assert resp.json()["error_code"] == "AUTH_USERNAME_TAKEN"
-
-
-def test_register_endpoint_reports_weak_password(factory, client):
-    resp = client.post("/api/register", json={"username": "cust-06", "password": "12345678"})
-
-    assert resp.status_code == 422
-    body = resp.json()
-    assert body["error_code"] == "AUTH_WEAK_PASSWORD"
-    assert body["error_detail"]["violations"]

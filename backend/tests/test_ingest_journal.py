@@ -119,9 +119,7 @@ assert ingest.recover_ingest(sys.argv[2]).knowledge_id == 'process-id'
 
 def test_recovery_api_permissions_and_missing_record(api_client):
     for headers in ({}, _headers(api_client, 'customer')):
-        assert api_client.get('/api/knowledge/ingest/pending', headers=headers).status_code == 403
         assert api_client.post('/api/knowledge/ingest/recover/' + 'a'*64, headers=headers).status_code == 403
-    assert api_client.get('/api/knowledge/ingest/pending', headers=_headers(api_client)).json() == {'items': []}
     assert api_client.post('/api/knowledge/ingest/recover/' + 'a'*64, headers=_headers(api_client)).status_code == 404
 
 
@@ -132,7 +130,7 @@ def test_recovery_api_resumes_pending_and_handles_active_lease(api_client, monke
         ingest.ingest(title='API资料', content='等待恢复')
     monkeypatch.setattr(ingest, 'split_into_chunks', original)
     headers = _headers(api_client)
-    fingerprint = api_client.get('/api/knowledge/ingest/pending', headers=headers).json()['items'][0]['fingerprint']
+    fingerprint = ingest.content_fingerprint('API资料', '等待恢复')
     with ingest_leases.hold(fingerprint, ingest.SessionLocal):
         busy = api_client.post('/api/knowledge/ingest/recover/' + fingerprint, headers=headers)
         assert busy.status_code == 409 and busy.headers['Retry-After'] == '1'

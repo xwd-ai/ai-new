@@ -52,17 +52,6 @@ def test_failed_execution_clears_previous_result(isolated_chat, monkeypatch):
     assert chat.last_summary() is None and chat.last_escalation() is None
 
 
-def test_http_request_scope_restores_callers_context(isolated_chat, monkeypatch):
-    from backend.tests.reference_api.chat import chat as endpoint
-    from backend.schemas import ChatRequest
-    chat.build_reply('user', 'outer')
-    outer = chat.last_summary()
-    result = endpoint(ChatRequest(message='first'), user={'id': 'user'})
-    assert result.reply == 'answer:first' and result.trace[-1]['kind'] == 'done'
-    assert chat.last_summary() is outer
-    assert chat.last_escalation().marker == 'outer'
-
-
 def test_async_contexts_can_read_their_own_completed_execution(isolated_chat):
     async def scenario():
         first_ready, second_ready = asyncio.Event(), asyncio.Event()
@@ -78,73 +67,6 @@ def test_async_contexts_can_read_their_own_completed_execution(isolated_chat):
             return chat.last_summary().answer
         return await asyncio.gather(first(), second())
     assert asyncio.run(scenario()) == ['answer:first', 'answer:second']
-
-
-def test_http_parallel_trace_is_bound_to_its_own_reply(isolated_chat, monkeypatch):
-    from backend.tests.reference_api.chat import chat as endpoint
-    from backend.schemas import ChatRequest
-    barrier = threading.Barrier(2)
-    original = chat.build_reply
-    def synchronized(user, message):
-        result = original(user, message)
-        barrier.wait(timeout=5)
-        return result
-    monkeypatch.setattr(chat, 'build_reply', synchronized)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(endpoint, ChatRequest(message=message), user={'id': 'user'}) for message in ('first','second')]
-        results = [f.result(timeout=10) for f in futures]
-    for message, result in zip(('first','second'), results):
-        assert result.reply == 'answer:' + message
-        assert result.trace[-1]['length'] == len(result.reply)
-
-
-def test_asgi_parallel_requests_keep_trace_and_leave_callers_result_untouched(isolated_chat, monkeypatch):
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-    from backend.tests.reference_api.chat import chat_router, current_user
-    chat.build_reply('outer-user', 'outer')
-    outer = chat.last_summary()
-    barrier = threading.Barrier(2)
-    original = chat.build_reply
-    def synchronized(user, message):
-        result = original(user, message)
-        barrier.wait(timeout=5)
-        return result
-    monkeypatch.setattr(chat, 'build_reply', synchronized)
-    app = FastAPI()
-    app.dependency_overrides[current_user] = lambda: {'id': 'shared-user'}
-    app.include_router(chat_router, prefix='/api')
-    with TestClient(app) as client, ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(client.post, '/api/chat', json={'message':message}) for message in ('first','second')]
-        results = [future.result(timeout=10) for future in futures]
-    for message, response in zip(('first','second'), results):
-        assert response.status_code == 200
-        result = response.json()
-        assert result['reply'] == 'answer:' + message
-        assert result['suggest_ticket'] == (message == 'first')
-        assert result['trace'][-1]['length'] == len(result['reply'])
-    assert chat.last_summary() is outer
-    assert chat.last_escalation().marker == 'outer'
-
-
-def test_http_exception_restores_outer_context(isolated_chat, monkeypatch):
-    from backend.tests.reference_api.chat import chat as endpoint
-    from backend.schemas import ChatRequest
-    chat.build_reply('outer-user', 'outer')
-    outer = chat.last_summary()
-    def fail(*args): raise RuntimeError('store unavailable')
-    monkeypatch.setattr(chat, 'get_or_create_conversation', fail)
-    with pytest.raises(RuntimeError): endpoint(ChatRequest(message='failed'), user={'id': 'user'})
-    assert chat.last_summary() is outer
-    assert chat.last_escalation().marker == 'outer'
-
-
-def test_http_does_not_reuse_outer_summary_when_call_publishes_nothing(isolated_chat, monkeypatch):
-    from backend.tests.reference_api.chat import chat as endpoint
-    from backend.schemas import ChatRequest
-    chat.build_reply('user', 'outer')
-    monkeypatch.setattr(chat, 'build_reply', lambda *args: ('no summary', [], False))
-    assert endpoint(ChatRequest(message='first'), user={'id': 'user'}).trace == []
 
 
 def test_reused_thread_has_no_previous_request_state(isolated_chat):

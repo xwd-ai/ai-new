@@ -19,7 +19,7 @@ from openai import (
     RateLimitError,
 )
 
-from backend.tests.reference_api.chat import chat_router
+from backend.api.agent_internal import agent_router
 from backend import providers
 from backend.services import agent, chat, llm, tools
 
@@ -108,16 +108,11 @@ def test_tool_failure_has_classification_without_raw_exception():
 
 @pytest.fixture()
 def chat_client(monkeypatch):
-    # 隔离存储与检索，仅保留真实的 API → 编排 → Agent → provider 调用链。
-    monkeypatch.setattr(chat, "get_or_create_conversation", lambda _: "test-conversation")
-    monkeypatch.setattr(chat, "history", lambda _: [])
-    monkeypatch.setattr(chat, "append_turn", lambda *args: None)
-    monkeypatch.setattr(chat, "append_tried_step", lambda *args: None)
-    # 桩函数接受任意关键字参数：对话链路经 search_for_chat 调用时会传 top_k
+    monkeypatch.setenv("AGENT_INTERNAL_TOKEN", "test-agent")
     monkeypatch.setattr(chat.knowledge, "search_knowledge", lambda *args, **kwargs: [])
     app = FastAPI()
-    app.include_router(chat_router, prefix="/api")
-    with chat.execution_scope(), TestClient(app) as client:
+    app.include_router(agent_router)
+    with TestClient(app, headers={"X-Agent-Token": "test-agent"}) as client:
         yield client
 
 
@@ -127,7 +122,7 @@ def test_chat_api_uses_classified_failure_as_reply(chat_client, monkeypatch):
             raise TimeoutError(PRIVATE_DETAIL)
 
     monkeypatch.setattr(chat, "_chat_provider", TimeoutProvider())
-    response = chat_client.post("/api/chat", json={"message": "导出失败"})
+    response = chat_client.post("/internal/agent/reply", json={"user_id": "", "history": [], "message": "导出失败"})
 
     assert response.status_code == 200
     body = response.json()
@@ -147,7 +142,7 @@ def test_unconfigured_model_returns_actionable_hint(chat_client, monkeypatch, ke
     monkeypatch.setenv("DEEPSEEK_API_KEY", key)
     monkeypatch.setattr(chat, "_chat_provider", None)
     monkeypatch.setattr(llm, "_default_provider", None)
-    response = chat_client.post("/api/chat", json={"message": "导出失败"})
+    response = chat_client.post("/internal/agent/reply", json={"user_id": "", "history": [], "message": "导出失败"})
 
     assert response.status_code == 200
     body = response.json()
@@ -162,7 +157,7 @@ def test_chat_success_keeps_existing_response(chat_client, monkeypatch):
             return "请补充导出格式。"
 
     monkeypatch.setattr(chat, "_chat_provider", SuccessProvider())
-    response = chat_client.post("/api/chat", json={"message": "导出失败"})
+    response = chat_client.post("/internal/agent/reply", json={"user_id": "", "history": [], "message": "导出失败"})
 
     assert response.status_code == 200
     body = response.json()
@@ -184,7 +179,7 @@ def test_initial_retrieval_failure_can_still_answer(chat_client, monkeypatch):
 
     monkeypatch.setattr(chat.knowledge, "search_knowledge", fail)
     monkeypatch.setattr(chat, "_chat_provider", SuccessProvider())
-    response = chat_client.post("/api/chat", json={"message": "导出失败"})
+    response = chat_client.post("/internal/agent/reply", json={"user_id": "", "history": [], "message": "导出失败"})
 
     assert response.status_code == 200
     body = response.json()
@@ -218,7 +213,7 @@ def test_successful_retrieval_preserves_citations(chat_client, monkeypatch):
 
     monkeypatch.setattr(chat.knowledge, "search_knowledge", search)
     monkeypatch.setattr(chat, "_chat_provider", CitingProvider())
-    response = chat_client.post("/api/chat", json={"message": "导出失败"})
+    response = chat_client.post("/internal/agent/reply", json={"user_id": "", "history": [], "message": "导出失败"})
 
     assert response.status_code == 200
     body = response.json()
