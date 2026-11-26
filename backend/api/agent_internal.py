@@ -6,7 +6,7 @@ import os
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from backend.api.chat import stream_response
+from backend.api.agent_stream import stream_response
 from backend.api.ratelimit import enforce_chat_rate
 from backend.services import chat
 

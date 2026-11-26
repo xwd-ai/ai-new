@@ -19,7 +19,7 @@ from openai import (
     RateLimitError,
 )
 
-from backend.api.chat import chat_router
+from backend.tests.reference_api.chat import chat_router
 from backend import providers
 from backend.services import agent, chat, llm, tools
 

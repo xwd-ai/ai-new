@@ -53,7 +53,7 @@ def test_failed_execution_clears_previous_result(isolated_chat, monkeypatch):
 
 
 def test_http_request_scope_restores_callers_context(isolated_chat, monkeypatch):
-    from backend.api.chat import chat as endpoint
+    from backend.tests.reference_api.chat import chat as endpoint
     from backend.schemas import ChatRequest
     chat.build_reply('user', 'outer')
     outer = chat.last_summary()
@@ -81,7 +81,7 @@ def test_async_contexts_can_read_their_own_completed_execution(isolated_chat):
 
 
 def test_http_parallel_trace_is_bound_to_its_own_reply(isolated_chat, monkeypatch):
-    from backend.api.chat import chat as endpoint
+    from backend.tests.reference_api.chat import chat as endpoint
     from backend.schemas import ChatRequest
     barrier = threading.Barrier(2)
     original = chat.build_reply
@@ -101,7 +101,7 @@ def test_http_parallel_trace_is_bound_to_its_own_reply(isolated_chat, monkeypatc
 def test_asgi_parallel_requests_keep_trace_and_leave_callers_result_untouched(isolated_chat, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
-    from backend.api.chat import chat_router, current_user
+    from backend.tests.reference_api.chat import chat_router, current_user
     chat.build_reply('outer-user', 'outer')
     outer = chat.last_summary()
     barrier = threading.Barrier(2)
@@ -128,7 +128,7 @@ def test_asgi_parallel_requests_keep_trace_and_leave_callers_result_untouched(is
 
 
 def test_http_exception_restores_outer_context(isolated_chat, monkeypatch):
-    from backend.api.chat import chat as endpoint
+    from backend.tests.reference_api.chat import chat as endpoint
     from backend.schemas import ChatRequest
     chat.build_reply('outer-user', 'outer')
     outer = chat.last_summary()
@@ -140,7 +140,7 @@ def test_http_exception_restores_outer_context(isolated_chat, monkeypatch):
 
 
 def test_http_does_not_reuse_outer_summary_when_call_publishes_nothing(isolated_chat, monkeypatch):
-    from backend.api.chat import chat as endpoint
+    from backend.tests.reference_api.chat import chat as endpoint
     from backend.schemas import ChatRequest
     chat.build_reply('user', 'outer')
     monkeypatch.setattr(chat, 'build_reply', lambda *args: ('no summary', [], False))

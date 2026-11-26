@@ -19,13 +19,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from backend.api import tickets as api_tickets
+from backend.tests.reference_api import tickets as api_tickets
 from backend.database import Base
 from backend.models import Order, Product, Session, Ticket, User
 from backend.models.ticket import TicketErrorCode, TicketTransitionError
 from backend.services import auth as auth_service
 from backend.services import orders as orders_service
-from backend.services import tickets
+from backend.tests.reference_api import ticket_service as tickets
 
 PRO_FEATURES = ["批量导出", "团队协作", "工单支持"]
 

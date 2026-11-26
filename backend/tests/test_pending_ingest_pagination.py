@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import sessionmaker
 
-from backend.api import knowledge as api
+from backend.tests.reference_api import knowledge as api
 from backend.database import Base
 from backend.models import KnowledgeIngestJournal
 

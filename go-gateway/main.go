@@ -3,14 +3,8 @@
 // 定位是「入口」而不是「业务」：它不改写业务语义，只做几件在入口处才高效的事
 // —— 统一鉴权可观测、入口限流、SSE 流转发、超时与优雅关闭、pprof。
 //
-// 它刻意**不接管授权判定**：授权仍只有 Python 一处权威。网关注入的身份只用于
-// 日志与限流维度，不写进转发给 Python 的请求头 —— 否则 Python 必须信任该头，
-// 一旦 Python 被直接暴露，那个头就成了可伪造的身份来源。纵深防御的原则是
-// 「多一层校验」，不是「多一个信任源」。
-//
-// 所有依赖都可缺省：BACKEND_URL 是唯一必需项；没配 GO_BUSINESS_URL 或
-// RETRIEVAL_URL 时对应能力自动关闭，请求照常透传，不会因为某个旁路服务
-// 没部署而挡死主流程。这与项目里「远程服务只是加速，不是正确性依赖」一致。
+// 网关校验结果用于日志与限流；Go 业务服务和 Python 各自校验自己接收的请求。
+// 已迁移的公开接口固定转给 Go 业务服务，其余请求按路由交给 Python 或检索服务。
 package main
 
 import (
@@ -57,23 +51,15 @@ const (
 
 // config 是网关的全部可配置项，全部来自环境变量。
 type config struct {
-	addr                 string
-	backendURL           *url.URL // 必需：其余能力都挂在它前面
-	retrievalURL         *url.URL // 可选：提供 /api/retrieval/stream
-	businessURL          *url.URL // 可选：提供入口令牌校验
-	upstreamTimeout      time.Duration
-	rateLimit            float64 // 每秒补充的令牌数，<=0 表示关闭入口限流
-	rateBurst            int
-	pprof                bool
-	goPendingTickets     bool
-	goTicketWrites       bool
-	goTicketCreate       bool
-	goChat               bool
-	goSessionReadRefresh bool
-	goLogin              bool
-	goSessionRevocation  bool
-	goBusinessAPI        bool
-	frontendDir          string
+	addr            string
+	backendURL      *url.URL // 必需：其余能力都挂在它前面
+	retrievalURL    *url.URL // 可选：提供 /api/retrieval/stream
+	businessURL     *url.URL // 已迁移接口的业务服务地址
+	upstreamTimeout time.Duration
+	rateLimit       float64 // 每秒补充的令牌数，<=0 表示关闭入口限流
+	rateBurst       int
+	pprof           bool
+	frontendDir     string
 }
 
 var (
@@ -96,7 +82,7 @@ func main() {
 	cfg = loadConfig()
 
 	backendProxy = newBackendProxy(cfg.backendURL)
-	if (cfg.goPendingTickets || cfg.goTicketWrites || cfg.goTicketCreate || cfg.goChat || cfg.goSessionReadRefresh || cfg.goLogin || cfg.goSessionRevocation || cfg.goBusinessAPI) && cfg.businessURL != nil {
+	if cfg.businessURL != nil {
 		businessProxy = newBackendProxy(cfg.businessURL)
 	}
 	businessHTTP = &http.Client{Timeout: probeTimeout, Transport: newTransport(false)}
@@ -177,51 +163,22 @@ func registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
 	}
 
-	if businessProxy != nil {
-		if cfg.goBusinessAPI {
-			for _, pattern := range []string{
-				"POST /api/register", "GET /api/sources/{source_id}", "GET /api/knowledge/items",
-				"GET /api/knowledge/ingest/pending", "GET /api/knowledge/settings", "PUT /api/knowledge/settings",
-				"GET /api/order", "GET /api/order/list",
-				"GET /api/order/scope", "GET /api/order/feature-scope", "GET /api/order/renewal",
-				"GET /api/order/admin", "GET /api/order/admin/{order_id}",
-				"POST /api/order/expire", "GET /api/tickets", "GET /api/tickets/stats",
-				"POST /api/tickets/reply", "POST /api/tickets/expire",
-				"POST /api/tickets/batch-close", "POST /api/tickets/batch-transfer", "POST /api/tickets/transfer",
-				"GET /api/tickets/{ticket_id}", "GET /api/tickets/{ticket_id}/transfer-decision",
-			} {
-				mux.HandleFunc(pattern, proxyBusinessPublic)
-			}
-		}
-		if cfg.goSessionRevocation {
-			mux.HandleFunc("POST /api/logout", proxyBusinessPublic)
-			mux.HandleFunc("POST /api/sessions/cleanup", proxyBusinessPublic)
-		}
-		if cfg.goLogin {
-			mux.HandleFunc("POST /api/login", proxyBusinessPublic)
-		}
-		if cfg.goSessionReadRefresh {
-			mux.HandleFunc("GET /api/me", proxyBusinessPublic)
-			mux.HandleFunc("POST /api/refresh", proxyBusinessPublic)
-		}
-		if cfg.goChat {
-			mux.HandleFunc("GET /api/conversation", proxyBusinessPublic)
-			mux.HandleFunc("POST /api/chat", proxyBusinessPublic)
-			mux.HandleFunc("POST /api/chat/stream", proxyBusinessPublic)
-		}
-		if cfg.goPendingTickets {
-			mux.HandleFunc("GET /api/tickets/pending", proxyBusinessPublic)
-		} else if cfg.goBusinessAPI {
-			mux.Handle("GET /api/tickets/pending", backendProxy)
-		}
-		if cfg.goTicketCreate {
-			mux.HandleFunc("POST /api/tickets", proxyBusinessPublic)
-		}
-		if cfg.goTicketWrites {
-			for _, operation := range []string{"confirm", "cancel", "status"} {
-				mux.HandleFunc("POST /api/tickets/"+operation, proxyBusinessPublic)
-			}
-		}
+	for _, pattern := range []string{
+		"POST /api/register", "POST /api/login", "GET /api/me",
+		"POST /api/refresh", "POST /api/logout", "POST /api/sessions/cleanup",
+		"POST /api/chat", "POST /api/chat/stream", "GET /api/conversation",
+		"GET /api/sources/{source_id}", "GET /api/knowledge/items",
+		"GET /api/knowledge/ingest/pending", "GET /api/knowledge/settings", "PUT /api/knowledge/settings",
+		"GET /api/order", "GET /api/order/list", "GET /api/order/scope",
+		"GET /api/order/feature-scope", "GET /api/order/renewal",
+		"GET /api/order/admin", "GET /api/order/admin/{order_id}", "POST /api/order/expire",
+		"GET /api/tickets", "POST /api/tickets", "GET /api/tickets/stats", "GET /api/tickets/pending",
+		"GET /api/tickets/{ticket_id}", "GET /api/tickets/{ticket_id}/transfer-decision",
+		"POST /api/tickets/confirm", "POST /api/tickets/cancel", "POST /api/tickets/status",
+		"POST /api/tickets/reply", "POST /api/tickets/expire", "POST /api/tickets/transfer",
+		"POST /api/tickets/batch-close", "POST /api/tickets/batch-transfer",
+	} {
+		mux.HandleFunc(pattern, proxyBusinessPublic)
 	}
 
 	registerFrontendRoutes(mux, cfg.frontendDir)
@@ -229,6 +186,12 @@ func registerRoutes(mux *http.ServeMux) {
 }
 
 func proxyBusinessPublic(w http.ResponseWriter, r *http.Request) {
+	if businessProxy == nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"Go 业务服务未配置"}`))
+		return
+	}
 	upstream := r.Clone(r.Context())
 	upstream.URL.Path = "/public" + r.URL.Path
 	upstream.URL.RawPath = ""
@@ -383,7 +346,7 @@ type tokenClaims struct {
 // withAuth 在入口做一次令牌校验，把用户身份放进 context 供日志与限流使用。
 //
 // 三档行为，都不阻断主流程：
-//   - 未配置业务服务：不接管，Python 自己验（保持单服务部署时的原行为）；
+//   - 未配置业务服务：跳过入口预验签，由匹配的路由处理；
 //   - 无令牌：匿名放行（对话接口允许匿名）；
 //   - 有令牌：调业务服务验签。成功注入用户身份；失败或服务不可用只记录，
 //     仍按匿名放行 —— 鉴权服务抖动不该变成业务整体不可用。
@@ -405,7 +368,7 @@ func withAuth(next http.Handler) http.Handler {
 			w.Header().Set("X-Gateway-Auth", "unavailable")
 		case !claims.Valid:
 			// 无效令牌不在这里拒绝：匿名可访问的接口仍应正常工作，
-			// 需要登录的接口由 Python 统一返回 401，错误格式才不会出现两套。
+			// 需要登录的接口由对应的服务返回错误。
 			w.Header().Set("X-Gateway-Auth", "invalid")
 		default:
 			w.Header().Set("X-Gateway-Auth", "valid")
@@ -568,15 +531,6 @@ func loadConfig() config {
 	c.retrievalURL = optionalURL("RETRIEVAL_URL")
 	c.businessURL = optionalURL("GO_BUSINESS_URL")
 	c.frontendDir = strings.TrimSpace(os.Getenv("GATEWAY_FRONTEND_DIR"))
-	goPrimary := envBool("GATEWAY_GO_PRIMARY", false)
-	c.goPendingTickets = envBool("GATEWAY_GO_PENDING_TICKETS", goPrimary)
-	c.goTicketWrites = envBool("GATEWAY_GO_TICKET_WRITES", goPrimary)
-	c.goTicketCreate = envBool("GATEWAY_GO_TICKET_CREATE", goPrimary)
-	c.goChat = envBool("GATEWAY_GO_CHAT", goPrimary)
-	c.goSessionReadRefresh = envBool("GATEWAY_GO_SESSION_REFRESH", goPrimary)
-	c.goLogin = envBool("GATEWAY_GO_LOGIN", goPrimary)
-	c.goSessionRevocation = envBool("GATEWAY_GO_SESSION_REVOCATION", goPrimary)
-	c.goBusinessAPI = envBool("GATEWAY_GO_BUSINESS_API", goPrimary)
 
 	c.rateBurst = envInt("GATEWAY_RATE_BURST", int(c.rateLimit))
 	if c.rateLimit > 0 && c.rateBurst <= 0 {

@@ -19,7 +19,7 @@ from sqlalchemy.orm import sessionmaker
 from backend.database import Base
 from backend.models import Ticket
 from backend.models.ticket import TicketErrorCode, TicketValidationError
-from backend.services import tickets
+from backend.tests.reference_api import ticket_service as tickets
 
 
 @pytest.fixture()

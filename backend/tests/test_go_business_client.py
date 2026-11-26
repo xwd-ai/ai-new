@@ -20,7 +20,8 @@ from sqlalchemy.orm import sessionmaker
 from backend.database import Base
 from backend.models import Ticket
 from backend.models.ticket import TicketValidationError
-from backend.services import go_client, orders, tickets
+from backend.services import go_client, orders
+from backend.tests.reference_api import ticket_service as tickets
 
 REMOTE_URL = "http://127.0.0.1:8082"
 

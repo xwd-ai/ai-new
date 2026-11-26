@@ -12,7 +12,7 @@ from backend.models import Conversation, Message, TriedStep
 from backend.providers import ChatProvider
 
 # 对话链路：会话与消息的存取、已尝试步骤的记录，以及「查订单 + 检索手册 + 生成回答」的编排。
-# 路由定义在 backend.api.chat，此处仅承载存储与业务编排逻辑。
+# 对外对话路由由 Go 处理，Python Agent 通过内部接口调用生成逻辑。
 
 # 未注入时由 llm 在首次调用时装配，缺少配置不阻止应用导入。
 _chat_provider: ChatProvider | None = None

@@ -18,7 +18,7 @@ from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, Query
 
-from backend.api.auth import (
+from backend.tests.reference_api.auth import (
     BusinessErrorRoute,
     current_user,
     require_admin,
@@ -52,7 +52,8 @@ from backend.schemas.ticket import (
     ConfirmRequest,
     TransferRequest,
 )
-from backend.services import auth, orders, tickets
+from backend.services import auth, orders
+from backend.tests.reference_api import ticket_service as tickets
 
 
 def _as_ticket_error(exc: auth.AuthError) -> Optional[TicketBusinessError]:

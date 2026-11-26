@@ -50,60 +50,51 @@ func TestGoMigrationRoutes(t *testing.T) {
 		}
 	}
 	for _, tc := range []struct {
-		enabled            bool
 		method, path, want string
 	}{
-		{true, "GET", "/", "index.html"},
-		{true, "GET", "/admin", "admin.html"},
-		{true, "GET", "/assets/chat.js", "chat.js"},
-		{true, "GET", "/api/tickets/pending?all_users=true", "go:/public/api/tickets/pending"},
-		{false, "GET", "/api/tickets/pending?all_users=true", "python:/api/tickets/pending"},
-		{true, "GET", "/api/chat", "python:/api/chat"},
-		{true, "GET", "/api/me", "go:/public/api/me"},
-		{true, "POST", "/api/refresh", "go:/public/api/refresh"},
-		{false, "POST", "/api/refresh", "python:/api/refresh"},
-		{true, "POST", "/api/logout", "go:/public/api/logout"},
-		{true, "POST", "/api/sessions/cleanup", "go:/public/api/sessions/cleanup"},
-		{false, "POST", "/api/logout", "python:/api/logout"},
-		{true, "POST", "/api/register", "go:/public/api/register"},
-		{true, "GET", "/api/sources/ref-1", "go:/public/api/sources/ref-1"},
-		{true, "GET", "/api/knowledge/settings", "go:/public/api/knowledge/settings"},
-		{true, "PUT", "/api/knowledge/settings", "go:/public/api/knowledge/settings"},
-		{true, "GET", "/api/knowledge/items", "go:/public/api/knowledge/items"},
-		{true, "GET", "/api/knowledge/ingest/pending", "go:/public/api/knowledge/ingest/pending"},
-		{true, "GET", "/api/order", "go:/public/api/order"},
-		{true, "GET", "/api/order/list", "go:/public/api/order/list"},
-		{true, "GET", "/api/order/admin", "go:/public/api/order/admin"},
-		{true, "GET", "/api/order/admin/O-1", "go:/public/api/order/admin/O-1"},
-		{true, "GET", "/api/order/scope", "go:/public/api/order/scope"},
-		{true, "GET", "/api/order/feature-scope", "go:/public/api/order/feature-scope"},
-		{true, "GET", "/api/order/renewal", "go:/public/api/order/renewal"},
-		{true, "GET", "/api/tickets", "go:/public/api/tickets"},
-		{true, "GET", "/api/tickets/stats", "go:/public/api/tickets/stats"},
-		{true, "POST", "/api/order/expire", "go:/public/api/order/expire"},
-		{true, "POST", "/api/tickets/batch-close", "go:/public/api/tickets/batch-close"},
-		{true, "POST", "/api/tickets/batch-transfer", "go:/public/api/tickets/batch-transfer"},
-		{true, "POST", "/api/tickets/transfer", "go:/public/api/tickets/transfer"},
-		{true, "GET", "/api/tickets/T-1", "go:/public/api/tickets/T-1"},
-		{true, "GET", "/api/tickets/T-1/transfer-decision", "go:/public/api/tickets/T-1/transfer-decision"},
-		{true, "POST", "/api/tickets/reply", "go:/public/api/tickets/reply"},
-		{true, "POST", "/api/tickets/expire", "go:/public/api/tickets/expire"},
-		{false, "POST", "/api/register", "python:/api/register"},
-		{true, "POST", "/api/knowledge/ingest", "python:/api/knowledge/ingest"},
-		{true, "POST", "/api/login", "go:/public/api/login"},
-		{false, "POST", "/api/login", "python:/api/login"},
-		{true, "GET", "/api/conversation", "go:/public/api/conversation"},
-		{true, "POST", "/api/chat", "go:/public/api/chat"},
-		{true, "POST", "/api/chat/stream", "go:/public/api/chat/stream"},
-		{false, "POST", "/api/chat", "python:/api/chat"},
-		{true, "POST", "/api/tickets", "go:/public/api/tickets"},
-		{false, "POST", "/api/tickets", "python:/api/tickets"},
-		{true, "POST", "/api/tickets/confirm", "go:/public/api/tickets/confirm"},
-		{true, "POST", "/api/tickets/cancel", "go:/public/api/tickets/cancel"},
-		{true, "POST", "/api/tickets/status", "go:/public/api/tickets/status"},
-		{false, "POST", "/api/tickets/status", "python:/api/tickets/status"},
+		{"GET", "/", "index.html"},
+		{"GET", "/admin", "admin.html"},
+		{"GET", "/assets/chat.js", "chat.js"},
+		{"GET", "/api/tickets/pending?all_users=true", "go:/public/api/tickets/pending"},
+		{"GET", "/api/chat", "python:/api/chat"},
+		{"GET", "/api/me", "go:/public/api/me"},
+		{"POST", "/api/refresh", "go:/public/api/refresh"},
+		{"POST", "/api/logout", "go:/public/api/logout"},
+		{"POST", "/api/sessions/cleanup", "go:/public/api/sessions/cleanup"},
+		{"POST", "/api/register", "go:/public/api/register"},
+		{"GET", "/api/sources/ref-1", "go:/public/api/sources/ref-1"},
+		{"GET", "/api/knowledge/settings", "go:/public/api/knowledge/settings"},
+		{"PUT", "/api/knowledge/settings", "go:/public/api/knowledge/settings"},
+		{"GET", "/api/knowledge/items", "go:/public/api/knowledge/items"},
+		{"GET", "/api/knowledge/ingest/pending", "go:/public/api/knowledge/ingest/pending"},
+		{"GET", "/api/order", "go:/public/api/order"},
+		{"GET", "/api/order/list", "go:/public/api/order/list"},
+		{"GET", "/api/order/admin", "go:/public/api/order/admin"},
+		{"GET", "/api/order/admin/O-1", "go:/public/api/order/admin/O-1"},
+		{"GET", "/api/order/scope", "go:/public/api/order/scope"},
+		{"GET", "/api/order/feature-scope", "go:/public/api/order/feature-scope"},
+		{"GET", "/api/order/renewal", "go:/public/api/order/renewal"},
+		{"GET", "/api/tickets", "go:/public/api/tickets"},
+		{"GET", "/api/tickets/stats", "go:/public/api/tickets/stats"},
+		{"POST", "/api/order/expire", "go:/public/api/order/expire"},
+		{"POST", "/api/tickets/batch-close", "go:/public/api/tickets/batch-close"},
+		{"POST", "/api/tickets/batch-transfer", "go:/public/api/tickets/batch-transfer"},
+		{"POST", "/api/tickets/transfer", "go:/public/api/tickets/transfer"},
+		{"GET", "/api/tickets/T-1", "go:/public/api/tickets/T-1"},
+		{"GET", "/api/tickets/T-1/transfer-decision", "go:/public/api/tickets/T-1/transfer-decision"},
+		{"POST", "/api/tickets/reply", "go:/public/api/tickets/reply"},
+		{"POST", "/api/tickets/expire", "go:/public/api/tickets/expire"},
+		{"POST", "/api/knowledge/ingest", "python:/api/knowledge/ingest"},
+		{"POST", "/api/login", "go:/public/api/login"},
+		{"GET", "/api/conversation", "go:/public/api/conversation"},
+		{"POST", "/api/chat", "go:/public/api/chat"},
+		{"POST", "/api/chat/stream", "go:/public/api/chat/stream"},
+		{"POST", "/api/tickets", "go:/public/api/tickets"},
+		{"POST", "/api/tickets/confirm", "go:/public/api/tickets/confirm"},
+		{"POST", "/api/tickets/cancel", "go:/public/api/tickets/cancel"},
+		{"POST", "/api/tickets/status", "go:/public/api/tickets/status"},
 	} {
-		cfg = config{businessURL: businessURL, frontendDir: dir, goPendingTickets: tc.enabled, goTicketWrites: tc.enabled, goTicketCreate: tc.enabled, goChat: tc.enabled, goSessionReadRefresh: tc.enabled, goLogin: tc.enabled, goSessionRevocation: tc.enabled, goBusinessAPI: tc.enabled}
+		cfg = config{businessURL: businessURL, frontendDir: dir}
 		mux := http.NewServeMux()
 		registerRoutes(mux)
 		r := httptest.NewRequest(tc.method, tc.path, nil)
@@ -111,23 +102,13 @@ func TestGoMigrationRoutes(t *testing.T) {
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, r)
 		if w.Code != http.StatusOK || w.Body.String() != tc.want {
-			t.Errorf("%s enabled=%v got %d %q, want %q", tc.path, tc.enabled, w.Code, w.Body.String(), tc.want)
+			t.Errorf("%s got %d %q, want %q", tc.path, w.Code, w.Body.String(), tc.want)
 		}
-	}
-
-	cfg = config{businessURL: businessURL, goBusinessAPI: true}
-	pendingOverrideMux := http.NewServeMux()
-	registerRoutes(pendingOverrideMux)
-	pending := httptest.NewRecorder()
-	pendingOverrideMux.ServeHTTP(pending, httptest.NewRequest("GET", "/api/tickets/pending", nil))
-	if pending.Code != http.StatusOK || pending.Body.String() != "python:/api/tickets/pending" {
-		t.Fatalf("pending override was captured by detail route: %d %q", pending.Code, pending.Body.String())
 	}
 
 	businessProxy.Transport = routeTransport(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("upstream connection closed")
 	})
-	cfg.goTicketWrites = true
 	mux := http.NewServeMux()
 	registerRoutes(mux)
 	w := httptest.NewRecorder()
@@ -142,21 +123,11 @@ func TestGoMigrationRoutes(t *testing.T) {
 		t.Fatalf("Agent route exposed: %d", w.Code)
 	}
 
-}
+	businessProxy = nil
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("POST", "/api/login", nil))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("missing Go backend must return 503, got %d", w.Code)
+	}
 
-func TestGoPrimaryDefaultsAndOverrides(t *testing.T) {
-	for _, name := range []string{
-		"GATEWAY_GO_PENDING_TICKETS", "GATEWAY_GO_TICKET_WRITES", "GATEWAY_GO_TICKET_CREATE",
-		"GATEWAY_GO_CHAT", "GATEWAY_GO_SESSION_REFRESH", "GATEWAY_GO_LOGIN",
-		"GATEWAY_GO_SESSION_REVOCATION", "GATEWAY_GO_BUSINESS_API",
-	} {
-		t.Setenv(name, "")
-	}
-	t.Setenv("GATEWAY_GO_PRIMARY", "true")
-	t.Setenv("GATEWAY_GO_CHAT", "false")
-	c := loadConfig()
-	if !c.goPendingTickets || !c.goTicketWrites || !c.goTicketCreate ||
-		!c.goSessionReadRefresh || !c.goLogin || !c.goSessionRevocation || !c.goBusinessAPI || c.goChat {
-		t.Fatalf("unexpected primary route configuration: %+v", c)
-	}
 }

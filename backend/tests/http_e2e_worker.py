@@ -76,7 +76,9 @@ def main():
 
     with stage('app_init'):
         from backend.main import app
+        from backend.tests.reference_api.app import mount_reference_routes
         import uvicorn
+        mount_reference_routes(app)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         with stage('listener'):
             listener.bind(('127.0.0.1', 0))

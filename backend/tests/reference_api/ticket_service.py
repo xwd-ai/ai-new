@@ -39,7 +39,7 @@ from backend.models.ticket import (
     validate_transition,
 )
 from backend.services import auth as auth_service, go_client
-from backend.services.distlock import distributed_lock
+from backend.tests.reference_api.distlock import distributed_lock
 from backend.services.ticket_number import allocate_ticket_id, lock_mysql_ticket_counter
 
 # 状态取值别名：业务代码统一引用这些常量，避免裸字符串分散在各处函数里

@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from backend.api.auth import auth_router
+from backend.tests.reference_api.auth import auth_router
 from backend.database import Base
 from backend.models import User
 from backend.models.user import PASSWORD_HASH_LENGTH

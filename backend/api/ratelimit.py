@@ -13,9 +13,8 @@ from __future__ import annotations
 
 import os
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import HTTPException
 
-from backend.api.auth import current_user
 from backend.services import cache
 
 _WINDOW_SECONDS = 60
@@ -31,17 +30,6 @@ def _limit() -> int:
         return max(1, int(raw))
     except ValueError:
         return _DEFAULT_LIMIT
-
-
-def chat_rate_limit(
-    request: Request,
-    user: dict | None = Depends(current_user),
-) -> None:
-    """对话接口限流依赖：超出限额抛 429；缓存不可用时直接放行。
-
-    作为 FastAPI 依赖使用，与路由的 current_user 依赖共享同一次解析结果。
-    """
-    enforce_chat_rate(user["id"] if user else "anonymous")
 
 
 def enforce_chat_rate(identity: str) -> None:

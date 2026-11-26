@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import sessionmaker
 
-from backend.api import chat as chat_api
+from backend.tests.reference_api import chat as chat_api
 from backend.database import Base
 from backend.models import Conversation, Message
 from backend.services import chat

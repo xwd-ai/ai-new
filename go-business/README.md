@@ -66,8 +66,8 @@ query 会进入访问日志与浏览器历史，等于把凭据写进日志。
 ### 关于工单迁移的边界
 
 已迁：待确认列表（读）、`confirm` / `cancel` / `update_status`（写）。
-开启 `GATEWAY_GO_TICKET_CREATE=true` 后，网关将 `POST /api/tickets` 转给 Go。
-Go 从会话身份确定归属，缺省时从同一数据库读取排查步骤。Python Agent 内部调用仍使用原有建单逻辑。
+网关将 `POST /api/tickets` 转给 Go。
+Go 从会话身份确定归属，缺省时从同一数据库读取排查步骤。
 
 启用前先升级数据库到最新 Alembic 版本，并在 Go 与 Python 配置相同的 `AI_NEW_JWT_SECRET`。
 
@@ -170,7 +170,7 @@ internal/tickets/
 
 ## Go 对话入口
 
-开启 `GATEWAY_GO_CHAT=true` 后，网关将 `POST /api/chat`、`POST /api/chat/stream`
+网关将 `POST /api/chat`、`POST /api/chat/stream`
 和 `GET /api/conversation` 转给 Go。Go 使用共享 SQLite 读取历史并保存完整对话轮次，
 Python 提供 Agent、模型和原有对话限流。流式路径仍使用单轮检索与模型生成。
 
@@ -181,26 +181,26 @@ Python 提供 Agent、模型和原有对话限流。流式路径仍使用单轮�
 
 ## Go 会话查询与续期
 
-开启 `GATEWAY_GO_SESSION_REFRESH=true` 后，网关将 `GET /api/me` 和
+网关将 `GET /api/me` 和
 `POST /api/refresh` 转给 Go。设置与 Python 相同的 `AI_NEW_JWT_SECRET`、
 `AI_NEW_JWT_TTL` 和 `AI_NEW_JWT_LEEWAY`，两者共用 SQLite 会话数据。
 续期仍回传原 refresh token 和原到期时间，新签发的 access token 登记到会话表。
 
 
-开启 `GATEWAY_GO_LOGIN=true` 后，网关将 `POST /api/login` 转给 Go。
+网关将 `POST /api/login` 转给 Go。
 Go 校验现有 bcrypt 哈希和旧版 SHA-256 摘要，签发的两个令牌在同一事务登记。
 使用与 Python 相同的签名密钥、令牌有效期及 `BCRYPT_COST`，即可在 Go 登录后
 继续使用 Python 认证与登出路径。
 
 
-开启 `GATEWAY_GO_SESSION_REVOCATION=true` 后，网关将 `POST /api/logout` 和
+网关将 `POST /api/logout` 和
 `POST /api/sessions/cleanup` 交给 Go。登出事务会删除对应会话并登记作废状态，
 清理接口只允许管理员调用，在 JWT 时钟偏差窗口内保留作废记录。
 
 
 ## Go 业务接口
 
-开启 `GATEWAY_GO_BUSINESS_API=true`，通过原有 API 使用这些 Go 实现。
+网关通过原有 API 调用这些 Go 实现。
 订单与工单按登录身份限制查询范围，知识管理列表、回复和批量归档按原权限执行。
 
 - 账号注册
@@ -211,8 +211,6 @@ Go 校验现有 bcrypt 哈希和旧版 SHA-256 摘要，签发的两个令牌在
 Compose 默认让 Go 与 Python 连接同一个 MySQL 8 数据库。本地单独运行也支持 SQLite。Agent、模型调用、知识入库编排与恢复及检索诊断由 Python 提供。
 
 
-设置 `GATEWAY_GO_PRIMARY=true` 可一次启用所有已迁移的 Go 路由。
-显式设置任一分项开关为 `false` 可把该组请求切回 Python。
-启用前配置共享数据库、JWT 密钥及内部 Agent 地址和令牌，并升级数据库到当前 Alembic 版本。
+部署时配置共享数据库、JWT 密钥及内部 Agent 地址和令牌，并升级数据库到当前 Alembic 版本。
 
 Compose 通过共享卷存储检索设置。单独运行时，可以为两个服务指定相同的 `RETRIEVAL_SETTINGS_PATH`。

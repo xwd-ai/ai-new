@@ -5,11 +5,13 @@ import importlib
 
 import pytest
 import sqlalchemy as sa
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import sessionmaker
 
 from backend import database, models, seed
-from backend.api import chat as chat_api
+from backend.tests.reference_api import chat as chat_api
+from backend.tests.reference_api.app import mount_reference_routes
 from backend.services import auth, chat, ingest, knowledge, orders
 
 
@@ -39,7 +41,10 @@ def api_client(tmp_path, monkeypatch):
             ))
         db.commit()
     main = importlib.import_module("backend.main")
-    with chat.execution_scope(), TestClient(main.app) as client:
+    reference_app = FastAPI()
+    reference_app.router.routes.extend(main.app.router.routes)
+    mount_reference_routes(reference_app)
+    with chat.execution_scope(), TestClient(reference_app) as client:
         yield client
     engine.dispose()
 
@@ -196,3 +201,17 @@ def test_invalid_login_and_token_keep_existing_fallbacks(api_client):
     headers = {"Authorization": "Bearer invalid-token"}
     assert api_client.get("/api/conversation", headers=headers).json() == {"messages": []}
     assert api_client.post("/api/chat", headers=headers, json={"message": "导出失败"}).status_code == 200
+
+
+def test_runtime_exposes_only_active_python_api_routes():
+    main = importlib.import_module("backend.main")
+    paths = main.app.openapi()["paths"]
+    assert {path for path in paths if path.startswith("/api/")} == {
+        "/api/knowledge/ingest",
+        "/api/knowledge/ingest/recover/{fingerprint}",
+        "/api/knowledge/diagnose",
+    }
+    with TestClient(main.app) as client:
+        assert client.post("/api/login", json={}).status_code == 404
+        assert client.post("/api/chat", json={}).status_code == 404
+        assert client.get("/api/tickets").status_code == 404

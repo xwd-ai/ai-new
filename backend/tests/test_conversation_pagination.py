@@ -3,7 +3,7 @@
 import pytest
 import sqlalchemy as sa
 
-from backend.api import chat as api
+from backend.tests.reference_api import chat as api
 from backend.models import Conversation, Message
 from backend.tests.test_conversation_selection import selection_store
 

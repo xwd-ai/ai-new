@@ -16,7 +16,7 @@ import pytest
 from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 
-from backend.api.auth import (
+from backend.tests.reference_api.auth import (
     AuthErrorRoute,
     BusinessErrorRoute,
     build_error_body,
@@ -24,7 +24,7 @@ from backend.api.auth import (
     error_response,
     is_valid_error_code,
 )
-from backend.api.tickets import TicketErrorRoute
+from backend.tests.reference_api.tickets import TicketErrorRoute
 from backend.models import order as order_models
 from backend.models import ticket as ticket_models
 from backend.services import auth as auth_service
