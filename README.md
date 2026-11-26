@@ -1,213 +1,121 @@
 # AI 客服与工单助手
 
-> **带证据、能追问、可交接**的售后支持系统 —— 让 AI 客服真正把问题解决到底，而不是只回一句话。
+面向软件售后支持的 Go 后端项目。用户可以询问产品问题、查看回答引用的原文，并在自助排查未解决时提交工单。客服可在后台处理工单，管理员可更新知识库和检索配置。
 
-`Python 3.12+` · `FastAPI` · `Go 1.27` · `SQLAlchemy` · `SQLite` · `Alembic` · `3 万行代码` · `62 个测试文件`
+## 核心功能
 
----
-
-## 解决什么问题
-
-软件售后场景里，用户一句「专业版导出一直失败，解决不了就提交工单」，背后要做的事远不止给个回复：
-
-- 先确认他买的是不是专业版、在不在服务期 —— **不然建议了也白搭**
-- 从产品手册里找到对应的排查步骤，并且**说得清依据**
-- 试了还是不行 → 判断什么时候该转人工
-- 转人工前把「问题 + 已尝试步骤 + 排查依据」一起交接，**不让用户再讲第二遍**
-
-这个项目把这套闭环完整做出来了。
-
-## 核心能力
-
-| 能力         | 说明                                |
-| ---------- | --------------------------------- |
-| **带来源问答**  | 回答标注引用来源，可点击回查原文，不凭空作答            |
-| **多步排查**   | Agent 循环：思考 → 调用工具 → 观察结果 → 继续或结束 |
-| **混合检索**   | 关键词 + 向量双路召回，RRF 融合，重排后 MMR 去冗余   |
-| **订单范围判定** | 版本 + 服务期 + 功能，决定能否支持、要不要转人工       |
-| **幂等建单**   | 同一问题并发提交，最终只产生一张工单                |
-| **工单流转**   | 待确认 → 处理中 → 已解决 / 转人工，全程留痕        |
-| **知识入库**   | 文本入库 + 租约心跳 + 断点恢复，失败可续跑          |
-| **可观测**    | 执行过程事件流、检索诊断、离线评测报告               |
-
-## 技术亮点
-
-**① 回答必须带证据**  
-模型只输出引用句柄，服务端解码为真实来源，前端可点开原文。检索不到支撑内容时，宁可少说也不硬编。
-
-**② 幂等建单的三层防护**  
-`幂等键哈希` + `数据库写锁` + `唯一约束` —— 并发提交同一问题，最终只落一张单。
-
-**③ 检索链路的降级设计**  
-BM25 与向量双路召回后 RRF 融合；重排全部不过阈值时，先放宽、再保底、最后**宁可返回空** —— 弱召回时不假装有答案。
-
-**④ 入库的任务可靠性**  
-数据库租约 + 心跳续租 + journal 检查点，进程崩溃后可从 `parsed → chunked → stored` 断点恢复。
-
-**⑤ 工程完备度**  
-62 个测试文件覆盖幂等、状态机、租约竞争、迁移、HTTP 全链路；Alembic 管理表结构演进；内置离线检索评测（Precision / Recall / MRR / nDCG）。
-
-**⑥ 按能力边界划分语言**  
-生产默认拓扑是「Go 网关为唯一对外入口 + 三个 Go 服务」，Python 退为内部服务，只接受网关与内网调用。
-纯 CPU 的检索打分、分块与后处理由 Go 检索服务承担；订单查询、令牌校验、待确认工单列表，以及工单的 `confirm / cancel / update_status` 三个状态流转由 Go 业务服务承担——后者只涉及规则校验、单表更新与时间线追加，不碰建单的取号与三层幂等锁；反向代理、入口鉴权、限流、SSE 转发、pprof 与优雅关闭由 Go 网关承担。
-建单、批量操作与 LLM 编排留在 Python —— 建单依赖 `MAX(id)+1` 的应用层取号，跨语言写入必然撞号，要迁必须先把主键分配换成数据库侧保证；模型适配与多轮编排的生态也在 Python。
-已迁移的公开业务接口固定由 Go 处理。Python 内部调用的检索计算保留故障降级。
+- **知识问答**：Agent 根据问题检索产品资料、调用工具并给出排查建议。回答支持来源回查与 SSE 流式输出。
+- **订单与服务范围**：根据产品版本、服务期和功能判断客户可获得的支持。
+- **工单闭环**：支持草稿确认、回复、状态流转和转人工。转交时保留问题、已尝试的步骤和相关证据，并记录操作时间线。重复提交按幂等键处理。
+- **知识库管理**：支持文本入库、检索诊断和中断恢复。入库通过租约、心跳和任务记录管理 `parsed → chunked → stored` 各阶段。
 
 ## 架构
 
-```
-前端（原生 HTML / JS）
-  ├─ 客户工作台 ── 对话、来源回查、执行过程
-  └─ 管理后台 ──── 工单、知识库、检索设置
-          │ HTTP
-网关（Go :8080）—— 唯一对外入口，生产只暴露此端口
-  ├─ 反向代理 → Python
-  ├─ 入口鉴权   经业务服务验签，结果用于日志与限流维度
-  ├─ 入口限流   token bucket，按用户 / IP 分桶
-  ├─ /api/retrieval/stream   SSE 阶段进度转发
-  └─ /debug/pprof            性能剖析
-          │ HTTP
-后端（FastAPI :8000，仅内网）—— LLM 编排、写事务与授权判定
-  ├─ api/        路由与权限
-  ├─ services/   业务：认证 / 订单 / 工单 / 知识 / 对话 / Agent
-  ├─ models/     数据模型        schemas/  接口契约
-  └─ providers/  模型适配（Chat / Embedding / Rerank）
-          │                            │ HTTP（内部调用，失败自动降级）
-    SQLite / MySQL + Alembic    ┌─────┴──────┐
-                                │            │
-                     检索服务（Go :8081）  业务服务（Go :8082）
-                       ├─ /search        BM25 + 向量 + RRF
-                       ├─ /rank          复合分 + 阈值降级 + MMR
-                       ├─ /ingest        分块 + 指纹（并发流水线）
-                       ├─ /ingest/stats  流水线计数（排队 / 在途 / 失败）
-                       └─ /stream        SSE 分阶段推送
-                                             ├─ /api/order
-                                             ├─ /api/orders
-                                             ├─ /api/auth/verify
-                                             ├─ /api/tickets/pending
-                                             ├─ /api/tickets/confirm ┐
-                                             ├─ /api/tickets/cancel  ├ 状态流转（写 SQLite）
-                                             └─ /api/tickets/status  ┘
-          │
-    模型 API（OpenAI 兼容）
+```mermaid
+flowchart LR
+    UI["浏览器 · HTML / JavaScript"] --> Gateway["Go 网关 · 8080"]
+    Gateway -->|公开业务 API| Business["Go 业务服务 · 8082"]
+    Gateway -->|入库、恢复、诊断| Python["Python Agent · 8000"]
+    Gateway -->|检索进度 SSE| Retrieval["Go 检索服务 · 8081"]
+    Business -->|内部对话调用| Python
+    Python -->|检索、排序、分块| Retrieval
+    Business --> MySQL[("MySQL 8")]
+    Python --> MySQL
+    Python --> Model["模型 API"]
 ```
 
-生产部署只对外暴露网关的 8080：前端 → 网关 → Python 后端 → 两个 Go 服务构成一条链路，
-Python 监听回环/内网地址，不直接接受公网请求。三个上游地址分别由 `BACKEND_URL`、
-`GO_RETRIEVAL_URL` 与 `GO_BUSINESS_URL` 配置，可按服务粒度单独部署与回滚。
-公开业务接口由 Go 处理，上游无法连接时由网关返回错误。
+| 模块 | 技术 | 职责 |
+| --- | --- | --- |
+| [go-gateway](go-gateway/) | Go | 提供前端静态页面、API 路由、反向代理、入口限流和健康检查 |
+| [go-business](go-business/) | Go | 处理注册登录、令牌、对话与会话持久化、订单、工单、知识库查询和检索设置 |
+| [go-retrieval](go-retrieval/) | Go | 执行 BM25、向量与关键词召回融合、排序、MMR 去冗余和入库分块 |
+| [backend](backend/) | Python 3.12、FastAPI、SQLAlchemy | 编排 Agent 和模型调用，执行知识入库、租约续期、恢复与诊断 |
+| [frontend](frontend/) | HTML、CSS、JavaScript | 提供客户工作台、工单后台、知识库和检索设置页面 |
+| [alembic](alembic/) | Alembic、MySQL 8 | 管理 Go 与 Python 共用的数据库结构，SQLite 可用于本地调试和测试 |
 
-## 快速开始（生产默认拓扑）
+公开业务接口固定路由到 Go。Python 的 Agent 接口通过内部令牌鉴权，由 Go 业务服务调用。Python 调用 Go 检索计算失败时仍可以使用本地实现。
 
-Docker Compose 默认启动 MySQL 8、Python Agent 和三个 Go 服务。先在仓库根目录的
-`.env` 配置相同供 Go 与 Python 使用的 `AI_NEW_JWT_SECRET` 和 `AGENT_INTERNAL_TOKEN`。
-模型配置沿用 `backend/.env`。
+## 快速开始
 
-```bash
-docker compose up -d --build
-```
+需要 Docker 和 Compose 插件。以下命令在仓库根目录运行。
 
-浏览器访问 <http://127.0.0.1:8080>。Python 容器启动前执行 Alembic 升级。
-网关固定把已迁移的接口交给 Go。Python 提供内部 Agent、知识入库、恢复与检索诊断。
+1. 在项目根目录的 `.env` 中设置共享的 JWT 密钥与 Agent 内部令牌。两个值分别生成，且每次重新启动时沿用已有值。
 
-### 从已有 SQLite 导入
+   ```bash
+   openssl rand -hex 32
+   openssl rand -hex 32
+   ```
 
-先停掉使用旧 SQLite 的应用写入。在空 MySQL 库上先升级、后导入，再启动应用，
-以防演示种子数据占用目标表。下面使用 Compose 默认用户、密码和本地映射端口；
-如设置了自定义 MySQL 配置，宿主机运行的命令使用同样的 `MYSQL_*` 环境变量
-（宿主机端口用 `MYSQL_PORT`，对应 Compose 的 `MYSQL_PUBLISHED_PORT`）。
+   ```dotenv
+   AI_NEW_JWT_SECRET=<第一条命令的输出>
+   AGENT_INTERNAL_TOKEN=<第二条命令的输出>
+   ```
+
+2. 配置对话模型。首次配置时复制 [模型配置示例](backend/.env.example)，然后在 `backend/.env` 中填写 `DEEPSEEK_API_KEY`。已有该文件可直接编辑。默认使用关键词检索。启用混合检索时，将 `RETRIEVAL_MODE` 设为 `hybrid`，并将 `DEEPSEEK_BASE_URL`、`DEEPSEEK_API_KEY` 和 `EMBEDDING_MODEL` 配置为支持向量化的 OpenAI 兼容服务及其模型。
+
+   ```bash
+   cp -n backend/.env.example backend/.env
+   ```
+
+3. 构建并启动。Python 容器会先执行 Alembic 迁移，Go 业务服务在 Python 健康检查通过后启动。
+
+   ```bash
+   docker compose up -d --build --wait
+   docker compose ps
+   curl -fsS http://127.0.0.1:8080/health
+   ```
+
+4. 打开 [客户工作台](http://127.0.0.1:8080/)。管理员可访问 [工单后台](http://127.0.0.1:8080/admin)、[知识库](http://127.0.0.1:8080/knowledge)和[检索设置](http://127.0.0.1:8080/settings)。首次启动会初始化演示数据，演示账号见 [backend/seed.py](backend/seed.py)。
+
+### 常用配置
+
+| 配置 | 位置 | 用途 |
+| --- | --- | --- |
+| `AI_NEW_JWT_SECRET` | 根目录 `.env` | Go 与 Python 共用的 JWT 签名密钥 |
+| `AGENT_INTERNAL_TOKEN` | 根目录 `.env` | Go 调用 Python Agent 时使用的内部令牌 |
+| `MYSQL_DATABASE`、`MYSQL_USER`、`MYSQL_PASSWORD`、`MYSQL_ROOT_PASSWORD` | 根目录 `.env` | MySQL 初始化配置，适用于新建的数据卷 |
+| `MYSQL_PUBLISHED_PORT` | 根目录 `.env` | 宿主机连接 MySQL 的端口，默认 `3307`。容器之间使用 `mysql:3306` |
+| `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL` | `backend/.env` | 对话模型 API 配置 |
+| `RETRIEVAL_MODE` | `backend/.env` | `keyword` 使用关键词检索，`hybrid` 启用混合检索 |
+
+排查启动问题时，用 `docker compose logs --tail=100 gateway go-business backend go-retrieval mysql` 查看各服务日志。网关在线但上游异常时，`/health` 可能仍返回 HTTP 200，需同时检查响应中的状态和上游信息。
+
+仓库中的 Compose 配置包含本地调试端口，并开启了网关 pprof。部署到公网前，请关闭 pprof、限制内部服务端口的访问范围，并更换演示账号口令和数据库默认密码。
+
+## 从 SQLite 导入 MySQL
+
+先停止旧应用的写入并备份 SQLite 文件。目标 MySQL schema 应为空，先建表、再导入，最后启动应用，以避免种子数据占用目标表。以下命令假设已按测试章节创建并激活 Python 虚拟环境，且使用 Compose 的默认本地连接参数。
 
 ```bash
 docker compose up -d --wait mysql
 DB_DRIVER=mysql python -m alembic upgrade head
-DB_DRIVER=mysql python -m scripts.import_sqlite_to_mysql backend/app.db
-docker compose up -d --build
+DB_DRIVER=mysql python -m scripts.import_sqlite_to_mysql /path/to/old-app.db
+docker compose up -d --build --wait
 ```
 
-导入使用只读 SQLite 快照与单个 MySQL 写事务，目标业务表已有数据时拒绝执行。
-既有 MySQL 里有数据时，用新的空 schema 进行导入。源 SQLite 可作为迁移前的备份。
-Go 与 Python 必须连接同一 MySQL schema。
+如修改过 MySQL 配置，宿主机执行迁移时也要设置相应的 `MYSQL_HOST`、`MYSQL_PORT`、`MYSQL_DATABASE`、`MYSQL_USER` 和 `MYSQL_PASSWORD`。这里的 `MYSQL_PORT` 对应 Compose 的 `MYSQL_PUBLISHED_PORT`。如已导出旧的 `DATABASE_URL`，请先清除或改为目标 MySQL 连接，因为该变量优先于 `DB_DRIVER`。
 
-### 单独运行：Go 检索服务
+## 开发与测试
 
-compose 已包含该服务，下列命令用于不启容器时单独调试。
+Go 模块和 CI 使用 Go 1.27.3，Python CI 使用 3.12。以下命令从仓库根目录执行，无需启动整套 Compose 服务。HTTP 测试会在本机回环地址启动独立进程。
 
 ```bash
-cd go-retrieval && go run .          # 默认 127.0.0.1:8081
+# Go 服务与竞态检查
+(cd go-gateway && go test -race ./...)
+(cd go-business && go test -race ./...)
+(cd go-retrieval && go test -race ./...)
+
+# Python Agent、入库、恢复与诊断等测试
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r backend/requirements-dev.txt
+PYTHONPATH="$PWD" python -m pytest backend/tests -q
 ```
 
-`backend/.env` 里的 `GO_RETRIEVAL_URL=http://127.0.0.1:8081` 指定它的地址；
-连接失败或超时时自动退回本地同语义实现，用于灰度与故障回滚。
+[CI 工作流](.github/workflows/ci.yml)分别运行三个 Go 模块、Python 测试和知识入库重启恢复测试。重启恢复测试在 CI 中单独作为观察性任务运行。
 
-### 单独运行：Go 业务服务
+## 更多文档
 
-订单查询、待确认工单列表，以及工单的 `confirm / cancel / update_status` 状态流转。
-compose 已包含该服务，下列命令用于不启容器时单独调试（需先启动过一次后端生成 `backend/app.db`）。
-
-```bash
-cd go-business && go run .          # 默认 127.0.0.1:8082，读 ../backend/app.db
-```
-
-`backend/.env` 里的 `GO_BUSINESS_URL=http://127.0.0.1:8082` 指定它的地址。
-后端优先使用 Go 的查询与状态流转；连不上或响应无法识别时自动退回本地实现。
-状态机规则两边一致——非法流转同样返回 `TICKET_INVALID_TRANSITION`，
-未知状态同样按 422 语义拒绝，因此前端不需要知道工单在哪边处理。
-
-本地可用 SQLite 单独调试。连接 MySQL 时设置 `DB_DRIVER=mysql` 并提供 `MYSQL_*` 连接参数。
-
-### 网关：对外唯一入口
-
-网关把 Python 后端与两个 Go 服务收在同一个入口后面：反向代理、入口鉴权、
-限流、SSE 转发、pprof 与优雅关闭都在这一层完成。生产部署只暴露 8080，
-Python 后端仅监听内网地址。
-
-```bash
-# 先启动内部 Python 后端（:8000），再起网关
-cd go-gateway && go run .          # 默认 127.0.0.1:8080
-```
-
-| 环境变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `BACKEND_URL` | `http://127.0.0.1:8000` | 必需，Python 后端地址 |
-| `RETRIEVAL_URL` | 空 | 配置后启用 `/api/retrieval/stream` |
-| `GO_BUSINESS_URL` | 空 | 配置后启用入口鉴权（经业务服务验签） |
-| `GATEWAY_RATE_LIMIT` | `0` | 每秒令牌数，`0` 表示关闭入口限流 |
-| `GATEWAY_RATE_BURST` | 同 rate | 桶容量 |
-| `GATEWAY_PPROF` | `false` | 是否暴露 `/debug/pprof` |
-| `GATEWAY_UPSTREAM_TIMEOUT` | `30s` | 等待上游响应头的超时（不影响 SSE 流式 body） |
-
-启动后访问 <http://127.0.0.1:8080>，与直连 8000 等价；`/health` 会额外返回
-`gateway: true`、各上游健康状态与能力开关。
-
-网关**不接管授权判定**：它只做入口层令牌校验，结果用于日志与限流维度，
-不写进转发给 Python 的请求头 —— 授权仍只有 Python 一处权威。
-这样即使 Python 被直接暴露，也不存在可伪造的身份来源。
-
-### 本地单独运行 Python
-
-直接运行 Python 时，默认使用 `backend/app.db`。设置 `DB_DRIVER=mysql` 会使用本机
-MySQL，或显式设置 `DATABASE_URL` 指定 Python 的连接。Go 服务使用 `MYSQL_*`
-连接参数，也可以通过 `MYSQL_DSN` 指定连接。
-
-## 演示账号
-
-首次启动时由 `backend/seed.py` 自动预置演示账号（管理员 / 客户各一个），账号与初始口令见该脚本，此处不列出明文密码。
-
-> 部署到公网前，请务必修改默认口令，并确认 `.env` 与数据库文件不进版本库。
-
-## 文档
-
-| 文档                                                                            | 内容              |
-| ----------------------------------------------------------------------------- | --------------- |
-| [接口文档](docs/api.md)                                                           | 字段、权限、错误响应、调用示例 |
-| [认证](docs/auth-api.md) · [工单](docs/tickets-api.md) · [订单](docs/orders-api.md) | 各模块接口细节         |
-| [检索评测](docs/retrieval-evaluation.md)                                          | 离线评测方法与消融结果     |
-| [Go 网关](go-gateway/README.md) · [Go 检索](go-retrieval/README.md) · [Go 业务](go-business/README.md) | 三个 Go 服务的端点、配置与设计取舍 |
-| [交付说明](docs/delivery-summary.md)                                              | 阶段成果与已知限制       |
-
-## 测试
-
-```bash
-pip install -r backend/requirements-dev.txt
-pytest backend/tests -q
-```
+- [API 概览](docs/api.md)、[认证](docs/auth-api.md)、[订单](docs/orders-api.md)、[工单](docs/tickets-api.md)
+- [Go 网关](go-gateway/README.md)、[Go 业务服务](go-business/README.md)、[Go 检索服务](go-retrieval/README.md)
+- [检索评测方法与结果](docs/retrieval-evaluation.md)
