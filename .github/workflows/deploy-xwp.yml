@@ -1,0 +1,51 @@
+name: Deploy xwp
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-xwp
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release images
+        env:
+          DEPLOY_SHA: ${{ github.sha }}
+          SEED_ADMIN_PASSWORD: build-only
+          SEED_CUSTOMER_PASSWORD: build-only
+        run: |
+          docker compose -f docker-compose.yml -f deploy/compose.xwp.yml build backend go-business go-retrieval gateway
+
+      - name: Transfer and deploy release
+        env:
+          DEPLOY_SHA: ${{ github.sha }}
+          XWP_DEPLOY_KEY: ${{ secrets.XWP_DEPLOY_KEY }}
+          XWP_KNOWN_HOSTS: ${{ vars.XWP_KNOWN_HOSTS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          scratch=$(mktemp -d)
+          trap 'rm -rf "$scratch"' EXIT
+          printf '%s\n' "$XWP_DEPLOY_KEY" > "$scratch/key"
+          printf '%s\n' "$XWP_KNOWN_HOSTS" > "$scratch/known_hosts"
+          docker save \
+            "ainew-xwp-backend:$DEPLOY_SHA" "ainew-xwp-business:$DEPLOY_SHA" \
+            "ainew-xwp-retrieval:$DEPLOY_SHA" "ainew-xwp-gateway:$DEPLOY_SHA" |
+            gzip -1 > "$scratch/images.tar.gz"
+          tar -cf - docker-compose.yml deploy/compose.xwp.yml frontend -C "$scratch" images.tar.gz |
+            ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+              -o "UserKnownHostsFile=$scratch/known_hosts" -i "$scratch/key" \
+              root@47.94.99.104 "$DEPLOY_SHA"

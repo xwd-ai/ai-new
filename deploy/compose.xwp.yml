@@ -1,0 +1,20 @@
+services:
+  mysql:
+    ports: !reset []
+  backend:
+    image: ainew-xwp-backend:${DEPLOY_SHA}
+    environment:
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD}
+      SEED_CUSTOMER_PASSWORD: ${SEED_CUSTOMER_PASSWORD}
+  go-business:
+    image: ainew-xwp-business:${DEPLOY_SHA}
+    ports: !reset []
+  go-retrieval:
+    image: ainew-xwp-retrieval:${DEPLOY_SHA}
+    ports: !reset []
+  gateway:
+    image: ainew-xwp-gateway:${DEPLOY_SHA}
+    ports: !override
+      - "127.0.0.1:2080:8080"
+    environment:
+      GATEWAY_PPROF: "false"

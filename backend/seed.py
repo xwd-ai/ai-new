@@ -1,4 +1,5 @@
 import hashlib
+import os
 import time
 
 from backend.database import SessionLocal
@@ -132,11 +133,12 @@ def _seed_users(db) -> None:
     if db.query(User).first() is not None:
         return
     for u in _SEED_USERS:
+        password = os.getenv(f"SEED_{u['role'].upper()}_PASSWORD") or u["password"]
         db.add(
             User(
                 id=u["id"],
                 username=u["username"],
-                password_hash=_hash(u["password"]),
+                password_hash=_hash(password),
                 name=u["name"],
                 role=u["role"],
             )

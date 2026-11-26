@@ -82,6 +82,12 @@ flowchart LR
 
 仓库中的 Compose 配置包含本地调试端口，并开启了网关 pprof。部署到公网前，请关闭 pprof、限制内部服务端口的访问范围，并更换演示账号口令和数据库默认密码。
 
+## xwp.xwd.info 自动部署
+
+推送到 `main` 后，[部署工作流](.github/workflows/deploy-xwp.yml)会按提交 SHA 构建四个应用镜像，传到部署服务器并替换对应容器。MySQL 数据和检索配置保存在独立数据卷。部署会检查网关与上游服务的健康状态，失败时尝试恢复上一版应用镜像。
+
+上线入口为 [xwp.xwd.info](https://xwp.xwd.info/)。Nginx 负责 HTTPS，网关只绑定宿主机回环地址的 `2080` 端口。服务器上的部署配置在 `/opt/ainew-xwp/.env`，模型配置在 `/opt/ainew-xwp/backend/.env`。GitHub Actions 使用 `XWP_DEPLOY_KEY` 和 `XWP_KNOWN_HOSTS` 连接部署服务器。
+
 ## 从 SQLite 导入 MySQL
 
 先停止旧应用的写入并备份 SQLite 文件。目标 MySQL schema 应为空，先建表、再导入，最后启动应用，以避免种子数据占用目标表。以下命令假设已按测试章节创建并激活 Python 虚拟环境，且使用 Compose 的默认本地连接参数。
