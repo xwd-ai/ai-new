@@ -122,7 +122,7 @@ def test_chat_api_uses_classified_failure_as_reply(chat_client, monkeypatch):
             raise TimeoutError(PRIVATE_DETAIL)
 
     monkeypatch.setattr(chat, "_chat_provider", TimeoutProvider())
-    response = chat_client.post("/internal/agent/reply", json={"user_id": "", "history": [], "message": "导出失败"})
+    response = chat_client.post("/internal/agent/reply", json={"user_id": "anonymous", "history": [], "message": "导出失败"})
 
     assert response.status_code == 200
     body = response.json()
@@ -142,7 +142,7 @@ def test_unconfigured_model_returns_actionable_hint(chat_client, monkeypatch, ke
     monkeypatch.setenv("DEEPSEEK_API_KEY", key)
     monkeypatch.setattr(chat, "_chat_provider", None)
     monkeypatch.setattr(llm, "_default_provider", None)
-    response = chat_client.post("/internal/agent/reply", json={"user_id": "", "history": [], "message": "导出失败"})
+    response = chat_client.post("/internal/agent/reply", json={"user_id": "anonymous", "history": [], "message": "导出失败"})
 
     assert response.status_code == 200
     body = response.json()
@@ -157,7 +157,7 @@ def test_chat_success_keeps_existing_response(chat_client, monkeypatch):
             return "请补充导出格式。"
 
     monkeypatch.setattr(chat, "_chat_provider", SuccessProvider())
-    response = chat_client.post("/internal/agent/reply", json={"user_id": "", "history": [], "message": "导出失败"})
+    response = chat_client.post("/internal/agent/reply", json={"user_id": "anonymous", "history": [], "message": "导出失败"})
 
     assert response.status_code == 200
     body = response.json()
@@ -179,7 +179,7 @@ def test_initial_retrieval_failure_can_still_answer(chat_client, monkeypatch):
 
     monkeypatch.setattr(chat.knowledge, "search_knowledge", fail)
     monkeypatch.setattr(chat, "_chat_provider", SuccessProvider())
-    response = chat_client.post("/internal/agent/reply", json={"user_id": "", "history": [], "message": "导出失败"})
+    response = chat_client.post("/internal/agent/reply", json={"user_id": "anonymous", "history": [], "message": "导出失败"})
 
     assert response.status_code == 200
     body = response.json()
@@ -213,7 +213,7 @@ def test_successful_retrieval_preserves_citations(chat_client, monkeypatch):
 
     monkeypatch.setattr(chat.knowledge, "search_knowledge", search)
     monkeypatch.setattr(chat, "_chat_provider", CitingProvider())
-    response = chat_client.post("/internal/agent/reply", json={"user_id": "", "history": [], "message": "导出失败"})
+    response = chat_client.post("/internal/agent/reply", json={"user_id": "anonymous", "history": [], "message": "导出失败"})
 
     assert response.status_code == 200
     body = response.json()
