@@ -24,6 +24,13 @@ func publicTicketList(conn *sql.DB) http.HandlerFunc {
 		if user.IsAdmin {
 			filter.UserID = ""
 		}
+		if q.Has("conversation_id") {
+			filter.ConversationID = q.Get("conversation_id")
+			if filter.ConversationID == "" || len(filter.ConversationID) > 64 {
+				writeTicketInputError(w, "会话 ID 不合法")
+				return
+			}
+		}
 		for _, entry := range q["status"] {
 			for value := range strings.SplitSeq(entry, ",") {
 				status := strings.ToLower(strings.TrimSpace(value))

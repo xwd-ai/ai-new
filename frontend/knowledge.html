@@ -46,12 +46,13 @@
     <p id="access" role="status">正在核对管理员身份…</p>
     <p id="loginLink" hidden><a href="/login">前往登录</a></p>
     <details class="panel">
-      <summary>添加文本资料</summary>
-      <p class="muted">粘贴手册、常见问题或规则正文。相同标题与正文重复提交会返回已有资料。</p>
+      <summary>添加资料</summary>
+      <p class="muted">粘贴正文，或上传 PDF、Markdown 文件。PDF 扫描页会自动识别中英文文字。每个文件最多 8 MiB，PDF 最多 20 页。</p>
       <form id="ingestForm"><fieldset id="ingestFields" disabled>
         <label>资料标题<input id="ingestTitle" maxlength="200" required /></label>
         <label>入库类型<select id="ingestKind"><option value="manual">手册</option><option value="faq">FAQ</option><option value="rule">规则</option></select></label>
-        <label class="full">资料正文<textarea id="ingestContent" rows="7" maxlength="100000" required></textarea></label>
+        <label class="full">上传文件（可选）<input type="file" id="ingestFile" accept=".pdf,.md,.markdown" /></label>
+        <label class="full">资料正文（上传文件时可留空）<textarea id="ingestContent" rows="7" maxlength="100000" required></textarea></label>
         <label class="full">关键词（可选）<textarea id="ingestKeywords" rows="2" placeholder="逗号或换行分隔，最多 20 个；留空自动提取"></textarea></label>
         <div class="full"><button class="primary">提交入库</button></div>
       </fieldset></form>

@@ -87,6 +87,8 @@ func TestGoMigrationRoutes(t *testing.T) {
 		{"POST", "/api/knowledge/ingest", "python:/api/knowledge/ingest"},
 		{"POST", "/api/login", "go:/public/api/login"},
 		{"GET", "/api/conversation", "go:/public/api/conversation"},
+		{"GET", "/api/conversations", "go:/public/api/conversations"},
+		{"POST", "/api/conversations", "go:/public/api/conversations"},
 		{"POST", "/api/chat", "go:/public/api/chat"},
 		{"POST", "/api/chat/stream", "go:/public/api/chat/stream"},
 		{"POST", "/api/tickets", "go:/public/api/tickets"},

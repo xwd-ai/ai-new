@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -28,6 +29,14 @@ func publicTicketCreate(conn *sql.DB) http.HandlerFunc {
 		}
 
 		input := tickets.CreateInput{UserID: user.ID, UserName: user.Name, Description: description}
+		if raw, present := fields["conversation_id"]; present {
+			id, valid := ticketString(raw)
+			if !valid || id == "" || len(id) > 64 {
+				writeTicketInputError(w, "会话 ID 不合法")
+				return
+			}
+			input.ConversationID = id
+		}
 		for field, target := range map[string]*string{"tried_steps": &input.TriedSteps, "evidence": &input.Evidence} {
 			if raw, present := fields[field]; present {
 				value, valid := ticketString(raw)
@@ -40,6 +49,10 @@ func publicTicketCreate(conn *sql.DB) http.HandlerFunc {
 		}
 
 		ticket, created, err := ticketWriter.Create(r.Context(), input)
+		if errors.Is(err, tickets.ErrConversationNotFound) {
+			writeSessionError(w, 404, "CONVERSATION_NOT_FOUND", "会话不存在")
+			return
+		}
 		if err != nil {
 			slog.Error("建单失败", "err", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{

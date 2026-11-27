@@ -68,6 +68,8 @@ func main() {
 	mux := http.NewServeMux()
 	chat := newPublicChat(chatStore{read: conn, write: writeConn})
 	mux.HandleFunc("GET /public/api/conversation", chat.handleConversation)
+	mux.HandleFunc("GET /public/api/conversations", chat.handleConversationCollection)
+	mux.HandleFunc("POST /public/api/conversations", chat.handleConversationCollection)
 	mux.HandleFunc("POST /public/api/chat", func(w http.ResponseWriter, r *http.Request) {
 		chat.respond(w, r, false)
 	})

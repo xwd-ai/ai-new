@@ -164,26 +164,64 @@
     .tstep.done .tstate { color: var(--ok); }
     .tstep.running .tstate { color: var(--primary); }
 
-    /* 工单卡片 */
+    .conversation-tickets { max-width: 760px; margin: 20px auto 0; display: grid; gap: 12px; }
+    .conversation-tickets[hidden], .ticket-card [hidden] { display: none; }
     .ticket-card {
-      background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--primary);
-      border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden;
+      width: min(100%, 640px); padding: 16px 18px; background: var(--surface);
+      border: 1px solid #dee5f0; border-radius: 16px; box-shadow: 0 3px 12px #172b5210;
     }
-    .ticket-card .tc-head {
-      display: flex; align-items: center; gap: 8px; padding: 12px 16px;
-      background: var(--primary-soft); font-size: 13px; font-weight: 700; color: var(--primary);
+    .ticket-card-head, .ticket-card-actions, .ticket-detail-header {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
     }
-    .ticket-card .tc-head .spacer { flex: 1; }
-    .ticket-card .tc-status {
-      font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 20px;
-      background: var(--warn-soft); color: var(--warn);
+    .ticket-card-head, .ticket-detail-header { justify-content: space-between; }
+    .ticket-identity { display: inline-flex; align-items: center; gap: 9px; color: #526079; font-size: 13px; }
+    .ticket-icon {
+      display: inline-grid; place-items: center; width: 32px; height: 32px; border-radius: 9px;
+      background: #edf1ff; color: #455cbe; flex-shrink: 0;
     }
-    .ticket-card .tc-body { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
-    .tc-row { display: flex; gap: 10px; font-size: 13px; }
-    .tc-row .k { color: var(--muted); flex-shrink: 0; width: 68px; }
-    .tc-row .v { color: var(--text); flex: 1; line-height: 1.55; }
-    .tc-ref { display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: 6px; background: var(--surface-2); border: 1px solid var(--border); font-size: 12px; color: var(--primary); cursor: pointer; }
-    .tc-ref:hover { border-color: var(--primary); }
+    .ticket-icon svg { width: 17px; height: 17px; }
+    .ticket-status {
+      display: inline-flex; align-items: center; gap: 6px; border-radius: 999px;
+      background: #eef2fb; color: #3d5076; padding: 5px 10px; font-size: 12px; font-weight: 650;
+    }
+    .ticket-status::before { content: ""; width: 6px; height: 6px; background: currentColor; border-radius: 50%; }
+    .ticket-status.is-resolved { background: #e8f7ee; color: #18603d; }
+    .ticket-status.is-pending { background: #fff4dd; color: #805411; }
+    .ticket-status.is-active { background: #eaf0ff; color: #304cae; }
+    .ticket-status.is-closed { background: #eff1f5; color: #546074; }
+    .ticket-card h3 { margin: 12px 0; font-size: 17px; line-height: 1.45; overflow-wrap: anywhere; }
+    .ticket-card-actions button, .ticket-detail-header button, .my-ticket-row button {
+      border: 1px solid #dbe3fb; border-radius: 8px; background: #f5f7ff; color: #354baf;
+      padding: 7px 11px; font: inherit; font-size: 13px; cursor: pointer;
+    }
+    .ticket-card-actions button:hover, .ticket-detail-header button:hover, .my-ticket-row button:hover { background: #eaf0ff; }
+    .ticket-card-detail, #ticketDetail {
+      margin-top: 14px; border-top: 1px solid var(--border); padding-top: 14px;
+      overflow-wrap: anywhere; font-size: 13px; color: #414e63;
+    }
+    .ticket-detail-header { margin-bottom: 6px; }
+    .ticket-detail-header strong { color: #4b5972; font-size: 13px; }
+    .ticket-detail-title { color: var(--text); font-size: 18px; line-height: 1.45; margin: 5px 0 14px; }
+    .ticket-detail-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 12px; }
+    .ticket-detail-panel { min-width: 0; background: #f7f9fe; border: 1px solid #edf0f7; border-radius: 12px; padding: 12px; }
+    .ticket-detail-panel h4 { font-size: 13px; color: #283552; margin: 0 0 9px; }
+    .ticket-replies { display: grid; gap: 8px; }
+    .ticket-reply { border: 1px solid #e6ecf7; background: white; padding: 10px; border-radius: 10px; }
+    .ticket-reply-meta { color: #53617a; font-size: 12px; margin-bottom: 5px; font-weight: 600; }
+    .ticket-reply-meta time { margin-left: 4px; font-weight: 400; }
+    .ticket-reply p, .ticket-notes p { line-height: 1.6; white-space: pre-wrap; }
+    .ticket-timeline { list-style: none; margin-left: 4px; }
+    .ticket-timeline li { position: relative; display: grid; gap: 3px; padding: 0 0 12px 15px; border-left: 1px solid #ccd6ed; }
+    .ticket-timeline li:last-child { padding-bottom: 0; border-color: transparent; }
+    .ticket-timeline li::before {
+      content: ""; position: absolute; left: -4px; top: 5px; width: 7px; height: 7px; border-radius: 50%; background: #a0afd6;
+    }
+    .ticket-timeline li.is-latest::before { background: var(--primary); box-shadow: 0 0 0 3px #e4eaff; }
+    .ticket-timeline time { font-size: 11px; color: #596780; }
+    .ticket-notes { margin-top: 12px; border: 1px solid #edf0f7; border-radius: 10px; padding: 10px 12px; }
+    .ticket-notes summary { cursor: pointer; color: #435477; font-weight: 600; }
+    .ticket-notes p { margin-top: 8px; }
+    @media (max-width: 520px) { .ticket-detail-grid { grid-template-columns: 1fr; } .ticket-card { padding: 13px; } }
 
     /* 输入区 */
     .composer {
@@ -293,6 +331,10 @@
     .trace-dot.err { background: #e03131; }
     .trace-dot.warn { background: #e8890c; }
 
+    .conversation-choice { width: 100%; border: 0; background: transparent; cursor: pointer; text-align: left; overflow-wrap: anywhere; }
+    #conversationList { max-height: 55vh; overflow: auto; }
+    #conversationSelect { display: none; min-width: 0; max-width: 42%; }
+    #ticketDetail { max-height: 42vh; overflow: auto; }
     .my-tickets { padding: 10px 22px; background: white; border-bottom: 1px solid var(--border); }
     .my-tickets summary { cursor: pointer; font-weight: 600; }
     #ticketListStatus { margin: 6px 0; color: var(--muted); font-size: 13px; }
@@ -306,6 +348,7 @@
     @media (max-width: 720px) {
       .layout { grid-template-columns: 1fr; }
       .sidebar { display: none; }
+      #conversationSelect { display: block; }
     }
   </style>
 </head>
@@ -322,9 +365,7 @@
       </div>
       <div class="conv-list">
         <div class="title">我的会话</div>
-        <div class="conv active">
-          <div class="meta"><div class="who">智能客服</div></div>
-        </div>
+        <div id="conversationList"></div>
       </div>
 
       <div class="sidebar-user">
@@ -342,12 +383,15 @@
       <div class="topbar">
         <div class="cust-avatar">AI</div>
         <div class="cust-name">智能客服</div>
+        <select id="conversationSelect" aria-label="切换会话"></select>
+        <button id="createConversation" type="button">新建会话</button>
       </div>
 
       <details class="my-tickets" id="myTickets">
-        <summary>我的工单 <span id="ticketCount"></span></summary>
+        <summary>全部工单 <span id="ticketCount"></span></summary>
         <p id="ticketListStatus" role="status"></p>
         <div id="ticketList"></div>
+        <div id="ticketDetail" hidden></div>
         <button id="refreshTickets" type="button">刷新工单</button>
         <button id="nextTickets" type="button" hidden>下一页</button>
       </details>
@@ -376,6 +420,7 @@
             </div>
           </div>
         </div>
+        <section id="conversationTickets" class="conversation-tickets" aria-label="当前会话的工单" hidden></section>
       </div>
 
       <div class="composer">
@@ -519,12 +564,126 @@
       return (await ticketRequestJSON('/api/tickets/confirm', {ticket_id: id})).ticket;
     }
 
+    const ticketDetail = document.getElementById('ticketDetail');
+    const ticketDetailRequests = new WeakMap();
+
+    async function showTicketDetail(id, target = ticketDetail) {
+      const request = (ticketDetailRequests.get(target) || 0) + 1;
+      ticketDetailRequests.set(target, request);
+      target.hidden = false;
+      target.textContent = '正在加载工单详情…';
+      try {
+        const {ticket} = await ticketRequestJSON('/api/tickets/' + encodeURIComponent(id));
+        if (request !== ticketDetailRequests.get(target) || !canUseSession()) return;
+        renderTicketDetail(target, ticket, () => {
+          ticketDetailRequests.set(target, request + 1);
+          target.replaceChildren();
+          target.hidden = true;
+        });
+      } catch {
+        if (request === ticketDetailRequests.get(target)) {
+          target.textContent = loginRequired ? '请重新登录后查看详情。' : '工单详情加载失败，请重新打开。';
+        }
+      }
+    }
+
+    function ticketText(tag, text, className = '') {
+      const element = document.createElement(tag);
+      element.textContent = text;
+      element.className = className;
+      return element;
+    }
+
+    function ticketBadge(status) {
+      const style = {
+        resolved: 'is-resolved', pending_confirm: 'is-pending',
+        closed: 'is-closed', open: 'is-active', in_progress: 'is-active',
+        transferred_human: 'is-active',
+      }[status] || '';
+      return ticketText('span', ticketStatusText[status] || status, `ticket-status ${style}`);
+    }
+
+    function appendTicketTime(target, timestamp) {
+      if (!timestamp) return;
+      const time = new Date(timestamp * 1000);
+      if (!Number.isFinite(time.getTime())) return;
+      const display = new Intl.DateTimeFormat('zh-CN', {
+        month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+        ...(time.getFullYear() !== new Date().getFullYear() ? {year: 'numeric'} : {}),
+      }).format(time);
+      const element = ticketText('time', display);
+      element.dateTime = time.toISOString();
+      target.appendChild(element);
+    }
+
+    function renderTicketDetail(target, ticket, dismiss) {
+      const header = document.createElement('div');
+      header.className = 'ticket-detail-header';
+      header.appendChild(ticketText('strong', `工单 #${ticket.id}`));
+      header.appendChild(ticketBadge(ticket.status));
+      const close = ticketText('button', '收起详情');
+      close.type = 'button';
+      close.addEventListener('click', dismiss);
+      header.appendChild(close);
+      const grid = document.createElement('div');
+      grid.className = 'ticket-detail-grid';
+      const replies = document.createElement('section');
+      replies.className = 'ticket-detail-panel';
+      replies.appendChild(ticketText('h4', '客服回复'));
+      const messages = document.createElement('div');
+      messages.className = 'ticket-replies';
+      for (const reply of ticket.reply_timeline?.items || []) {
+        const entry = document.createElement('div');
+        entry.className = 'ticket-reply';
+        const meta = ticketText('div', `${reply.replier}：`, 'ticket-reply-meta');
+        appendTicketTime(meta, reply.at);
+        entry.appendChild(meta);
+        entry.appendChild(ticketText('p', reply.content));
+        messages.appendChild(entry);
+      }
+      if (!messages.children.length) messages.appendChild(ticketText('p', '暂无回复'));
+      replies.appendChild(messages);
+      grid.appendChild(replies);
+      const progress = document.createElement('section');
+      progress.className = 'ticket-detail-panel';
+      progress.appendChild(ticketText('h4', '处理进度'));
+      const timeline = document.createElement('ol');
+      timeline.className = 'ticket-timeline';
+      const events = ticket.status_timeline || [];
+      for (const [index, event] of events.entries()) {
+        const entry = document.createElement('li');
+        if (index === events.length - 1) entry.className = 'is-latest';
+        entry.appendChild(ticketText('strong', ticketStatusText[event.to_status] || event.to_status));
+        appendTicketTime(entry, event.changed_at);
+        timeline.appendChild(entry);
+      }
+      if (events.length) progress.appendChild(timeline);
+      else progress.appendChild(ticketText('p', '暂无流转记录'));
+      grid.appendChild(progress);
+      target.replaceChildren(header, ticketText('h4', ticket.description, 'ticket-detail-title'), grid);
+      if (ticket.evidence || ticket.tried_steps) {
+        const notes = document.createElement('details');
+        notes.className = 'ticket-notes';
+        notes.appendChild(ticketText('summary', '排查信息'));
+        if (ticket.evidence) notes.appendChild(ticketText('p', '排查依据：' + ticket.evidence));
+        if (ticket.tried_steps) notes.appendChild(ticketText('p', '已尝试步骤：' + ticket.tried_steps));
+        target.appendChild(notes);
+      }
+    }
+
     function renderTicketRow(ticket) {
       const row = document.createElement('div');
       row.className = 'my-ticket-row';
       const label = document.createElement('span');
       label.textContent = `#${ticket.id} · ${ticketStatusText[ticket.status] || ticket.status} · ${ticket.description}`;
       row.appendChild(label);
+      const detailButton = document.createElement('button');
+      detailButton.type = 'button';
+      detailButton.textContent = '查看详情';
+      detailButton.addEventListener('click', () => {
+        if (canUseSession()) showTicketDetail(ticket.id);
+      });
+      row.appendChild(detailButton);
       if (ticket.status === 'pending_confirm') {
         const button = document.createElement('button');
         button.type = 'button';
@@ -535,6 +694,7 @@
           try {
             await confirmTicket(ticket.id);
             await loadTickets(ticketPage);
+            refreshConversationTickets();
           } catch {
             ticketListStatus.textContent = '确认失败，请重试。';
             button.disabled = loginRequired;
@@ -570,7 +730,7 @@
     nextTickets.addEventListener('click', () => loadTickets(ticketPage + 1));
 
     // 确认建单按钮（带来源依据）
-    function addConfirmTicket(body, description, sources) {
+    function addConfirmTicket(body, description, sources, selected) {
       const wrap = document.createElement('div');
       wrap.className = 'confirm-ticket';
       wrap.innerHTML = `
@@ -592,19 +752,22 @@
         let draft;
         try {
           const evidence = sources.map(source => source.title).join('；') || 'AI 客服建议';
-          const data = await ticketRequestJSON('/api/tickets', {description, evidence});
+          const data = await ticketRequestJSON('/api/tickets', {
+            description, evidence, ...(selected ? {conversation_id: selected} : {}),
+          });
           draft = data.ticket;
           const ticket = draft.status === 'pending_confirm' ? await confirmTicket(draft.id) : draft;
           wrap.innerHTML = '';
-          addTicketCard(body, ticket);
+          if (!selected) body.appendChild(ticketCard(ticket));
         } catch {
           confirmBtn.disabled = loginRequired;
           cancelBtn.disabled = false;
           confirmBtn.textContent = '重试提交工单';
           wrap.querySelector('.ct-text').textContent = draft
-            ? '草稿已保存，可重试或在「我的工单」中确认。'
-            : '提交结果未确认，请重试或刷新「我的工单」。';
+            ? '草稿已保存，可重试或从工单卡片确认。'
+            : '提交结果未确认，请重试或刷新「全部工单」。';
         }
+        if (draft && selected === conversationID && selected) refreshConversationTickets();
         await loadTickets();
       });
       cancelBtn.addEventListener('click', () => {
@@ -612,19 +775,97 @@
       });
     }
 
-    function addTicketCard(body, t) {
-      const card = document.createElement('div');
+    const conversationTickets = document.getElementById('conversationTickets');
+    let conversationTicketRequest = 0;
+
+    function ticketCard(ticket) {
+      const card = document.createElement('article');
       card.className = 'ticket-card';
-      card.innerHTML = `
-        <div class="tc-head"><span>工单已提交</span><span class="spacer"></span><span class="tc-status">${escapeHtml(ticketStatusText[t.status] || t.status)}</span></div>
-        <div class="tc-body">
-          <div class="tc-row"><span class="k">问题</span><span class="v">${escapeHtml(t.description)}</span></div>
-          <div class="tc-row"><span class="k">依据</span><span class="v">${escapeHtml(t.evidence || '—')}</span></div>
-          <div class="tc-row"><span class="k">工单号</span><span class="v">#${escapeHtml(t.id)}</span></div>
-          <div class="tc-row"><span class="k">状态</span><span class="v">${escapeHtml(ticketStatusText[t.status] || t.status)}</span></div>
-        </div>`;
-      body.appendChild(card);
-      scrollBottom();
+      const header = document.createElement('div');
+      header.className = 'ticket-card-head';
+      const identity = document.createElement('div');
+      identity.className = 'ticket-identity';
+      const icon = document.createElement('span');
+      icon.className = 'ticket-icon';
+      icon.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="5" y="4" width="14" height="16" rx="2"/><path d="M8 9h8M8 13h8M8 17h4"/></svg>';
+      identity.appendChild(icon);
+      identity.appendChild(ticketText('span', `工单 #${ticket.id}`));
+      header.appendChild(identity);
+      header.appendChild(ticketBadge(ticket.status));
+      const title = document.createElement('h3');
+      title.textContent = ticket.description;
+      const actions = document.createElement('div');
+      actions.className = 'ticket-card-actions';
+      const detail = document.createElement('div');
+      detail.className = 'ticket-card-detail';
+      detail.hidden = true;
+      const view = document.createElement('button');
+      view.type = 'button';
+      view.textContent = '查看详情';
+      view.addEventListener('click', () => {
+        if (canUseSession()) showTicketDetail(ticket.id, detail);
+      });
+      actions.appendChild(view);
+      if (ticket.status === 'pending_confirm') {
+        const submit = document.createElement('button');
+        submit.type = 'button';
+        submit.textContent = '确认提交';
+        const feedback = document.createElement('span');
+        feedback.setAttribute('role', 'status');
+        submit.addEventListener('click', async () => {
+          if (!canUseSession()) return;
+          submit.disabled = true;
+          try {
+            await confirmTicket(ticket.id);
+            refreshConversationTickets();
+            loadTickets();
+          } catch {
+            feedback.textContent = '提交失败，请重试。';
+            submit.disabled = loginRequired;
+          }
+        });
+        actions.appendChild(submit);
+        actions.appendChild(feedback);
+      }
+      for (const part of [header, title, actions, detail]) card.appendChild(part);
+      return card;
+    }
+
+    async function refreshConversationTickets(page = 1) {
+      const selected = conversationID;
+      const request = ++conversationTicketRequest;
+      if (!selected || !canUseSession()) return;
+      try {
+        const {tickets, has_more: hasMore} = await ticketRequestJSON(
+          `/api/tickets?conversation_id=${encodeURIComponent(selected)}&page=${page}`
+        );
+        if (request !== conversationTicketRequest || selected !== conversationID || !canUseSession()) return;
+        const cards = tickets.map(ticketCard);
+        if (page === 1) conversationTickets.replaceChildren(...cards);
+        else for (const card of cards) conversationTickets.appendChild(card);
+        if (hasMore) {
+          const more = document.createElement('button');
+          more.type = 'button';
+          more.textContent = '查看更多工单';
+          more.addEventListener('click', () => {
+            more.remove();
+            refreshConversationTickets(page + 1);
+          });
+          conversationTickets.appendChild(more);
+        }
+        conversationTickets.hidden = !conversationTickets.children.length;
+      } catch {
+        if (request !== conversationTicketRequest || selected !== conversationID || !canUseSession()) return;
+        const retry = document.createElement('button');
+        retry.type = 'button';
+        retry.textContent = '工单读取失败，点击重试';
+        retry.addEventListener('click', () => {
+          retry.remove();
+          refreshConversationTickets(page);
+        });
+        conversationTickets.appendChild(retry);
+        conversationTickets.hidden = false;
+      }
     }
 
     // 展示执行过程：把后端返回的事件渲染成一串步骤卡片
@@ -708,7 +949,8 @@
     }
 
     function updateControls(busy) {
-      sendBtn.disabled = busy || loginRequired;
+      sendBtn.disabled = busy || loginRequired || creatingConversation || loadingConversations;
+      createConversationButton.disabled = recovery.sending || loginRequired || creatingConversation || loadingConversations;
       syncBtn.disabled = busy || loginRequired;
       document.getElementById('cancelHistory').hidden = !recovery.syncing;
     }
@@ -765,10 +1007,106 @@
       }
     });
 
+    const conversationList = document.getElementById('conversationList');
+    const conversationSelect = document.getElementById('conversationSelect');
+    const createConversationButton = document.getElementById('createConversation');
+    const conversationDrafts = new Map();
+    let conversations = [];
+    let conversationID = '';
+    let creatingConversation = false;
+    let loadingConversations = true;
+    let conversationListRequest = 0;
+
+    function renderConversations() {
+      conversationList.replaceChildren();
+      conversationSelect.replaceChildren();
+      for (const item of conversations) {
+        const label = item.title || '新会话';
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'conv conversation-choice' + (item.id === conversationID ? ' active' : '');
+        button.textContent = label;
+        button.setAttribute('aria-current', item.id === conversationID ? 'true' : 'false');
+        button.addEventListener('click', () => switchConversation(item.id));
+        conversationList.appendChild(button);
+        const option = document.createElement('option');
+        option.value = item.id;
+        option.textContent = label;
+        conversationSelect.appendChild(option);
+      }
+      conversationSelect.value = conversationID;
+    }
+
+    async function fetchConversations() {
+      const request = ++conversationListRequest;
+      const res = await fetch('/api/conversations', {
+        cache: 'no-store',
+        headers: {Authorization: 'Bearer ' + token},
+        signal: AbortSignal.timeout(10000),
+      });
+      if (res.status === 401) requireRelogin('登录已失效，请重新登录。');
+      if (!res.ok) throw new Error('读取会话失败');
+      const data = await res.json();
+      if (request !== conversationListRequest || !canUseSession()) return;
+      conversations = data.conversations;
+      if (!conversationID && conversations.length) conversationID = conversations[0].id;
+      renderConversations();
+    }
+
+    function switchConversation(id) {
+      if (!canUseSession() || recovery.sending || creatingConversation || id === conversationID) {
+        conversationSelect.value = conversationID;
+        return;
+      }
+      recovery.cancelSync();
+      const uncertainTexts = document.getElementById('uncertainTexts');
+      conversationDrafts.set(conversationID, {input: input.value, uncertain: recovery.uncertain, retained: [...uncertainTexts.children]});
+      conversationID = id;
+      const draft = conversationDrafts.get(id);
+      input.value = draft?.input || '';
+      autoResize();
+      recovery.uncertain = draft?.uncertain || false;
+      uncertainTexts.replaceChildren(...(draft?.retained || []));
+      document.getElementById('uncertainQuestions').hidden = !uncertainTexts.children.length;
+      log.replaceChildren();
+      conversationTickets.replaceChildren();
+      conversationTickets.hidden = true;
+      refreshConversationTickets();
+      renderedHistory = null;
+      addBubble(addAiContainer(false), '请输入问题，开始对话。');
+      renderConversations();
+      recovery.sync();
+    }
+
+    conversationSelect.addEventListener('change', () => switchConversation(conversationSelect.value));
+    createConversationButton.addEventListener('click', async () => {
+      if (!canUseSession() || recovery.sending || creatingConversation || loadingConversations) return;
+      creatingConversation = true;
+      updateControls(true);
+      try {
+        const item = await ticketRequestJSON('/api/conversations', {});
+        if (!canUseSession()) return;
+        conversationListRequest++;
+        conversations = [item, ...conversations];
+        creatingConversation = false;
+        switchConversation(item.id);
+      } catch {
+        showStatus('新建会话失败，请重试。');
+      } finally {
+        creatingConversation = false;
+        updateControls(recovery.sending || recovery.syncing);
+      }
+    });
+
+    function chatPayload(text) {
+      return JSON.stringify(conversationID ? {message: text, conversation_id: conversationID} : {message: text});
+    }
+
     const recovery = new ChatRecovery({
       isActive: canUseSession,
       onAuthExpired: requireRelogin,
       fetchHistory: async (onProgress, signal) => {
+        const selected = conversationID;
         const timeout = AbortSignal.timeout(10000);
         const options = {
           cache: 'no-store',
@@ -776,7 +1114,9 @@
           signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
         };
         try {
-          return await fetchPagedHistory(path => { options.signal.throwIfAborted(); return fetch(path, options); }, me.id, onProgress);
+          return await fetchPagedHistory(path => { options.signal.throwIfAborted(); const url = selected && path.startsWith('/api/conversation?')
+            ? path + '&conversation_id=' + encodeURIComponent(selected) : path;
+          return fetch(url, options); }, me.id, onProgress);
         } catch (error) {
           // 读取响应体时，浏览器可能只报告 AbortError。
           if (error.name === 'AbortError' && timeout.aborted) throw timeout.reason;
@@ -811,7 +1151,7 @@
       onStatus: showStatus,
       onBusy: updateControls,
     });
-    syncBtn.addEventListener('click', () => recovery.sync());
+    syncBtn.addEventListener('click', () => { recovery.sync(); refreshConversationTickets(); });
     document.getElementById('cancelHistory').addEventListener('click', () => recovery.cancelSync());
     window.addEventListener('pagehide', () => {
       pageActive = false;
@@ -855,7 +1195,7 @@
         method: 'POST',
         signal: AbortSignal.timeout(120000),
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-        body: JSON.stringify({ message: text }),
+        body: chatPayload(text),
       });
       if (!res.ok || !res.body) throw new Error('stream unavailable');
 
@@ -910,7 +1250,7 @@
 
     async function handleSend() {
       const text = input.value.trim();
-      if (!text || !recovery.beginSend()) return;
+      if (!text || creatingConversation || loadingConversations || !recovery.beginSend()) return;
       renderedHistory = null;
       addUserMsg(text);
       input.value = '';
@@ -944,7 +1284,7 @@
           sources = streamed.sources;
           // 流式接口不跑 Agent 循环，因此没有执行过程可展示
         } else {
-          const res = await fetch('/api/chat', { method: 'POST', signal: AbortSignal.timeout(60000), headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify({ message: text }) });
+          const res = await fetch('/api/chat', { method: 'POST', signal: AbortSignal.timeout(60000), headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: chatPayload(text) });
           if (res.status === 401) requireRelogin('登录已失效，请重新登录。');
           if (!res.ok) throw new Error('对话请求失败');
           const data = await res.json();
@@ -973,10 +1313,14 @@
       addSources(body, sources);
 
       if (suggest) {
-        addConfirmTicket(body, text, sources);
+        if (!conversationID && !uncertain) {
+          await fetchConversations().catch(() => {});
+        }
+        addConfirmTicket(body, text, sources, conversationID);
       }
 
       await recovery.finishSend(uncertain);
+      if (!uncertain && canUseSession()) fetchConversations().catch(() => {});
       scrollBottom();
     }
 
@@ -995,8 +1339,16 @@
       handleSend();
     }
     // ---- 加载历史对话，让用户「记得」之前聊过什么 ----
-    recovery.sync();
-    loadTickets();
+    if (token && me && me.role !== 'admin') {
+      updateControls(false);
+      fetchConversations().catch(() => {}).finally(() => {
+        loadingConversations = false;
+        updateControls(false);
+        recovery.sync();
+        refreshConversationTickets();
+      });
+      loadTickets();
+    }
 
     // ---- 加载真实订单信息到右侧面板 ----
     async function loadOrder() {

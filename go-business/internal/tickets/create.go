@@ -12,14 +12,16 @@ import (
 )
 
 type CreateInput struct {
-	UserID      string
-	UserName    string
-	Description string
-	TriedSteps  string
-	Evidence    string
+	ConversationID string
+	UserID         string
+	UserName       string
+	Description    string
+	TriedSteps     string
+	Evidence       string
 }
 
 var ErrEmptyDescription = errors.New("问题描述不能为空")
+var ErrConversationNotFound = errors.New("会话不存在")
 
 // Create creates a draft and its initial timeline entry in one SQLite write transaction.
 func (w *Writer) Create(ctx context.Context, input CreateInput) (map[string]any, bool, error) {
@@ -34,6 +36,17 @@ func (w *Writer) Create(ctx context.Context, input CreateInput) (map[string]any,
 	}
 	defer tx.Rollback()
 
+	if input.ConversationID != "" {
+		var id string
+		err := tx.QueryRowContext(ctx, "SELECT id FROM conversations WHERE id = ? AND user_id = ?", input.ConversationID, input.UserID).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, false, ErrConversationNotFound
+		}
+		if err != nil {
+			return nil, false, err
+		}
+	}
+
 	if db.IsMySQL(w.db) {
 		if err := lockMySQLCounter(ctx, tx); err != nil {
 			return nil, false, err
@@ -42,7 +55,10 @@ func (w *Writer) Create(ctx context.Context, input CreateInput) (map[string]any,
 	existing, err := scanTicket(tx.QueryRowContext(ctx, db.LockRows(w.db, ticketSelect+" WHERE dedup_key = ?"), key))
 	switch {
 	case err == nil && existing.Status != string(StatusResolved):
-		return existing.payload(), false, nil
+		if err := w.linkConversation(ctx, tx, input.ConversationID, existing.ID); err != nil {
+			return nil, false, err
+		}
+		return existing.payload(), false, tx.Commit()
 	case err == nil:
 		// 释放已解决记录的去重键，历史工单本身及其时间线保留。
 		if _, err := tx.ExecContext(ctx, "UPDATE tickets SET dedup_key = ? WHERE id = ?",
@@ -81,10 +97,27 @@ func (w *Writer) Create(ctx context.Context, input CreateInput) (map[string]any,
 	if err := logTransition(ctx, tx, ticket.ID, "", ticket.Status, CleanOperator(input.UserName)); err != nil {
 		return nil, false, err
 	}
+	if err := w.linkConversation(ctx, tx, input.ConversationID, ticket.ID); err != nil {
+		return nil, false, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, false, fmt.Errorf("提交建单事务: %w", err)
 	}
 	return ticket.payload(), true, nil
+}
+
+func (w *Writer) linkConversation(ctx context.Context, tx *sql.Tx, conversationID, ticketID string) error {
+	if conversationID == "" {
+		return nil
+	}
+	query := "INSERT INTO conversation_tickets (conversation_id, ticket_id) VALUES (?, ?)"
+	if db.IsMySQL(w.db) {
+		query += " ON DUPLICATE KEY UPDATE ticket_id = conversation_tickets.ticket_id"
+	} else {
+		query += " ON CONFLICT (conversation_id, ticket_id) DO NOTHING"
+	}
+	_, err := tx.ExecContext(ctx, query, conversationID, ticketID)
+	return err
 }
 
 func recordedSteps(ctx context.Context, tx *sql.Tx, userID string) (string, error) {

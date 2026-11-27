@@ -102,4 +102,51 @@ func TestPublicChatPersistsOnlyCompleteTurns(t *testing.T) {
 		}
 		revision = page.Revision
 	}
+	if _, err := conn.Exec("INSERT INTO conversations VALUES ('other-session', 'u2', '其他客户', 1, 1)"); err != nil {
+		t.Fatal(err)
+	}
+	request := func(method, path, body string, handler http.HandlerFunc) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer legacy")
+		w := httptest.NewRecorder()
+		handler(w, r)
+		return w
+	}
+	created := request("POST", "/api/conversations", "", chat.handleConversationCollection)
+	var second conversationSummary
+	if err := json.Unmarshal(created.Body.Bytes(), &second); err != nil || created.Code != 201 || second.ID == "" {
+		t.Fatalf("create conversation: %d %s", created.Code, created.Body.String())
+	}
+	listed := request("GET", "/api/conversations", "", chat.handleConversationCollection)
+	var list struct {
+		Conversations []conversationSummary `json:"conversations"`
+	}
+	if err := json.Unmarshal(listed.Body.Bytes(), &list); err != nil || listed.Code != 200 || len(list.Conversations) != 2 || list.Conversations[0].ID != second.ID || list.Conversations[1].Title != "问题" {
+		t.Fatalf("list conversations: %d %s", listed.Code, listed.Body.String())
+	}
+	firstID := list.Conversations[1].ID
+	for _, stream := range []bool{false, true} {
+		respond := func(w http.ResponseWriter, r *http.Request) { chat.respond(w, r, stream) }
+		if w := request("POST", "/api/chat", `{"message":"越权","conversation_id":"other-session"}`, respond); w.Code != 404 {
+			t.Fatalf("foreign conversation write: %d %s", w.Code, w.Body.String())
+		}
+	}
+	if w := request("GET", "/api/conversation?conversation_id=other-session", "", chat.handleConversation); w.Code != 404 {
+		t.Fatalf("foreign conversation read: %d %s", w.Code, w.Body.String())
+	}
+	historyLength = 0
+	upstreamBody = `{"reply":"第二个答复"}`
+	respond := func(w http.ResponseWriter, r *http.Request) { chat.respond(w, r, false) }
+	if w := request("POST", "/api/chat", `{"message":"第二个问题","conversation_id":"`+second.ID+`"}`, respond); w.Code != 200 {
+		t.Fatalf("reply in new conversation: %d %s", w.Code, w.Body.String())
+	}
+	first := request("GET", "/api/conversation?conversation_id="+firstID, "", chat.handleConversation)
+	if first.Code != 200 || strings.Contains(first.Body.String(), "第二个") || !strings.Contains(first.Body.String(), "答复") {
+		t.Fatalf("first conversation history changed: %d %s", first.Code, first.Body.String())
+	}
+	secondHistory := request("GET", "/api/conversation?conversation_id="+second.ID, "", chat.handleConversation)
+	if secondHistory.Code != 200 || !strings.Contains(secondHistory.Body.String(), "第二个答复") {
+		t.Fatalf("second conversation history: %d %s", secondHistory.Code, secondHistory.Body.String())
+	}
+
 }

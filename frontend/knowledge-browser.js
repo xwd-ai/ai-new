@@ -57,7 +57,7 @@ if (typeof document !== 'undefined') {
     let response;
     try {
       response = await fetch(path, {...options,
-        headers: {Authorization: `Bearer ${token}`, 'Content-Type': 'application/json'},
+        headers: {Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...options.headers},
         signal: AbortSignal.timeout(options.method === 'POST' ? 60000 : 20000)});
       if (response.status === 401 || response.status === 403) {
         authorized = false;
@@ -74,6 +74,11 @@ if (typeof document !== 'undefined') {
       }
       if (response.status === 409) throw new Error('相同资料正在处理或租约已失效，请稍后核对并重试。');
       const recovering = path.startsWith('/api/knowledge/ingest/recover/');
+      if (!response.ok && path.startsWith('/api/knowledge/ingest/file?')) {
+        const error = await response.json().catch(() => ({}));
+        throw new Error(typeof error.detail === 'string' ? error.detail :
+          response.status === 413 ? '文件超过上传大小限制。' : '文件入库失败，请检查文件后重试。');
+      }
       if (!response.ok) throw new Error(response.status === 404 ?
         (recovering ? '待恢复记录不存在，请刷新列表。' : '资料不存在，请刷新列表。') :
         response.status === 422 && recovering ? '持久化记录无法恢复，请人工核对输入与处理阶段。' :
@@ -135,7 +140,12 @@ if (typeof document !== 'undefined') {
   byId('ingestForm').addEventListener('submit', event => {
     event.preventDefault();
     if (authorized) ingest.submit({title: byId('ingestTitle').value, content: byId('ingestContent').value,
-      kind: byId('ingestKind').value, keywords: byId('ingestKeywords').value});
+      kind: byId('ingestKind').value, keywords: byId('ingestKeywords').value, file: byId('ingestFile').files?.[0]});
+  });
+  byId('ingestFile').addEventListener('change', () => {
+    const file = byId('ingestFile').files?.[0];
+    byId('ingestContent').required = !file;
+    byId('ingestTitle').required = !file;
   });
   byId('ingestForm').addEventListener('input', () => {
     savedId = null; byId('viewSaved').hidden = true;
