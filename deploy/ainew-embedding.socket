@@ -1,0 +1,13 @@
+[Unit]
+Description=Private Embedding socket for AI New containers
+Wants=rag-embedding-tunnel.service
+After=rag-embedding-tunnel.service
+
+[Socket]
+ListenStream=/opt/ainew-xwp/embedding/embedding.sock
+SocketGroup=65534
+SocketMode=0660
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

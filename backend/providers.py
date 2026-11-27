@@ -5,10 +5,19 @@
 Embedding / Rerank 时无需改动业务链路。
 """
 
+import http.client
+import json
 import os
+import socket
+import ssl
+import time
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from dataclasses import dataclass
+from functools import lru_cache
+from threading import Lock
 from typing import Iterator, Protocol, Sequence
+from urllib.parse import urlsplit
 
 from backend.errors import ModelConfigurationError
 
@@ -110,12 +119,28 @@ class EmbeddingProvider(Protocol):
         ...
 
 
-class OpenAICompatEmbeddingProvider:
-    """基于 OpenAI 兼容接口的 Embedding 实现。
+class EmbeddingHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, host, port, *, context, timeout, socket_path):
+        super().__init__(host, port, context=context, timeout=timeout)
+        self._socket_path = socket_path
+        self._tls = context
 
-    通过 base_url / api_key 指向任意 OpenAI 兼容服务。默认对接
-    DeepSeek 的向量接口，也可换成其它兼容供应商而无需改动调用方。
-    """
+    def connect(self):
+        if not self._socket_path:
+            super().connect()
+            return
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(self.timeout)
+            sock.connect(self._socket_path)
+            self.sock = self._tls.wrap_socket(sock, server_hostname=self.host)
+        except Exception:
+            sock.close()
+            raise
+
+
+class OpenAICompatEmbeddingProvider:
+    """OpenAI 兼容的向量接口；E5 部署同时区分查询与文档。"""
 
     def __init__(
         self,
@@ -123,29 +148,95 @@ class OpenAICompatEmbeddingProvider:
         api_key: str | None = None,
         base_url: str | None = None,
         model: str | None = None,
+        e5: bool = False,
+        ca_file: str = "",
+        socket_path: str = "",
     ) -> None:
-        self._api_key = api_key or os.getenv("DEEPSEEK_API_KEY", "")
-        self._base_url = base_url or os.getenv(
-            "DEEPSEEK_BASE_URL", "https://api.deepseek.com"
-        )
-        self._model = model or os.getenv(
-            "EMBEDDING_MODEL", "deepseek-embedding"
-        )
-        from openai import OpenAI
-        self._client = OpenAI(api_key=self._api_key, base_url=self._base_url)
+        self._model = model or os.getenv("EMBEDDING_MODEL", "deepseek-embedding")
+        self._e5 = e5
+        self._passages: OrderedDict[str, list[float]] = OrderedDict()
+        self._cache_lock = Lock()
+        if e5:
+            self._endpoint = urlsplit(base_url or "")
+            if self._endpoint.scheme != "https" or not self._endpoint.hostname:
+                raise ValueError("Embedding endpoint must use HTTPS")
+            self._key = api_key
+            self._socket_path = socket_path
+            self._tls = ssl.create_default_context(cafile=ca_file or None)
+        else:
+            from openai import OpenAI
+
+            self._client = OpenAI(
+                api_key=api_key or os.getenv("DEEPSEEK_API_KEY", ""),
+                base_url=base_url or os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+            )
+
+    def _request(self, texts: Sequence[str], model: str) -> list[list[float]]:
+        if self._e5:
+            entries = self._request_private(texts, model)
+        else:
+            response = self._client.embeddings.create(model=model, input=list(texts))
+            entries = [{"index": entry.index, "embedding": entry.embedding} for entry in response.data]
+        entries.sort(key=lambda entry: entry["index"])
+        if [entry["index"] for entry in entries] != list(range(len(texts))):
+            raise ValueError("incomplete embedding response")
+        return [entry["embedding"] for entry in entries]
+
+    def _request_private(self, texts: Sequence[str], model: str) -> list[dict]:
+        body = json.dumps({"model": model, "input": list(texts), "encoding_format": "float"}, ensure_ascii=False).encode()
+        headers = {"Authorization": f"Bearer {self._key}", "Content-Type": "application/json"}
+        target = self._endpoint.path.rstrip("/") + "/embeddings"
+        for attempt in range(2):
+            connection = EmbeddingHTTPSConnection(
+                self._endpoint.hostname, self._endpoint.port,
+                context=self._tls, timeout=5, socket_path=self._socket_path,
+            )
+            try:
+                connection.request("POST", target, body=body, headers=headers)
+                response = connection.getresponse()
+                if response.status == 200:
+                    return json.loads(response.read(4 << 20))["data"]
+                if response.status not in (429, 503) or attempt:
+                    raise ConnectionError(f"Embedding HTTP {response.status}")
+            finally:
+                connection.close()
+            time.sleep(0.3)
 
     def embed(self, text: str, *, model: str | None = None) -> list[float]:
-        return self.embed_many([text], model=model)[0]
+        query = "query: " + text[:2000] if self._e5 else text
+        return self._request([query], model or self._model)[0]
 
-    def embed_many(
-        self, texts: Sequence[str], *, model: str | None = None
-    ) -> list[list[float]]:
+    def embed_many(self, texts: Sequence[str], *, model: str | None = None) -> list[list[float]]:
         if not texts:
             return []
-        resp = self._client.embeddings.create(
-            model=model or self._model, input=list(texts)
-        )
-        return [d.embedding for d in resp.data]
+        if not self._e5:
+            return self._request(texts, model or self._model)
+        passages = ["passage: " + text[:2000] for text in texts]
+        selected_model = model or self._model
+        if selected_model != self._model:
+            return self._batch_passages(passages, selected_model)
+
+        with self._cache_lock:
+            cached = {}
+            for passage in dict.fromkeys(passages):
+                if passage in self._passages:
+                    self._passages.move_to_end(passage)
+                    cached[passage] = self._passages[passage]
+        missing = list(dict.fromkeys(passage for passage in passages if passage not in cached))
+        if missing:
+            fetched = dict(zip(missing, self._batch_passages(missing, selected_model), strict=True))
+            cached.update(fetched)
+            with self._cache_lock:
+                self._passages.update(fetched)
+                while len(self._passages) > 2048:
+                    self._passages.popitem(last=False)
+        return [cached[passage] for passage in passages]
+
+    def _batch_passages(self, passages: list[str], model: str) -> list[list[float]]:
+        vectors = []
+        for start in range(0, len(passages), 16):
+            vectors.extend(self._request(passages[start:start + 16], model))
+        return vectors
 
 
 class RerankResult:
@@ -227,9 +318,23 @@ def build_chat_provider() -> ChatProvider:
     return OpenAICompatChatProvider()
 
 
-def build_embedding_provider() -> EmbeddingProvider:
-    """按环境变量装配一个 Embedding 能力实现。"""
-    return OpenAICompatEmbeddingProvider()
+@lru_cache(maxsize=1)
+def _embedding_client(key: str, url: str, model: str, ca_file: str, socket_path: str) -> EmbeddingProvider:
+    return OpenAICompatEmbeddingProvider(
+        api_key=key, base_url=url, model=model, e5=True, ca_file=ca_file, socket_path=socket_path,
+    )
+
+
+def build_embedding_provider() -> EmbeddingProvider | None:
+    """仅在显式配置外部 Embedding 时构建客户端。"""
+    key = os.getenv("EMBEDDING_API_KEY", "").strip()
+    url = os.getenv("EMBEDDING_BASE_URL", "").strip()
+    model = os.getenv("EMBEDDING_MODEL", "").strip()
+    if not _check_key("EMBEDDING_API_KEY")[0] or not url or not model:
+        return None
+    return _embedding_client(
+        key, url, model, os.getenv("EMBEDDING_CA_FILE", ""), os.getenv("EMBEDDING_SOCKET", ""),
+    )
 
 
 def build_rerank_provider() -> RerankProvider:
@@ -282,7 +387,10 @@ def inspect_capabilities() -> list[CapabilityStatus]:
     ok, hint = _check_key()
 
     chat_status = CapabilityStatus("chat", ok, hint)
-    embedding_status = CapabilityStatus("embedding", ok, hint or "")
+    embedding_ok, embedding_hint = _check_key("EMBEDDING_API_KEY")
+    if embedding_ok and not all((os.getenv(name) or "").strip() for name in ("EMBEDDING_BASE_URL", "EMBEDDING_MODEL")):
+        embedding_ok, embedding_hint = False, "请配置 EMBEDDING_BASE_URL 和 EMBEDDING_MODEL"
+    embedding_status = CapabilityStatus("embedding", embedding_ok, embedding_hint)
     rerank_status = CapabilityStatus("rerank", ok, hint or "")
 
     if ok:

@@ -91,4 +91,6 @@ def diagnose_knowledge(
 
     管理员专属：它会把内部标识与打分过程暴露出来，不适合给普通用户。
     """
-    return knowledge.diagnose(q, top_k=max(1, min(top_k, 20)))
+    provider = knowledge.configured_embedding()
+    options = {"embedding_provider": provider} if provider is not None else {}
+    return knowledge.diagnose(q, top_k=max(1, min(top_k, 20)), **options)

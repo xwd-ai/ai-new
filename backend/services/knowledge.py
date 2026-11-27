@@ -23,6 +23,7 @@ from numbers import Integral, Real
 
 from sqlalchemy import text
 
+from backend import providers
 from backend.database import SessionLocal
 from backend.logging_conf import log_event
 from backend.models import KnowledgeDoc
@@ -548,19 +549,21 @@ def search_knowledge_hybrid(
 
 
 def search_for_chat(query: str, top_k: int = 3) -> list[dict]:
-    """对话链路的统一检索入口：按配置选择混合检索或纯关键词。
-
-    默认走纯关键词。原因是**当前可用的模型供应商没有 embedding 接口**
-    （DeepSeek 返回 404），启用混合检索只会为每次查询增加一次必然失败的调用。
-
-    配置了支持 embedding 的供应商（OpenAI / 智谱 / 本地 BGE 等）之后，
-    设置环境变量 ``RETRIEVAL_MODE=hybrid`` 即可启用「关键词 + 向量 + RRF」。
-    向量路失败时 ``search_knowledge_hybrid`` 内部会退化为纯关键词，不会影响可用性。
-    """
-    mode = (os.getenv("RETRIEVAL_MODE") or "keyword").strip().lower()
-    if mode == "hybrid":
-        return search_knowledge_hybrid(query, top_k=top_k)
+    """按配置在关键词检索和混合检索之间选择。"""
+    provider = configured_embedding()
+    if provider is not None:
+        return search_knowledge_hybrid(query, top_k=top_k, embedding_provider=provider)
     return search_knowledge(query, top_k=top_k)
+
+
+def configured_embedding():
+    if os.getenv("RETRIEVAL_MODE", "keyword").strip().lower() != "hybrid":
+        return None
+    try:
+        return providers.build_embedding_provider()
+    except (OSError, ValueError):
+        log_event("embedding_configuration_error")
+        return None
 
 
 # ---------------------------------------------------------------------------

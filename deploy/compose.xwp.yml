@@ -3,6 +3,8 @@ services:
     ports: !reset []
   backend:
     image: ainew-xwp-backend:${DEPLOY_SHA}
+    volumes:
+      - /opt/ainew-xwp/embedding:/run/ainew-embedding:ro
     environment:
       SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD}
       SEED_CUSTOMER_PASSWORD: ${SEED_CUSTOMER_PASSWORD}

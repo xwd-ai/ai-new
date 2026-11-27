@@ -1,0 +1,9 @@
+[Unit]
+Description=Forward AI New Embedding socket to its private SSH tunnel
+Requires=ainew-embedding.socket
+After=ainew-embedding.socket
+
+[Service]
+ExecStart=/lib/systemd/systemd-socket-proxyd 127.0.0.1:18443
+DynamicUser=yes
+NoNewPrivileges=yes

@@ -51,7 +51,7 @@ flowchart LR
    AGENT_INTERNAL_TOKEN=<第二条命令的输出>
    ```
 
-2. 配置对话模型。首次配置时复制 [模型配置示例](backend/.env.example)，然后在 `backend/.env` 中填写 `DEEPSEEK_API_KEY`。已有该文件可直接编辑。默认使用关键词检索。启用混合检索时，将 `RETRIEVAL_MODE` 设为 `hybrid`，并将 `DEEPSEEK_BASE_URL`、`DEEPSEEK_API_KEY` 和 `EMBEDDING_MODEL` 配置为支持向量化的 OpenAI 兼容服务及其模型。
+2. 配置对话模型。首次配置时复制 [模型配置示例](backend/.env.example)，然后在 `backend/.env` 中填写 `DEEPSEEK_API_KEY`。已有该文件可直接编辑。默认使用关键词检索。启用混合检索时，将 `RETRIEVAL_MODE` 设为 `hybrid`，并单独配置 `EMBEDDING_BASE_URL`、`EMBEDDING_API_KEY` 和 `EMBEDDING_MODEL`。
 
    ```bash
    cp -n backend/.env.example backend/.env
@@ -77,6 +77,7 @@ flowchart LR
 | `MYSQL_PUBLISHED_PORT` | 根目录 `.env` | 宿主机连接 MySQL 的端口，默认 `3307`。容器之间使用 `mysql:3306` |
 | `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL` | `backend/.env` | 对话模型 API 配置 |
 | `RETRIEVAL_MODE` | `backend/.env` | `keyword` 使用关键词检索，`hybrid` 启用混合检索 |
+| `EMBEDDING_BASE_URL`、`EMBEDDING_API_KEY`、`EMBEDDING_MODEL` | `backend/.env` | 独立的 HTTPS E5 向量服务 |
 
 排查启动问题时，用 `docker compose logs --tail=100 gateway go-business backend go-retrieval mysql` 查看各服务日志。网关在线但上游异常时，`/health` 可能仍返回 HTTP 200，需同时检查响应中的状态和上游信息。
 
@@ -87,6 +88,8 @@ flowchart LR
 推送到 `main` 后，[部署工作流](.github/workflows/deploy-xwp.yml)会按提交 SHA 构建四个应用镜像，传到部署服务器并替换对应容器。MySQL 数据和检索配置保存在独立数据卷。部署会检查网关与上游服务的健康状态，失败时尝试恢复上一版应用镜像。
 
 上线入口为 [xwp.xwd.info](https://xwp.xwd.info/)。Nginx 负责 HTTPS，网关只绑定宿主机回环地址的 `2080` 端口。服务器上的部署配置在 `/opt/ainew-xwp/.env`，模型配置在 `/opt/ainew-xwp/backend/.env`。GitHub Actions 使用 `XWP_DEPLOY_KEY` 和 `XWP_KNOWN_HOSTS` 连接部署服务器。
+
+线上 Embedding 通过 SSH 隧道访问远端服务。Python 容器通过只读挂载的 Unix Socket 连接宿主机的隧道，并使用服务证书验证 TLS。部署主机的 Socket 中继由 [systemd 单元](deploy/ainew-embedding.socket)维护，`EMBEDDING_CA_FILE` 和 `EMBEDDING_SOCKET` 配置见 [环境变量示例](backend/.env.example)。
 
 ## 从 SQLite 导入 MySQL
 

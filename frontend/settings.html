@@ -49,7 +49,7 @@
   <main>
     <h1>检索设置</h1>
     <p class="intro">调整候选范围与结果多样性，再用一个问题检查各阶段的命中情况。</p>
-    <div class="notice">当前对话使用关键词检索，这里的参数不会改变对话检索。试查支持候选预取与 MMR；HTTP 尚未启用向量和重排模型，RRF 参数仅在服务层启用混合检索时生效。</div>
+    <div class="notice">启用混合检索时，对话与试查使用关键词和向量召回，RRF 参数用于融合结果。向量不可用时回退到关键词；试查结果会显示各阶段状态。</div>
     <p id="access" class="status" role="status">正在核对管理员身份…</p>
     <p id="loginLink" hidden><a href="/login">前往登录</a></p>
     <div class="workspace">
