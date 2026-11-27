@@ -78,6 +78,7 @@ function page(handler=()=>null, rows=[{role:'user',content:'saved'}]) {
       }
       if(url==='/api/chat')return json({reply:'answer',sources:[],trace:[],suggest_ticket:false});
       if(url==='/api/order')return json({order:null});
+      if(url==='/api/tickets' && !options.method)return json({tickets:[],total:0,page:1,pages:0});
       throw Error('unexpected URL '+url);
     },
   });
@@ -703,9 +704,9 @@ test('late clipboard completion cannot show feedback for an edited draft',async(
 
 test('a late uncertain question invalidates the expired page copy feedback',async()=>{
   let sends=0, reply;
-  const {elements:e,navigator}=page(url=>{
+  const {elements:e,navigator}=page((url, options)=>{
     if(url==='/api/chat')return ++sends===1?json({reply:'answer',suggest_ticket:true}):new Promise(resolve=>reply=resolve);
-    if(url==='/api/tickets')return json({},401);
+    if(url==='/api/tickets' && options.method==='POST')return json({},401);
   });
   const copied=[];
   navigator.clipboard={writeText:async text=>copied.push(text)};
@@ -728,9 +729,9 @@ test('a late uncertain question invalidates the expired page copy feedback',asyn
 
 test('ticket 401 locks identity and cancels a history request already in flight',async()=>{
   let hold=false,release;
-  const {elements:e,calls}=page(url=>{
+  const {elements:e,calls}=page((url, options)=>{
     if(url==='/api/chat')return json({reply:'answer',suggest_ticket:true});
-    if(url==='/api/tickets')return json({},401);
+    if(url==='/api/tickets' && options.method==='POST')return json({},401);
     if(hold&&url.startsWith('/api/conversation?'))return new Promise(r=>release=r);
   });
   await settle();e.msgInput.value='question';await e.sendBtn.emit('click');
@@ -751,7 +752,7 @@ test('chat 401 keeps the question and leaves send disabled after the request fin
 });
 
 test('ticket 403 retains the confirmation without classifying it as session expiry',async()=>{
-  const {elements:e}=page(url=>url==='/api/chat'?json({reply:'answer',suggest_ticket:true}):url==='/api/tickets'?json({},403):null);
+  const {elements:e}=page((url, options)=>url==='/api/chat'?json({reply:'answer',suggest_ticket:true}):url==='/api/tickets' && options.method==='POST'?json({},403):null);
   await settle();e.msgInput.value='question';await e.sendBtn.emit('click');
   const confirm=e.chatLog.querySelector('.ct-btn.primary');await confirm.emit('click');
   assert.equal(e.reloginLink.hidden,true);assert.equal(e.sendBtn.disabled,false);
@@ -766,4 +767,45 @@ test('exhausted page failures preserve old messages and permit manual sync',asyn
   assert.equal(state.elements.chatLog.textContent,before); assert.equal(state.elements.syncHistory.disabled,false);
   fail=false; await state.elements.syncHistory.emit('click');
   assert.match(state.elements.connectionStatus.textContent,/历史已同步/);
+});
+
+test('submitting a suggested ticket confirms the draft and refreshes the signed-in ticket list', async () => {
+  const ticket = {id: 'T-1', description: '导出失败', status: 'pending_confirm'};
+  let stored = false;
+  const {elements: e, calls} = page((url, options) => {
+    if (url === '/api/chat') return json({reply: '需要人工跟进', suggest_ticket: true});
+    if (url === '/api/tickets' && options.method === 'POST') {
+      stored = true;
+      return json({ticket});
+    }
+    if (url === '/api/tickets/confirm') {
+      assert.deepEqual(JSON.parse(options.body), {ticket_id: 'T-1'});
+      ticket.status = 'open';
+      return json({ticket});
+    }
+    if (url === '/api/tickets' && stored) return json({tickets: [ticket], total: 1, page: 1, pages: 1});
+  });
+  await settle();
+  assert.match(e.ticketListStatus.textContent, /暂无工单/);
+  e.msgInput.value = ticket.description;
+  await e.sendBtn.emit('click');
+  await e.chatLog.querySelector('.ct-btn.primary').emit('click');
+  assert.match(e.ticketList.textContent, /T-1 · 待处理 · 导出失败/);
+  assert.ok(calls.filter(call => call.url.startsWith('/api/tickets'))
+    .every(call => call.headers.Authorization === 'Bearer test-token'));
+});
+
+test('a saved draft stays visible and can be submitted from my tickets', async () => {
+  const ticket = {id: 'T-2', description: '激活失败', status: 'pending_confirm'};
+  const {elements: e} = page(url => {
+    if (url === '/api/tickets/confirm') {
+      ticket.status = 'open';
+      return json({ticket});
+    }
+    if (url === '/api/tickets') return json({tickets: [ticket], total: 1, page: 1, pages: 1});
+  });
+  await settle();
+  assert.match(e.ticketList.textContent, /待确认/);
+  await e.ticketList.children[0].children[1].emit('click');
+  assert.match(e.ticketList.textContent, /待处理/);
 });

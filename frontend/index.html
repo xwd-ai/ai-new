@@ -293,6 +293,12 @@
     .trace-dot.err { background: #e03131; }
     .trace-dot.warn { background: #e8890c; }
 
+    .my-tickets { padding: 10px 22px; background: white; border-bottom: 1px solid var(--border); }
+    .my-tickets summary { cursor: pointer; font-weight: 600; }
+    #ticketListStatus { margin: 6px 0; color: var(--muted); font-size: 13px; }
+    #ticketList { max-height: 28vh; overflow: auto; }
+    .my-ticket-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 0; overflow-wrap: anywhere; }
+
     @media (max-width: 1080px) {
       .layout { grid-template-columns: 220px 1fr; }
       .aside { display: none; }
@@ -311,43 +317,13 @@
         <div class="logo">AI</div>
         <div>
           <div class="name">客服工作台</div>
-          <div class="ver">工单助手 · Demo</div>
+          <div class="ver">工单助手</div>
         </div>
       </div>
-      <button class="new-chat" onclick="newChat()">＋ 新建会话</button>
       <div class="conv-list">
-        <div class="title">最近会话</div>
-        <div class="conv active" id="conv0" onclick="switchConv(this)">
-          <div class="avatar">李</div>
-          <div class="meta">
-            <div class="who">李女士</div>
-            <div class="preview">专业版导出功能一直失败…</div>
-          </div>
-          <span class="badge">2</span>
-        </div>
-        <div class="conv" onclick="switchConv(this)">
-          <div class="avatar">王</div>
-          <div class="meta">
-            <div class="who">王先生</div>
-            <div class="preview">退款申请怎么操作？</div>
-          </div>
-          <span class="time">10:24</span>
-        </div>
-        <div class="conv" onclick="switchConv(this)">
-          <div class="avatar">张</div>
-          <div class="meta">
-            <div class="who">张先生</div>
-            <div class="preview">激活码输入提示无效</div>
-          </div>
-          <span class="time">昨天</span>
-        </div>
-      </div>
-
-      <div class="nav" id="navAdmin" style="display:none;">
-        <div class="title">管理</div>
-        <div class="conv" onclick="goTickets()">
-          <div class="avatar" style="background:linear-gradient(135deg,#4f6ef7,#7a5cf0);">单</div>
-          <div class="meta"><div class="who">工单管理</div></div>
+        <div class="title">我的会话</div>
+        <div class="conv active">
+          <div class="meta"><div class="who">智能客服</div></div>
         </div>
       </div>
 
@@ -364,14 +340,17 @@
     <!-- 中间聊天 -->
     <main class="main">
       <div class="topbar">
-        <div class="cust-avatar">李</div>
-        <div>
-          <div class="cust-name">李女士</div>
-          <div class="cust-status">在线 · 专业版</div>
-        </div>
-        <div class="spacer"></div>
-        <span class="tag">工单 #T-1024</span>
+        <div class="cust-avatar">AI</div>
+        <div class="cust-name">智能客服</div>
       </div>
+
+      <details class="my-tickets" id="myTickets">
+        <summary>我的工单 <span id="ticketCount"></span></summary>
+        <p id="ticketListStatus" role="status"></p>
+        <div id="ticketList"></div>
+        <button id="refreshTickets" type="button">刷新工单</button>
+        <button id="nextTickets" type="button" hidden>下一页</button>
+      </details>
 
       <div style="padding:8px 22px;display:flex;flex-wrap:wrap;align-items:center;gap:12px;font-size:13px;color:var(--muted)">
         <span id="connectionStatus" role="status" aria-live="polite">正在同步历史…</span>
@@ -444,11 +423,11 @@
     const input = document.getElementById('msgInput');
     const sendBtn = document.getElementById('sendBtn');
 
-    // 显示当前用户 + 管理员入口
-    document.getElementById('meName').textContent = me.name;
-    document.getElementById('meRole').textContent = me.role === 'admin' ? '管理员' : '用户';
-    document.getElementById('meAvatar').textContent = me.name.charAt(0);
-    if (me.role === 'admin') document.getElementById('navAdmin').style.display = '';
+    // 显示当前用户
+    document.getElementById('meName').textContent = me?.name || '未登录';
+    document.getElementById('custName').textContent = me?.name || '未登录';
+    document.getElementById('meRole').textContent = me?.role === 'admin' ? '管理员' : '用户';
+    document.getElementById('meAvatar').textContent = (me?.name || '客').charAt(0);
 
     document.getElementById('logoutBtn').addEventListener('click', () => {
       localStorage.removeItem('token');
@@ -512,15 +491,92 @@
       return b;
     }
 
-    // 确认建单按钮
+    const ticketStatusText = {
+      pending_confirm: '待确认', open: '待处理', in_progress: '处理中',
+      resolved: '已解决', transferred_human: '已转人工', closed: '已关闭',
+    };
+    const ticketList = document.getElementById('ticketList');
+    const ticketListStatus = document.getElementById('ticketListStatus');
+    const nextTickets = document.getElementById('nextTickets');
+    let ticketPage = 1;
+    let ticketRequest = 0;
+
+    async function ticketRequestJSON(path, body) {
+      const headers = { Authorization: 'Bearer ' + token };
+      const options = { headers };
+      if (body) {
+        headers['Content-Type'] = 'application/json';
+        options.method = 'POST';
+        options.body = JSON.stringify(body);
+      }
+      const res = await fetch(path, options);
+      if (res.status === 401) requireRelogin('登录已失效，请重新登录。');
+      if (!res.ok) throw new Error('工单请求失败');
+      return res.json();
+    }
+
+    async function confirmTicket(id) {
+      return (await ticketRequestJSON('/api/tickets/confirm', {ticket_id: id})).ticket;
+    }
+
+    function renderTicketRow(ticket) {
+      const row = document.createElement('div');
+      row.className = 'my-ticket-row';
+      const label = document.createElement('span');
+      label.textContent = `#${ticket.id} · ${ticketStatusText[ticket.status] || ticket.status} · ${ticket.description}`;
+      row.appendChild(label);
+      if (ticket.status === 'pending_confirm') {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = '确认提交';
+        button.addEventListener('click', async () => {
+          if (!canUseSession()) return;
+          button.disabled = true;
+          try {
+            await confirmTicket(ticket.id);
+            await loadTickets(ticketPage);
+          } catch {
+            ticketListStatus.textContent = '确认失败，请重试。';
+            button.disabled = loginRequired;
+          }
+        });
+        row.appendChild(button);
+      }
+      return row;
+    }
+
+    async function loadTickets(page = 1) {
+      if (!token || !me || me.role === 'admin' || !canUseSession()) return;
+      const request = ++ticketRequest;
+      nextTickets.hidden = true;
+      ticketListStatus.textContent = '正在加载工单…';
+      try {
+        const path = page === 1 ? '/api/tickets' : `/api/tickets?page=${page}`;
+        const data = await ticketRequestJSON(path);
+        if (request !== ticketRequest || !canUseSession()) return;
+        ticketPage = data.page || 1;
+        document.getElementById('ticketCount').textContent = `（${data.total}）`;
+        ticketList.replaceChildren(...data.tickets.map(renderTicketRow));
+        ticketListStatus.textContent = data.tickets.length
+          ? `第 ${ticketPage} / ${data.pages} 页` : '暂无工单';
+        nextTickets.hidden = !data.has_more;
+      } catch {
+        if (request !== ticketRequest) return;
+        ticketListStatus.textContent = loginRequired ? '请重新登录后查看工单。' : '工单加载失败，请刷新重试。';
+      }
+    }
+
+    document.getElementById('refreshTickets').addEventListener('click', () => loadTickets());
+    nextTickets.addEventListener('click', () => loadTickets(ticketPage + 1));
+
     // 确认建单按钮（带来源依据）
-    function addConfirmTicket(body, description) {
+    function addConfirmTicket(body, description, sources) {
       const wrap = document.createElement('div');
       wrap.className = 'confirm-ticket';
       wrap.innerHTML = `
         <div class="ct-text">是否需要我为您创建工单，让人工客服跟进？</div>
         <div class="ct-actions">
-          <button class="ct-btn primary">确认创建工单</button>
+          <button class="ct-btn primary">确认提交工单</button>
           <button class="ct-btn">暂不需要</button>
         </div>`;
       body.appendChild(wrap);
@@ -532,29 +588,24 @@
         if (!canUseSession()) return;
         confirmBtn.disabled = true;
         confirmBtn.textContent = '创建中…';
+        cancelBtn.disabled = true;
+        let draft;
         try {
-          // 把当前命中的知识来源作为「排查依据」沉淀进工单
-          const evidence = currentSources.length
-            ? currentSources.map(s => s.title).join('；')
-            : 'AI 客服建议';
-          const res = await fetch('/api/tickets', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-            body: JSON.stringify({
-              description: description,
-              evidence: evidence,
-            }),
-          });
-          if (res.status === 401) requireRelogin('登录已失效，请重新登录。');
-          if (!res.ok) throw new Error('工单创建失败');
-          const data = await res.json();
-          const t = data.ticket;
+          const evidence = sources.map(source => source.title).join('；') || 'AI 客服建议';
+          const data = await ticketRequestJSON('/api/tickets', {description, evidence});
+          draft = data.ticket;
+          const ticket = draft.status === 'pending_confirm' ? await confirmTicket(draft.id) : draft;
           wrap.innerHTML = '';
-          addTicketCard(body, t);
-        } catch (e) {
+          addTicketCard(body, ticket);
+        } catch {
           confirmBtn.disabled = loginRequired;
-          confirmBtn.textContent = '确认创建工单';
+          cancelBtn.disabled = false;
+          confirmBtn.textContent = '重试提交工单';
+          wrap.querySelector('.ct-text').textContent = draft
+            ? '草稿已保存，可重试或在「我的工单」中确认。'
+            : '提交结果未确认，请重试或刷新「我的工单」。';
         }
+        await loadTickets();
       });
       cancelBtn.addEventListener('click', () => {
         wrap.innerHTML = `<div class="ct-dismiss">好的，如后续需要可随时让我创建工单。</div>`;
@@ -565,12 +616,12 @@
       const card = document.createElement('div');
       card.className = 'ticket-card';
       card.innerHTML = `
-        <div class="tc-head"><span>📋 工单已创建</span><span class="spacer"></span><span class="tc-status">${t.status === 'open' ? '待处理' : t.status}</span></div>
+        <div class="tc-head"><span>工单已提交</span><span class="spacer"></span><span class="tc-status">${escapeHtml(ticketStatusText[t.status] || t.status)}</span></div>
         <div class="tc-body">
           <div class="tc-row"><span class="k">问题</span><span class="v">${escapeHtml(t.description)}</span></div>
           <div class="tc-row"><span class="k">依据</span><span class="v">${escapeHtml(t.evidence || '—')}</span></div>
           <div class="tc-row"><span class="k">工单号</span><span class="v">#${escapeHtml(t.id)}</span></div>
-          <div class="tc-row"><span class="k">状态</span><span class="v">已提交，人工客服将尽快处理</span></div>
+          <div class="tc-row"><span class="k">状态</span><span class="v">${escapeHtml(ticketStatusText[t.status] || t.status)}</span></div>
         </div>`;
       body.appendChild(card);
       scrollBottom();
@@ -636,7 +687,6 @@
     }
 
     // 当前对话命中的知识来源（供建单时沉淀为「依据」）
-    let currentSources = [];
     let renderedHistory = null;
 
     const syncBtn = document.getElementById('syncHistory');
@@ -746,7 +796,6 @@
         const atBottom = isAtBottom();
         if (!canReuse) {
           log.replaceChildren();
-          currentSources = [];
         }
         for (const message of messages.slice(firstNewMessage)) {
           if (message.role === 'user') addUserMsg(message.content, false);
@@ -915,8 +964,6 @@
         reply = '发送结果不确定，服务可能仍在处理。请点击「同步历史」查看已保存的回答，避免重复发送。';
       }
 
-      currentSources = sources;
-
       // 用真实回复替换「正在思考」
       typing.textContent = reply;
       typing.style.color = '';
@@ -926,7 +973,7 @@
       addSources(body, sources);
 
       if (suggest) {
-        addConfirmTicket(body, text);
+        addConfirmTicket(body, text, sources);
       }
 
       await recovery.finishSend(uncertain);
@@ -947,19 +994,9 @@
       input.value = t;
       handleSend();
     }
-    function newChat() {
-      if (recovery.sending || recovery.syncing) return;
-      log.innerHTML = '';
-      renderedHistory = null;
-      currentSources = [];
-      updateJumpLatest();
-      input.focus();
-    }
-    function switchConv(el) { document.querySelectorAll('.conv').forEach(c => c.classList.remove('active')); el.classList.add('active'); }
-    function goTickets() { alert('工单管理页（后续实现）'); }
-
     // ---- 加载历史对话，让用户「记得」之前聊过什么 ----
     recovery.sync();
+    loadTickets();
 
     // ---- 加载真实订单信息到右侧面板 ----
     async function loadOrder() {
@@ -968,7 +1005,6 @@
         const data = await res.json();
         const o = data.order;
         if (!o || !o.has_order) return;
-        document.getElementById('custName').textContent = me.name;
         document.getElementById('custProduct').textContent = o.product_name;
         document.getElementById('custStatus').textContent = o.in_service ? '服务期内' : '服务期外';
         document.getElementById('custStatus').className = 'pill ' + (o.in_service ? 'ok' : 'warn');
