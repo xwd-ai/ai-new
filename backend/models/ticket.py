@@ -1,6 +1,6 @@
 from enum import Enum
 
-from sqlalchemy import JSON, BigInteger, Integer, String, Text
+from sqlalchemy import JSON, BigInteger, Column, ForeignKey, Integer, String, Table, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base, DB_TIMESTAMP
@@ -290,6 +290,14 @@ class Ticket(Base):
             "created_at": self.created_at,
             "replies": self.replies,
         }
+
+
+conversation_tickets = Table(
+    "conversation_tickets",
+    Base.metadata,
+    Column("conversation_id", String(64), ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True),
+    Column("ticket_id", String(64), ForeignKey("tickets.id", ondelete="CASCADE"), primary_key=True),
+)
 
 
 class TicketNumberCounter(Base):

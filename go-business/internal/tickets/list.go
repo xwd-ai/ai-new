@@ -7,6 +7,7 @@ import (
 )
 
 type ListFilter struct {
+	ConversationID             string
 	UserID, Keyword, Direction string
 	Statuses                   []string
 	Page, Size                 int
@@ -18,6 +19,10 @@ func (r *Repository) Page(ctx context.Context, filter ListFilter) ([]map[string]
 	if filter.UserID != "" {
 		where += " AND user_id = ?"
 		args = append(args, filter.UserID)
+	}
+	if filter.ConversationID != "" {
+		where += " AND id IN (SELECT ticket_id FROM conversation_tickets WHERE conversation_id = ?)"
+		args = append(args, filter.ConversationID)
 	}
 	if len(filter.Statuses) > 0 {
 		where += " AND status IN (?" + strings.Repeat(", ?", len(filter.Statuses)-1) + ")"

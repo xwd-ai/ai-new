@@ -166,7 +166,7 @@ func registerRoutes(mux *http.ServeMux) {
 	for _, pattern := range []string{
 		"POST /api/register", "POST /api/login", "GET /api/me",
 		"POST /api/refresh", "POST /api/logout", "POST /api/sessions/cleanup",
-		"POST /api/chat", "POST /api/chat/stream", "GET /api/conversation",
+		"POST /api/chat", "POST /api/chat/stream", "GET /api/conversation", "GET /api/conversations", "POST /api/conversations",
 		"GET /api/sources/{source_id}", "GET /api/knowledge/items",
 		"GET /api/knowledge/ingest/pending", "GET /api/knowledge/settings", "PUT /api/knowledge/settings",
 		"GET /api/order", "GET /api/order/list", "GET /api/order/scope",

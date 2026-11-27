@@ -11,6 +11,7 @@ import (
 	"errors"
 	"math"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -40,10 +41,10 @@ func chatRecordID() string {
 	return hex.EncodeToString(id[:])
 }
 
-func (s chatStore) prepare(ctx context.Context, userID string) (string, []chatMessage, error) {
+func (s chatStore) prepare(ctx context.Context, userID, selected string) (string, []chatMessage, error) {
 	var id string
-	err := s.read.QueryRowContext(ctx, latestConversation, userID).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
+	err := findConversation(ctx, s.read, userID, selected, &id)
+	if selected == "" && errors.Is(err, sql.ErrNoRows) {
 		id, err = s.createConversation(ctx, userID)
 	}
 	if err != nil {
@@ -86,13 +87,58 @@ func (s chatStore) createConversation(ctx context.Context, userID string) (strin
 	if !errors.Is(err, sql.ErrNoRows) {
 		return id, err
 	}
-	id, now := chatRecordID(), chatNow()
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO conversations (id, user_id, title, created_at, updated_at)
-		VALUES (?, ?, '', ?, ?)`, id, userID, now, now); err != nil {
+	id, err = insertConversation(ctx, tx, userID)
+	if err != nil {
 		return "", err
 	}
 	return id, tx.Commit()
+}
+
+type conversationQuery interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func findConversation(ctx context.Context, q conversationQuery, userID, selected string, id *string) error {
+	if selected == "" {
+		return q.QueryRowContext(ctx, latestConversation, userID).Scan(id)
+	}
+	return q.QueryRowContext(ctx, "SELECT id FROM conversations WHERE user_id = ? AND id = ?", userID, selected).Scan(id)
+}
+
+type conversationInsert interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func insertConversation(ctx context.Context, conn conversationInsert, userID string) (string, error) {
+	id, now := chatRecordID(), chatNow()
+	_, err := conn.ExecContext(ctx, `
+        INSERT INTO conversations (id, user_id, title, created_at, updated_at)
+        VALUES (?, ?, '', ?, ?)`, id, userID, now, now)
+	return id, err
+}
+
+type conversationSummary struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+func (s chatStore) listConversations(ctx context.Context, userID string) ([]conversationSummary, error) {
+	rows, err := s.read.QueryContext(ctx, `
+        SELECT id, title FROM conversations WHERE user_id = ?
+        ORDER BY updated_at DESC, created_at DESC, id DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []conversationSummary{}
+	for rows.Next() {
+		var item conversationSummary
+		if err := rows.Scan(&item.ID, &item.Title); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 func (s chatStore) saveTurn(ctx context.Context, userID, id, message, reply, step string) error {
@@ -114,7 +160,11 @@ func (s chatStore) saveTurn(ctx context.Context, userID, id, message, reply, ste
 		chatRecordID(), id, message, userAt, chatRecordID(), id, reply, replyAt); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, "UPDATE conversations SET updated_at = ? WHERE id = ?", replyAt, id); err != nil {
+	title := []rune(strings.Join(strings.Fields(message), " "))
+	if len(title) > 40 {
+		title = title[:40]
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE conversations SET updated_at = ?, title = CASE WHEN title = '' THEN ? ELSE title END WHERE id = ?", replyAt, string(title), id); err != nil {
 		return err
 	}
 	if step != "" {
@@ -127,7 +177,7 @@ func (s chatStore) saveTurn(ctx context.Context, userID, id, message, reply, ste
 	return tx.Commit()
 }
 
-func (s chatStore) conversation(ctx context.Context, userID string, offset, limit int, paged bool) (map[string]any, error) {
+func (s chatStore) conversation(ctx context.Context, userID, selected string, offset, limit int, paged bool) (map[string]any, error) {
 	messages := []storedMessage{}
 	response := map[string]any{"messages": messages}
 	if paged {
@@ -142,8 +192,8 @@ func (s chatStore) conversation(ctx context.Context, userID string, offset, limi
 	}
 	defer tx.Rollback()
 	var id string
-	err = tx.QueryRowContext(ctx, latestConversation, userID).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
+	err = findConversation(ctx, tx, userID, selected, &id)
+	if selected == "" && errors.Is(err, sql.ErrNoRows) {
 		return response, nil
 	}
 	if err != nil {

@@ -124,7 +124,9 @@
 | `stopped` | `reason` |
 | `error` | `message`；服务异常带 `error_code`、`retryable`，空回答重试带 `retry`；检索失败可能带 `query` |
 
-`GET /api/conversation` 无分页参数时返回当前用户最近会话的全部消息，按 `at`、消息 `id` 依次升序排列；时间戳相同以编号的字符串升序稳定决胜，响应仍不增加编号字段：
+客户可以用 `GET /api/conversations` 查看自己的会话，用 `POST /api/conversations` 新建。会话列表通过 `conversations` 字段返回，每项包含 `id` 和 `title`。新建返回 HTTP 201 和新会话的 `id`、`title`。读取历史时用查询参数 `conversation_id` 选择会话，发送普通或流式消息时在 JSON 请求体中传同名字段。显式指定会话需要登录，只能操作本人会话。省略该字段时沿用最近会话规则。
+
+`GET /api/conversation` 无分页参数时返回选中会话的全部消息，按 `at`、消息 `id` 依次升序排列；时间戳相同以编号的字符串升序稳定决胜，响应仍不增加编号字段：
 
 ```json
 {"messages":[{"role":"user","content":"导出失败怎么办？","at":1700000000.0},{"role":"assistant","content":"请补充导出格式。","at":1700000001.0}]}

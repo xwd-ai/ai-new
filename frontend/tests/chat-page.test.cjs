@@ -32,6 +32,7 @@ class Element {
     for (const fn of this.listeners[name] || []) fn({preventDefault(){},...extra});
     await settle();
   }
+  setAttribute(name,value) { this[name]=value; }
   focus() { this.focused=true; }
   select() { this.selected=true; }
 }
@@ -78,6 +79,7 @@ function page(handler=()=>null, rows=[{role:'user',content:'saved'}]) {
       }
       if(url==='/api/chat')return json({reply:'answer',sources:[],trace:[],suggest_ticket:false});
       if(url==='/api/order')return json({order:null});
+      if(url==='/api/conversations')return json({conversations:[]});
       if(url==='/api/tickets' && !options.method)return json({tickets:[],total:0,page:1,pages:0});
       throw Error('unexpected URL '+url);
     },
@@ -806,6 +808,73 @@ test('a saved draft stays visible and can be submitted from my tickets', async (
   });
   await settle();
   assert.match(e.ticketList.textContent, /待确认/);
-  await e.ticketList.children[0].children[1].emit('click');
+  await e.ticketList.children[0].children[2].emit('click');
   assert.match(e.ticketList.textContent, /待处理/);
+});
+
+test('creating and switching conversations isolates history, drafts and newly sent messages', async () => {
+  const conversations = [{id: 'first', title: '问题一'}];
+  const histories = {first: [{role: 'user', content: '第一条会话原文'}], second: []};
+  const {elements: e, calls} = page((url, options) => {
+    if (url === '/api/conversations' && options.method === 'POST') {
+      const item = {id: 'second', title: ''};
+      conversations.unshift(item);
+      return json(item, 201);
+    }
+    if (url === '/api/conversations') return json({conversations});
+    if (url.startsWith('/api/conversation?')) {
+      const id = new URLSearchParams(url.split('?')[1]).get('conversation_id');
+      return json({messages: histories[id], total: histories[id].length, conversation_id: id});
+    }
+  });
+  await settle();
+  assert.match(e.chatLog.textContent, /第一条会话原文/);
+  e.msgInput.value = '第一条会话草稿';
+  await e.createConversation.emit('click');
+  assert.doesNotMatch(e.chatLog.textContent, /第一条会话原文/);
+  assert.equal(e.msgInput.value, '');
+  e.msgInput.value = '第二条会话的新问题';
+  await e.sendBtn.emit('click');
+  const sent = calls.find(call => call.url === '/api/chat');
+  assert.deepEqual(JSON.parse(sent.body), {message: '第二条会话的新问题', conversation_id: 'second'});
+  await e.conversationList.children[1].emit('click');
+  assert.match(e.chatLog.textContent, /第一条会话原文/);
+  assert.doesNotMatch(e.chatLog.textContent, /第二条会话的新问题/);
+  assert.equal(e.msgInput.value, '第一条会话草稿');
+});
+
+test('customer can open a ticket and read its description, evidence and replies', async () => {
+  const ticket = {id: 'T-20', status: 'open', description: '无法导出', evidence: '导出指南',
+    reply_timeline: {items: [{replier: '客服', content: '已收到'}]}};
+  const {elements: e, calls} = page(url => {
+    if (url === '/api/tickets') return json({tickets: [ticket], total: 1, pages: 1});
+    if (url === '/api/tickets/T-20') return json({ticket});
+  });
+  await settle();
+  await e.ticketList.children[0].children[1].emit('click');
+  assert.equal(e.ticketDetail.hidden, false);
+  assert.match(e.ticketDetail.textContent, /无法导出/);
+  assert.match(e.ticketDetail.textContent, /导出指南/);
+  assert.match(e.ticketDetail.textContent, /客服：已收到/);
+  assert.equal(calls.find(call => call.url === '/api/tickets/T-20').headers.Authorization, 'Bearer test-token');
+});
+
+test('ticket cards reload per conversation and open detail inline', async () => {
+  const ticket = {id: 'T-21', status: 'open', description: '无法导出', evidence: '导出指南'};
+  const {elements: e} = page((url) => {
+    if (url === '/api/conversations') return json({conversations: [{id: 'a', title: '导出'}, {id: 'b', title: '退款'}]});
+    if (url === '/api/tickets?conversation_id=a&page=1') return json({tickets: [ticket]});
+    if (url === '/api/tickets?conversation_id=b&page=1') return json({tickets: []});
+    if (url === '/api/tickets/T-21') return json({ticket});
+  });
+  await settle();
+  assert.match(e.conversationTickets.textContent, /T-21.*待处理.*无法导出/);
+  const card = e.conversationTickets.children[0];
+  await card.children[2].children[0].emit('click');
+  assert.match(card.children[3].textContent, /导出指南/);
+  await e.conversationList.children[1].emit('click');
+  assert.equal(e.conversationTickets.hidden, true);
+  assert.doesNotMatch(e.conversationTickets.textContent, /T-21/);
+  await e.conversationList.children[0].emit('click');
+  assert.match(e.conversationTickets.textContent, /T-21/);
 });

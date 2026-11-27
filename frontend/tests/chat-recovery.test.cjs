@@ -13,6 +13,7 @@ test('page send timeout releases controls and preserves uncertain question outsi
   const {recovery} = setup(async () => []);
   const context = {
     input: {value:'尚未确认保存的问题', style:{}}, recovery, sendBtn:{}, token:'test',
+    creatingConversation:false, loadingConversations:false, chatPayload:message=>JSON.stringify({message}),
     addUserMsg() {}, addAiContainer: () => ({}), addTyping: () => ({style:{}}),
     addTrace() {}, addSources() {}, addConfirmTicket() {}, scrollBottom() {}, clearCopyFeedback() {},
     AbortSignal: {timeout: ms => {timeout = ms; return 'bounded-signal';}},
@@ -160,7 +161,7 @@ test('page history callback shares one ten second signal for identity and pages'
   const code = source.slice(start+'fetchHistory: '.length,end)+'\n      }';
   const options = [], timeouts = [], signal = {throwIfAborted(){}};
   const callback = vm.runInNewContext('('+code+')', {
-    token:'test', me:{id:'u'}, fetchPagedHistory,
+    token:'test', me:{id:'u'}, fetchPagedHistory, conversationID:'',
     AbortSignal:{timeout:ms=>{timeouts.push(ms);return signal;}},
     fetch:async (path,option)=>{options.push(option);return json(path==='/api/me'?{user:{id:'u'}}:{messages:[],total:0});},
   });

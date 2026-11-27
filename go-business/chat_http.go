@@ -52,6 +52,34 @@ func (c publicChat) userID(r *http.Request) (string, error) {
 	return user.ID, err
 }
 
+func (c publicChat) handleConversationCollection(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	userID, err := c.userID(r)
+	if err != nil {
+		chatFailure(w, http.StatusInternalServerError, "读取登录状态失败", err)
+		return
+	}
+	if userID == "" {
+		chatFailure(w, http.StatusUnauthorized, "请先登录", nil)
+		return
+	}
+	if r.Method == http.MethodPost {
+		id, err := insertConversation(r.Context(), c.store.write, userID)
+		if err != nil {
+			chatFailure(w, http.StatusInternalServerError, "新建会话失败", err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, conversationSummary{ID: id})
+		return
+	}
+	items, err := c.store.listConversations(r.Context(), userID)
+	if err != nil {
+		chatFailure(w, http.StatusInternalServerError, "读取会话列表失败", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"conversations": items})
+}
+
 func (c publicChat) handleConversation(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	query := r.URL.Query()
@@ -72,14 +100,27 @@ func (c publicChat) handleConversation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	selected := query.Get("conversation_id")
+	if query.Has("conversation_id") && (selected == "" || len(selected) > 64) {
+		chatFailure(w, http.StatusUnprocessableEntity, "会话 ID 不合法", nil)
+		return
+	}
 	userID, err := c.userID(r)
+	if err == nil && selected != "" && userID == "" {
+		chatFailure(w, http.StatusUnauthorized, "请先登录", nil)
+		return
+	}
 	if err == nil {
 		var result map[string]any
-		result, err = c.store.conversation(r.Context(), userID, offset, limit, paged)
+		result, err = c.store.conversation(r.Context(), userID, selected, offset, limit, paged)
 		if err == nil {
 			writeJSON(w, http.StatusOK, result)
 			return
 		}
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		chatFailure(w, http.StatusNotFound, "会话不存在", nil)
+		return
 	}
 	chatFailure(w, http.StatusInternalServerError, "读取会话失败", err)
 }
@@ -112,10 +153,27 @@ func (c publicChat) respond(w http.ResponseWriter, r *http.Request, stream bool)
 		chatFailure(w, http.StatusInternalServerError, "读取登录状态失败", err)
 		return
 	}
+	var selected string
+	if raw, exists := fields["conversation_id"]; exists {
+		var valid bool
+		selected, valid = ticketString(raw)
+		if !valid || selected == "" || len(selected) > 64 {
+			chatFailure(w, http.StatusUnprocessableEntity, "会话 ID 不合法", nil)
+			return
+		}
+	}
 	if userID == "" {
+		if selected != "" {
+			chatFailure(w, http.StatusUnauthorized, "请先登录", nil)
+			return
+		}
 		userID = "anonymous"
 	}
-	id, history, err := c.store.prepare(r.Context(), userID)
+	id, history, err := c.store.prepare(r.Context(), userID, selected)
+	if selected != "" && errors.Is(err, sql.ErrNoRows) {
+		chatFailure(w, http.StatusNotFound, "会话不存在", nil)
+		return
+	}
 	if err != nil {
 		chatFailure(w, http.StatusInternalServerError, "读取会话失败", err)
 		return

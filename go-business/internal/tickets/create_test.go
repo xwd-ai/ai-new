@@ -75,3 +75,40 @@ func TestCreateRollsBackNumberAndDraftOnTimelineFailure(t *testing.T) {
 		}
 	}
 }
+
+func TestConversationTicketLinksPersistWithoutDuplicatingTickets(t *testing.T) {
+	writer, conn := newTestWriter(t)
+	if _, err := conn.Exec(`
+		CREATE TABLE conversations (id TEXT PRIMARY KEY, user_id TEXT NOT NULL);
+		CREATE TABLE conversation_tickets (conversation_id TEXT, ticket_id TEXT, PRIMARY KEY (conversation_id, ticket_id));
+		INSERT INTO conversations VALUES ('one', 'u1'), ('two', 'u1'), ('foreign', 'u2');
+	`); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	input := CreateInput{UserID: "u1", UserName: "客户", Description: "导出失败", ConversationID: "one"}
+	original, created, err := writer.Create(ctx, input)
+	if err != nil || !created {
+		t.Fatalf("create ticket: %v, %v", created, err)
+	}
+	input.ConversationID = "two"
+	for range 2 {
+		again, created, err := writer.Create(ctx, input)
+		if err != nil || created || again["id"] != original["id"] {
+			t.Fatalf("deduplicate and link: %v %v %v", again, created, err)
+		}
+	}
+	input.ConversationID = "foreign"
+	if _, _, err := writer.Create(ctx, input); err != ErrConversationNotFound {
+		t.Fatalf("foreign conversation accepted: %v", err)
+	}
+
+	repo := &Repository{db: conn}
+	for session, expected := range map[string]int{"one": 1, "two": 1, "foreign": 0} {
+		filter := ListFilter{UserID: "u1", ConversationID: session, Page: 1, Size: 20}
+		rows, total, err := repo.Page(ctx, filter)
+		if err != nil || total != expected || len(rows) != expected {
+			t.Fatalf("list %s: %v %d %v", session, rows, total, err)
+		}
+	}
+}
