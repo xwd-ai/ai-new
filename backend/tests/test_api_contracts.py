@@ -145,6 +145,7 @@ def test_runtime_exposes_only_active_python_api_routes():
     paths = main.app.openapi()["paths"]
     assert {path for path in paths if path.startswith("/api/")} == {
         "/api/knowledge/ingest",
+        "/api/knowledge/ingest/file",
         "/api/knowledge/ingest/recover/{fingerprint}",
         "/api/knowledge/diagnose",
     }

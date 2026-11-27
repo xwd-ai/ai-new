@@ -3,14 +3,19 @@
 入库属于内容管理操作，只对管理员开放：普通用户能查资料，但不能改资料。
 """
 
+from pathlib import PurePosixPath
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from pydantic import ValidationError
+from starlette.concurrency import run_in_threadpool
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
 from backend.schemas import KnowledgeDiagnosisResponse, ErrorResponse, IngestRequest, IngestResponse
 from backend.services import auth as auth_service
 from backend.services import ingest as ingest_service
 from backend.services import knowledge
+from backend.services.document_text import DocumentUnavailable, MAX_UPLOAD_BYTES, document_text
 from backend.services.ingest_leases import IngestBusyError, IngestLeaseLostError
 
 
@@ -57,6 +62,55 @@ def ingest_knowledge(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return IngestResponse(**result.to_dict())
+
+
+@knowledge_router.post(
+    "/knowledge/ingest/file", response_model=IngestResponse, summary="上传 PDF 或 Markdown 文件",
+    description="由管理员将原始文件作为请求体上传，文件名和资料信息通过查询参数传入。",
+    openapi_extra={"requestBody": {"required": True, "content": {
+        "application/octet-stream": {"schema": {"type": "string", "format": "binary"}},
+    }}},
+    responses={403: {"model": ErrorResponse}, 409: {"model": ErrorResponse},
+               413: {"model": ErrorResponse}, 415: {"model": ErrorResponse},
+               422: {"model": ErrorResponse}, 503: {"model": ErrorResponse}},
+)
+async def ingest_file(
+    request: Request,
+    filename: Annotated[str, Query(min_length=1, max_length=255)],
+    title: Annotated[str, Query(max_length=200)] = "",
+    kind: str = "manual",
+    keywords: Annotated[list[str] | None, Query()] = None,
+) -> IngestResponse:
+    name = PurePosixPath(filename.replace(chr(92), "/")).name
+    path = PurePosixPath(name)
+    extension = path.suffix.lower()
+    if extension not in {".pdf", ".md", ".markdown"}:
+        raise HTTPException(status_code=415, detail="仅支持 PDF 或 Markdown 文件。")
+    try:
+        metadata = IngestRequest(title=title.strip() or path.stem, content="占位", kind=kind, keywords=keywords or [])
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail="请检查资料标题、类型和关键词。") from exc
+
+    content_length = request.headers.get("content-length", "")
+    if content_length.isdecimal() and int(content_length) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="文件不能超过 8 MiB。")
+    data = bytearray()
+    async for chunk in request.stream():
+        if len(data) + len(chunk) > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="文件不能超过 8 MiB。")
+        data.extend(chunk)
+    if not data:
+        raise HTTPException(status_code=422, detail="文件为空。")
+    try:
+        content = await run_in_threadpool(document_text, extension, bytes(data))
+        req = IngestRequest(title=metadata.title, kind=metadata.kind, keywords=metadata.keywords, content=content)
+    except DocumentUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "3"}) from exc
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail="正文为空或超过 10 万字符，请检查文件或拆分上传。") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return await run_in_threadpool(ingest_knowledge, req)
 
 
 @knowledge_router.post(

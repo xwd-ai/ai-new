@@ -32,3 +32,22 @@ test('duplicate result reports existing source; failure unlocks and never retrie
   assert.match(statuses.at(-1),/保留/);assert.equal(saved.length,0);
   await form.submit(original);assert.match(statuses.at(-1),/已存在/);assert.equal(saved[0].knowledge_id,'old');
 });
+
+test('uploads PDF or Markdown as a binary body with file metadata', async () => {
+  for (const name of ['扫描手册.pdf', 'notes.md']) {
+    const file = {name, size: 100};
+    let call;
+    const {form, saved} = setup(async (...args) => {
+      call = args;
+      return {created: true, chunks: 1, knowledge_id: 'new'};
+    });
+    await form.submit({...input(), title: '', content: '', file});
+    const url = new URL(call[0], 'http://localhost');
+    assert.equal(url.pathname, '/api/knowledge/ingest/file');
+    assert.equal(url.searchParams.get('filename'), name);
+    assert.deepEqual(url.searchParams.getAll('keywords'), ['导出', 'CSV', '权限']);
+    assert.equal(call[1].body, file);
+    assert.equal(call[1].headers['Content-Type'], 'application/octet-stream');
+    assert.equal(saved[0].knowledge_id, 'new');
+  }
+});

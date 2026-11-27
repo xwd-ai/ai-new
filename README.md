@@ -7,7 +7,7 @@
 - **知识问答**：Agent 根据问题检索产品资料、调用工具并给出排查建议。回答支持来源回查与 SSE 流式输出。
 - **订单与服务范围**：根据产品版本、服务期和功能判断客户可获得的支持。
 - **工单闭环**：支持草稿确认、回复、状态流转和转人工。转交时保留问题、已尝试的步骤和相关证据，并记录操作时间线。重复提交按幂等键处理。
-- **知识库管理**：支持文本入库、检索诊断和中断恢复。入库通过租约、心跳和任务记录管理 `parsed → chunked → stored` 各阶段。
+- **知识库管理**：支持粘贴文本、上传 Markdown 和 PDF、检索诊断和中断恢复。扫描版 PDF 由 Tesseract 识别简体中文和英文。入库通过租约、心跳和任务记录管理 `parsed → chunked → stored` 各阶段。
 
 ## 架构
 
@@ -90,6 +90,12 @@ flowchart LR
 上线入口为 [xwp.xwd.info](https://xwp.xwd.info/)。Nginx 负责 HTTPS，网关只绑定宿主机回环地址的 `2080` 端口。服务器上的部署配置在 `/opt/ainew-xwp/.env`，模型配置在 `/opt/ainew-xwp/backend/.env`。GitHub Actions 使用 `XWP_DEPLOY_KEY` 和 `XWP_KNOWN_HOSTS` 连接部署服务器。
 
 线上 Embedding 通过 SSH 隧道访问远端服务。Python 容器通过只读挂载的 Unix Socket 连接宿主机的隧道，并使用服务证书验证 TLS。部署主机的 Socket 中继由 [systemd 单元](deploy/ainew-embedding.socket)维护，`EMBEDDING_CA_FILE` 和 `EMBEDDING_SOCKET` 配置见 [环境变量示例](backend/.env.example)。
+
+## 知识文件上传
+
+管理后台的知识库支持 UTF-8 `.md` / `.markdown` 和 PDF。PDF 先通过 Poppler 提取文字层，再对缺少可用文字的页面用 Tesseract 识别简体中文和英文。入库保存提取后的正文并沿用分块、去重和恢复流程。
+
+单个文件最多 8 MiB，PDF 最多 20 页，提取结果最多 10 万字符。扫描页较多或识别超时时可分批上传。Docker 后端镜像包含 Poppler、Tesseract 和中英文语言包。源码启动需要将对应工具装在 `PATH`，并为 Tesseract 安装 `chi_sim` 与 `eng` 语言数据。使用 Nginx 时将文件上传路径 `/api/knowledge/ingest/file` 的 `client_max_body_size` 设为至少 `8m`。
 
 ## 从 SQLite 导入 MySQL
 
